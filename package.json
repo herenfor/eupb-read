@@ -1,0 +1,34 @@
+{
+  "name": "epub-reader",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "icons": "node scripts/gen-icons.mjs",
+    "pack": "node scripts/pack-epub.mjs",
+    "check": "tsx scripts/check-book.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@xmldom/xmldom": "^0.8.10",
+    "linkedom": "^0.18.13",
+    "playwright": "^1.62.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^3.0.5"
+  }
+}

@@ -1,0 +1,208 @@
+import type { Theme } from "../render/settings";
+
+export interface MenuPanelProps {
+  fontSize: number;
+  uiScale: number;
+  theme: Theme;
+  lineHeight?: number;
+  fontWeight?: number;
+  letterSpacingPx?: number;
+  wordSpacingPx?: number;
+  onOpenFile(): void;
+  onOpenToc(): void;
+  onFontDec(): void;
+  onFontInc(): void;
+  onFontSizeChange(v: number): void;
+  onLineHeightDec(): void;
+  onLineHeightInc(): void;
+  onLineHeightChange(v: number): void;
+  onWeightDec(): void;
+  onWeightInc(): void;
+  onWeightChange(v: number): void;
+  onLetterSpacingDec(): void;
+  onLetterSpacingInc(): void;
+  onLetterSpacingChange(v: number): void;
+  onWordSpacingDec(): void;
+  onWordSpacingInc(): void;
+  onWordSpacingChange(v: number): void;
+  onUiScaleChange(v: number): void;
+  onThemeChange(theme: Theme): void;
+  onClose(): void;
+}
+
+const UI_SCALES: Array<{ value: number; label: string }> = [
+  { value: 0.85, label: "小" },
+  { value: 1, label: "标准" },
+  { value: 1.15, label: "大" },
+  { value: 1.3, label: "特大" },
+];
+
+const THEME_OPTIONS: Array<{ value: Theme; label: string }> = [
+  { value: "light", label: "浅色" },
+  { value: "dark", label: "深色" },
+  { value: "sepia", label: "纸色" },
+];
+
+function fmtLineHeight(v?: number): string {
+  return v === undefined ? "自动" : v.toFixed(1);
+}
+
+function fmtWeight(v?: number): string {
+  if (v === undefined) return "自动";
+  if (v <= 400) return "常规";
+  if (v <= 500) return "中等";
+  return "粗体";
+}
+
+function fmtPx(v?: number): string {
+  return v === undefined ? "自动" : `${v}px`;
+}
+
+interface SliderRowProps {
+  label: string;
+  valueText: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange(v: number): void;
+  onDec(): void;
+  onInc(): void;
+}
+
+/** 排版行：小 −/+ 按钮 + 中间拖动条，数值显示在拖动条上方。 */
+function SliderRow(props: SliderRowProps) {
+  return (
+    <div className="slider-row">
+      <span className="menu-label">{props.label}</span>
+      <div className="slider-main">
+        <span className="slider-value">{props.valueText}</span>
+        <div className="slider-line">
+          <button className="step-btn" onClick={props.onDec} title="上一档">
+            −
+          </button>
+          <input
+            type="range"
+            min={props.min}
+            max={props.max}
+            step={props.step}
+            value={props.value}
+            onChange={(e) => props.onChange(Number(e.target.value))}
+          />
+          <button className="step-btn" onClick={props.onInc} title="下一档">
+            +
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 左侧滑出的二级菜单：收纳文件/导航/正文排版/界面/外观等操作。 */
+export function MenuPanel(props: MenuPanelProps) {
+  return (
+    <div className="menu-panel">
+      <div className="menu-head">
+        <span>菜单</span>
+        <button className="tb-btn" onClick={props.onClose} title="关闭">
+          ✕
+        </button>
+      </div>
+
+      <div className="menu-section">文件</div>
+      <button className="menu-item" onClick={props.onOpenFile}>
+        打开 EPUB 文件
+      </button>
+
+      <div className="menu-section">导航</div>
+      <button className="menu-item" onClick={props.onOpenToc}>
+        打开目录
+      </button>
+
+      <div className="menu-section">正文</div>
+      <SliderRow
+        label="字号"
+        valueText={`${props.fontSize}px`}
+        min={12}
+        max={32}
+        step={2}
+        value={props.fontSize}
+        onChange={props.onFontSizeChange}
+        onDec={props.onFontDec}
+        onInc={props.onFontInc}
+      />
+      <SliderRow
+        label="行高"
+        valueText={fmtLineHeight(props.lineHeight)}
+        min={1.4}
+        max={2.2}
+        step={0.2}
+        value={props.lineHeight ?? 1.6}
+        onChange={props.onLineHeightChange}
+        onDec={props.onLineHeightDec}
+        onInc={props.onLineHeightInc}
+      />
+      <SliderRow
+        label="字重"
+        valueText={fmtWeight(props.fontWeight)}
+        min={400}
+        max={700}
+        step={100}
+        value={props.fontWeight ?? 400}
+        onChange={props.onWeightChange}
+        onDec={props.onWeightDec}
+        onInc={props.onWeightInc}
+      />
+      <SliderRow
+        label="字间距"
+        valueText={fmtPx(props.letterSpacingPx)}
+        min={0}
+        max={8}
+        step={2}
+        value={props.letterSpacingPx ?? 0}
+        onChange={props.onLetterSpacingChange}
+        onDec={props.onLetterSpacingDec}
+        onInc={props.onLetterSpacingInc}
+      />
+      <SliderRow
+        label="字符间距"
+        valueText={fmtPx(props.wordSpacingPx)}
+        min={0}
+        max={16}
+        step={4}
+        value={props.wordSpacingPx ?? 0}
+        onChange={props.onWordSpacingChange}
+        onDec={props.onWordSpacingDec}
+        onInc={props.onWordSpacingInc}
+      />
+
+      <div className="menu-section">界面</div>
+      <div className="theme-row">
+        {UI_SCALES.map((opt) => (
+          <button
+            key={opt.value}
+            className={`theme-btn${Math.abs(props.uiScale - opt.value) < 0.001 ? " active" : ""}`}
+            onClick={() => props.onUiScaleChange(opt.value)}
+            title={`界面缩放 ${Math.round(opt.value * 100)}%`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="menu-section">外观</div>
+      <div className="theme-row">
+        {THEME_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            className={`theme-btn${props.theme === opt.value ? " active" : ""}`}
+            onClick={() => props.onThemeChange(opt.value)}
+            title={`切换到${opt.label}主题`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
