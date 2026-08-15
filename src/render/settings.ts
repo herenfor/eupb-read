@@ -27,16 +27,16 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
 };
 
 /**
- * 行文自适应版式（参考实体书/日轻文库本的行宽习惯）：
- * - ratio：行宽占页面宽的最大比例（宽屏时生效）
- * - maxEm：绝对舒适上限（em，按正文字号计），极端宽屏封顶
- * - minEm：行宽下限（em），窄页面时防止文字挤成细长竖条
+ * 行文版式（参考一般书籍/日轻文库本版心习惯）：
+ * - maxEm：行宽上限（em，按正文字号计），默认 40em ≈ 一般书籍每行 40 字；
+ *   宽屏/全屏时正文按此封顶居中
  * - vTopEm/vBottomEm：页面上下留白（em，上大下小，类实体书版心）
  */
+/** 标准页：固定 1000 字/页（千字页口径），用于按内容字数推算阅读进度。 */
+export const STANDARD_PAGE_CHARS = 1000;
+
 export const TEXT_MEASURE = {
-  ratio: 0.7,
-  maxEm: 38,
-  minEm: 22,
+  maxEm: 40,
   vTopEm: 2.2,
   vBottomEm: 1.6,
 };

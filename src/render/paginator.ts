@@ -25,6 +25,14 @@ export interface LoadOptions {
  * 5. 阅读位置用"内容锚点"保留：页中心取样元素 + 元素内横向比例，
  *    重排/重载后按比例映射回新布局，保证正在读的行保持在页面中部
  */
+/** 叶子文本长度（无元素子级的元素文本；父容器不重复计数）。 */
+function leafTextLen(el: HTMLElement): number {
+  if (el.children.length === 0) return (el.textContent ?? "").replace(/\s/g, "").length;
+  let n = 0;
+  for (const c of Array.from(el.children)) n += leafTextLen(c as HTMLElement);
+  return n;
+}
+
 export class ChapterPaginator {
   private blobUrl?: string;
   private viewer: HTMLElement | null = null;
@@ -39,13 +47,22 @@ export class ChapterPaginator {
   private linkHandler = (e: Event): void => this.handleLinkClick(e);
   private wheelHandler = (e: WheelEvent): void => this.handleWheel(e);
   private wheelAcc = 0;
+  private keyHandler = (e: KeyboardEvent): void => this.handleKey(e);
   private pendingAnchor: string | undefined;
   private lastState: ChapterState = { status: "loading" };
   private recomputeRetries = 0;
   /** reflow 序号：丢弃过期测量结果，防快速缩放时旧布局覆盖新布局 */
   private reflowSeq = 0;
-  /** 阅读位置锚点：页中心元素（子树元素序号 + 元素内横向比例） */
-  private anchor: { index: number; ratio: number } | null = null;
+  /** 最近点击的脚注标记元素（供弹层随重排重新定位） */
+  private lastFootnoteEl: HTMLElement | null = null;
+
+  /** 阅读位置锚点：页中心元素（子树元素序号 + 元素内横向比例 + 字数位置） */
+  private anchor: {
+    index: number;
+    ratio: number;
+    charsRead: number;
+    totalChars: number;
+  } | null = null;
   private anchorPath: string | undefined;
 
   constructor(
@@ -60,7 +77,14 @@ export class ChapterPaginator {
     /** 书内链接点击回调（已解析为书内路径，含可选锚点），供阅读器跳转 */
     private onNavigate?: (href: string) => void,
     /** 滚轮翻页回调（累积阈值后触发，1=下一页 -1=上一页） */
-    private onWheelNavigate?: (dir: 1 | -1) => void
+    private onWheelNavigate?: (dir: 1 | -1) => void,
+    /** 键盘翻页回调（焦点在书页内时也有效） */
+    private onKeyNavigate?: (dir: 1 | -1) => void,
+    /** 脚注点击回调（文本 + 标记在 iframe 内的视口矩形，由阅读器弹层定位显示） */
+    private onFootnote?: (
+      text: string,
+      rect: { left: number; top: number; right: number; bottom: number }
+    ) => void
   ) {}
 
   /** 加载一章。path 为规范化内部路径。 */
@@ -68,10 +92,12 @@ export class ChapterPaginator {
     const seq = ++this.loadSeq;
     this.disposed = false;
     this.recomputeRetries = 0;
-    // 换章加载：丢弃旧锚点（锚点只对同章重排/重载有效）
+    // 换章加载：丢弃旧锚点与旧页号（页号只对同章重排有意义，
+    // 否则新章会沿袭上一章的页号，如"上一章13页→下一章也跳到第13页"）
     if (path !== this._currentPath) {
       this.anchor = null;
       this.anchorPath = undefined;
+      this.metrics.currentPage = 0;
     }
     this._currentPath = path;
     this.pendingAnchor = opts.anchor;
@@ -134,6 +160,8 @@ export class ChapterPaginator {
     doc.addEventListener("click", this.linkHandler, true);
     // 滚轮翻页（内容不可滚动，事件冒泡到文档即可捕获）
     doc.addEventListener("wheel", this.wheelHandler, { passive: false });
+    // 键盘翻页：焦点在书页内时，方向键事件不会冒泡到主窗口，需在此监听
+    doc.addEventListener("keydown", this.keyHandler);
     void this.measure().then(() => {
       if (seq !== this.loadSeq || this.disposed) return;
       this.recompute(true);
@@ -194,6 +222,9 @@ export class ChapterPaginator {
   }
 
   private recompute(useAnchor: boolean): void {
+    // 章节代号校验：切章后旧章的延迟重排（图片加载防抖等）一律丢弃，
+    // 否则旧 DOM 的锚点/页数会污染新章（表现：卡死在上一章末页）
+    const loadSeq = this.loadSeq;
     const viewer = this.viewer;
     if (!viewer || this.step <= 0) return;
     // 自愈：viewer 为空但 body 里还有内容（内容落在容器外）时，重新包裹
@@ -211,7 +242,7 @@ export class ChapterPaginator {
       }
       if (moved > 0) {
         void this.measure().then(() => {
-          if (!this.disposed) this.recompute(useAnchor);
+          if (!this.disposed && loadSeq === this.loadSeq) this.recompute(useAnchor);
         });
         return;
       }
@@ -230,15 +261,16 @@ export class ChapterPaginator {
       if (this.recomputeRetries < 2) {
         this.recomputeRetries++;
         void this.measure().then(() => {
-          if (!this.disposed) this.recompute(useAnchor);
+          if (!this.disposed && loadSeq === this.loadSeq) this.recompute(useAnchor);
         });
         return;
       }
     }
-    this.recomputeInner(useAnchor);
+    this.recomputeInner(useAnchor, loadSeq);
   }
 
-  private recomputeInner(useAnchor: boolean): void {
+  private recomputeInner(useAnchor: boolean, loadSeq: number): void {
+    if (loadSeq !== this.loadSeq) return; // 过期章节：丢弃
     const viewer = this.viewer;
     if (!viewer || this.step <= 0) return;
     // 用内容实际占用的列范围计算页数（不依赖视口，elementFromPoint 对
@@ -326,7 +358,12 @@ export class ChapterPaginator {
     const rect = (el as HTMLElement).getBoundingClientRect();
     const ratio =
       rect.width > 0 ? Math.min(1, Math.max(0, (x - rect.left) / rect.width)) : 0;
-    this.anchor = { index: idx, ratio };
+    // 字数位置：叶子文本累计（父容器不重复计数），供内容进度推算
+    let charsRead = 0;
+    for (let i = 0; i < idx; i++) charsRead += leafTextLen(all[i] as HTMLElement);
+    charsRead += ratio * leafTextLen(el as HTMLElement);
+    const totalChars = (viewer.textContent ?? "").replace(/\s/g, "").length;
+    this.anchor = { index: idx, ratio, charsRead, totalChars };
     this.anchorPath = this._currentPath;
   }
 
@@ -369,16 +406,38 @@ export class ChapterPaginator {
     this.setPage(Math.floor(x / this.step));
   }
 
-  /** 当前阅读锚点（供阅读记录持久化）。 */
-  getReadingAnchor(): { path: string; index: number; ratio: number } | null {
+  /** 当前阅读锚点（供阅读记录持久化与内容进度推算）。 */
+  getReadingAnchor(): {
+    path: string;
+    index: number;
+    ratio: number;
+    charsRead: number;
+    totalChars: number;
+  } | null {
     if (!this.anchor || !this.anchorPath) return null;
-    return { path: this.anchorPath, index: this.anchor.index, ratio: this.anchor.ratio };
+    return {
+      path: this.anchorPath,
+      index: this.anchor.index,
+      ratio: this.anchor.ratio,
+      charsRead: this.anchor.charsRead,
+      totalChars: this.anchor.totalChars,
+    };
   }
 
   /** 恢复阅读锚点（打开书时定位到上次阅读处）。 */
-  setReadingAnchor(a: { path: string; index: number; ratio: number } | null | undefined): void {
+  setReadingAnchor(
+    a:
+      | { path: string; index: number; ratio: number; charsRead?: number; totalChars?: number }
+      | null
+      | undefined
+  ): void {
     if (a && a.path) {
-      this.anchor = { index: a.index, ratio: a.ratio };
+      this.anchor = {
+        index: a.index,
+        ratio: a.ratio,
+        charsRead: a.charsRead ?? 0,
+        totalChars: a.totalChars ?? 0,
+      };
       this.anchorPath = a.path;
     } else {
       this.anchor = null;
@@ -411,9 +470,10 @@ export class ChapterPaginator {
 
   private scheduleReflow(): void {
     if (this.reflowTimer !== undefined) window.clearTimeout(this.reflowTimer);
+    const seq = this.loadSeq;
     this.reflowTimer = window.setTimeout(() => {
       this.reflowTimer = undefined;
-      if (!this.disposed) this.recompute(false);
+      if (!this.disposed && seq === this.loadSeq) this.recompute(false);
     }, 200);
   }
 
@@ -422,10 +482,25 @@ export class ChapterPaginator {
   reflow(): void {
     if (this.disposed) return;
     const seq = ++this.reflowSeq;
+    const loadSeq = this.loadSeq;
     void this.measure().then(() => {
-      // 过期测量（更早发起、更晚完成）直接丢弃，防布局/位置被覆写
-      if (!this.disposed && seq === this.reflowSeq) this.recompute(true);
+      // 过期测量（更早发起、更晚完成/切章后）直接丢弃，防布局/位置被覆写
+      if (!this.disposed && seq === this.reflowSeq && loadSeq === this.loadSeq) {
+        this.recompute(true);
+      }
     });
+  }
+
+  /** 键盘翻页（书页内焦点）。 */
+  private handleKey(e: KeyboardEvent): void {
+    const k = e.key;
+    if (k === "ArrowRight" || k === "PageDown" || k === " ") {
+      e.preventDefault();
+      this.onKeyNavigate?.(1);
+    } else if (k === "ArrowLeft" || k === "PageUp") {
+      e.preventDefault();
+      this.onKeyNavigate?.(-1);
+    }
   }
 
   /** 滚轮翻页：累积 deltaY，超过阈值翻一页（触控板连续小增量也能工作）。 */
@@ -456,6 +531,31 @@ export class ChapterPaginator {
     e.preventDefault();
     e.stopPropagation();
     if (isExternalUrl(href) || href.startsWith("//")) return;
+    // 脚注标记（多看/掌阅式）：提取目标 aside 的文本交给阅读器弹层
+    const isFootnote =
+      a.classList.contains("duokan-footnote") ||
+      a.getAttribute("epub:type") === "noteref" ||
+      a.querySelector(".zhangyue-footnote, .duokan-footnote") !== null;
+    if (isFootnote) {
+      const { anchor } = splitHref(href);
+      if (anchor) {
+        const aside = this.contentDoc?.getElementById(anchor);
+        if (aside) {
+          const text = (aside.textContent ?? "").replace(/\s+/g, " ").trim();
+          if (text) {
+            this.lastFootnoteEl = a;
+            const r = a.getBoundingClientRect();
+            this.onFootnote?.(text, {
+              left: r.left,
+              top: r.top,
+              right: r.right,
+              bottom: r.bottom,
+            });
+            return;
+          }
+        }
+      }
+    }
     if (isFragmentOnly(href)) {
       this.jumpToAnchor(href.slice(1));
       return;
@@ -463,6 +563,13 @@ export class ChapterPaginator {
     const { path, anchor } = splitHref(href);
     const resolved = resolvePath(this._currentPath, path);
     this.onNavigate?.(anchor ? `${resolved}#${anchor}` : resolved);
+  }
+
+  /** 当前脚注标记在 iframe 内的视口矩形（弹层随重排重定位用）；无则 null。 */
+  getFootnoteMarkerRect(): { left: number; top: number; right: number; bottom: number } | null {
+    if (!this.lastFootnoteEl || !this.lastFootnoteEl.isConnected) return null;
+    const r = this.lastFootnoteEl.getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }
 
   /** 渲染诊断：输出当前章节的分页/布局关键数据（浏览器内调试用）。 */
@@ -512,9 +619,11 @@ export class ChapterPaginator {
   }
 
   private cleanupDoc(): void {
+    this.lastFootnoteEl = null;
     this.contentDoc?.removeEventListener("load", this.imgHandler, true);
     this.contentDoc?.removeEventListener("click", this.linkHandler, true);
     this.contentDoc?.removeEventListener("wheel", this.wheelHandler);
+    this.contentDoc?.removeEventListener("keydown", this.keyHandler);
     this.contentDoc = null;
     this.viewer = null;
     if (this.blobUrl) {

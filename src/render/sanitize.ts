@@ -50,6 +50,20 @@ function buildOverrideCss(s: ReaderSettings): string {
     s.fontFamily ??
     `"Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif`;
   const maxEm = TEXT_MEASURE.maxEm;
+  const footnoteCss = `
+/* 脚注标记小图标：按书的设计随字号缩放，不被通用图片规则放大 */
+#${VIEWER_ID} sup img,
+#${VIEWER_ID} .duokan-footnote img,
+#${VIEWER_ID} .zhangyue-footnote img {
+  height: 1.2em !important;
+  width: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  vertical-align: top;
+  border: 0;
+}
+/* 脚注内容（aside）：从正文流隐藏，由阅读器弹层显示 */
+#${VIEWER_ID} aside[epub\\:type="footnote"] { display: none !important; }`;
   // 排版属性（未设置 = 跟随书的定义）
   const typeCss = [
     s.lineHeight !== undefined ? `line-height: ${s.lineHeight} !important;` : "",
@@ -71,6 +85,7 @@ html, body { position: relative; height: 100%; margin: 0 !important; padding: 0 
   margin-right: auto !important;
   ${typeCss}
 }
+${footnoteCss}
 #${VIEWER_ID} img { max-width: 100% !important; height: auto !important; }
 #${VIEWER_ID} table { max-width: 100% !important; }
 #${VIEWER_ID} img, #${VIEWER_ID} video, #${VIEWER_ID} svg { max-height: 100% !important; }

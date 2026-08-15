@@ -6,6 +6,7 @@ export interface TocPanelProps {
   /** 当前章的内部路径（用于高亮） */
   activePath?: string;
   onNavigate(href: string): void;
+  onClose(): void;
 }
 
 function TocList({
@@ -59,17 +60,27 @@ function TocList({
 }
 
 export function TocPanel(props: TocPanelProps) {
-  if (props.toc.length === 0) {
-    return <div className="toc-panel">（本书无目录）</div>;
-  }
   return (
     <div className="toc-panel">
-      <TocList
-        nodes={props.toc}
-        level={0}
-        activePath={props.activePath}
-        onNavigate={props.onNavigate}
-      />
+      <div className="toc-head">
+        <span className="toc-title">目录</span>
+        <span className="toc-count">
+          {props.toc.length > 0 ? `${props.toc.length} 章` : "无"}
+        </span>
+        <button className="tb-btn" onClick={props.onClose} title="关闭目录">
+          ✕
+        </button>
+      </div>
+      {props.toc.length === 0 ? (
+        <div className="toc-empty">（本书无目录）</div>
+      ) : (
+        <TocList
+          nodes={props.toc}
+          level={0}
+          activePath={props.activePath}
+          onNavigate={props.onNavigate}
+        />
+      )}
     </div>
   );
 }

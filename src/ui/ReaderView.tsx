@@ -11,8 +11,21 @@ export interface ReaderHandle {
   setPage(i: number): void;
   /** 渲染诊断文本（浏览器内调试） */
   diagnose(): string;
-  /** 当前阅读锚点（进度持久化） */
-  getReadingAnchor(): { path: string; index: number; ratio: number } | null;
+  /** 当前阅读锚点（进度持久化与内容进度） */
+  getReadingAnchor(): {
+    path: string;
+    index: number;
+    ratio: number;
+    charsRead: number;
+    totalChars: number;
+  } | null;
+  /** 脚注标记当前矩形（阅读区坐标系），弹层随重排重定位用。 */
+  getFootnoteMarkerRect(): {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  } | null;
 }
 
 interface ReaderViewProps {
@@ -26,10 +39,17 @@ interface ReaderViewProps {
   settings: ReaderSettings;
   onPageState(s: ChapterState): void;
   /** 请求切换到相邻章节（next/prev 或空章自动前进） */
-  onRequestChapter(index: number): void;
+  onRequestChapter(index: number, opts?: { atEnd?: boolean }): void;
+  /** 章节切换请求（nonce 单调递增；atEnd=true 表示加载完成后翻到最后一页） */
+  startAtEnd: { nonce: number; atEnd: boolean };
   onIssues(issues: string[]): void;
   /** 书内链接跳转（已解析为书内路径，含可选 #anchor） */
   onInternalLink(href: string): void;
+  /** 脚注弹层（文本 + 标记在阅读区坐标系的矩形） */
+  onFootnote(
+    text: string,
+    rect: { left: number; top: number; right: number; bottom: number }
+  ): void;
   /** 打开书时恢复的阅读锚点（可选，页码之外的精确定位） */
   initialAnchor?: { index: number; ratio: number } | null;
 }
@@ -50,8 +70,17 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   const paginatorRef = useRef<ChapterPaginator | null>(null);
   const spineIndexRef = useRef(spineIndex);
   const autoAdvanceRef = useRef(false);
+  const startAtEndRef = useRef(false);
+  const lastStateRef = useRef<string>("loading");
 
   spineIndexRef.current = spineIndex;
+
+  // 每次请求（nonce 变化）时按 atEnd 武装；消费后归 false，渲染不再重武装
+  useEffect(() => {
+    if (props.startAtEnd.atEnd) {
+      startAtEndRef.current = true;
+    }
+  }, [props.startAtEnd]);
 
   // 固定版式：分栏间距为 0（每章整页显示）
   const effSettings: ReaderSettings =
@@ -69,8 +98,14 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       effSettings,
       book.version === 2,
       (s) => {
+        lastStateRef.current = s.status;
         props.onPageState(s);
         if (s.status !== "ready") return;
+        // 向前回翻：进入上一章时直接翻到最后一页
+        if (startAtEndRef.current) {
+          startAtEndRef.current = false;
+          if (s.pageCount > 1) p.setPage(s.pageCount - 1);
+        }
         // 空章节：自动前进到下一线性章
         if (s.empty && !autoAdvanceRef.current) {
           autoAdvanceRef.current = true;
@@ -81,7 +116,26 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       (issues) => props.onIssues(issues),
       book.fixedLayout,
       (href) => props.onInternalLink(href),
-      (dir) => turnPageRef.current(dir)
+      (dir) => turnPageRef.current(dir),
+      (dir) => turnPageRef.current(dir),
+      (text, rect) => {
+        const iframe = iframeRef.current;
+        const main = iframe?.parentElement;
+        if (!iframe || !main) {
+          props.onFootnote(text, rect);
+          return;
+        }
+        const ir = iframe.getBoundingClientRect();
+        const mr = main.getBoundingClientRect();
+        const dx = ir.left - mr.left;
+        const dy = ir.top - mr.top;
+        props.onFootnote(text, {
+          left: rect.left + dx,
+          top: rect.top + dy,
+          right: rect.right + dx,
+          bottom: rect.bottom + dy,
+        });
+      }
     );
     paginatorRef.current = p;
     return () => {
@@ -148,6 +202,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   turnPageRef.current = (dir) => {
     const p = paginatorRef.current;
     if (!p) return;
+    // 章节未就绪期间忽略翻页：否则按键重复事件会按 pageCount=1 误判，
+    // 连续请求上一章导致快速翻页时跳过多章
+    if (lastStateRef.current !== "ready") return;
     if (dir === 1) {
       if (p.currentPage < p.pageCount - 1) {
         p.setPage(p.currentPage + 1);
@@ -160,7 +217,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
         p.setPage(p.currentPage - 1);
       } else {
         const prev = nextLinearIndex(book, spineIndexRef.current, -1);
-        if (prev >= 0) props.onRequestChapter(prev);
+        if (prev >= 0) props.onRequestChapter(prev, { atEnd: true });
       }
     }
   };
@@ -182,6 +239,23 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       },
       getReadingAnchor() {
         return paginatorRef.current?.getReadingAnchor() ?? null;
+      },
+      getFootnoteMarkerRect() {
+        const p = paginatorRef.current;
+        const iframe = iframeRef.current;
+        const main = iframe?.parentElement;
+        const r = p?.getFootnoteMarkerRect();
+        if (!p || !iframe || !main || !r) return null;
+        const ir = iframe.getBoundingClientRect();
+        const mr = main.getBoundingClientRect();
+        const dx = ir.left - mr.left;
+        const dy = ir.top - mr.top;
+        return {
+          left: r.left + dx,
+          top: r.top + dy,
+          right: r.right + dx,
+          bottom: r.bottom + dy,
+        };
       },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -1,3 +1,4 @@
+import { useState, type CSSProperties } from "react";
 import type { Theme } from "../render/settings";
 
 export interface MenuPanelProps {
@@ -27,6 +28,7 @@ export interface MenuPanelProps {
   onWordSpacingChange(v: number): void;
   onUiScaleChange(v: number): void;
   onThemeChange(theme: Theme): void;
+  onResetDefaults(): void;
   onClose(): void;
 }
 
@@ -87,6 +89,17 @@ function SliderRow(props: SliderRowProps) {
             max={props.max}
             step={props.step}
             value={props.value}
+            style={
+              {
+                "--fill": `${Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    ((props.value - props.min) / (props.max - props.min)) * 100
+                  )
+                )}%`,
+              } as CSSProperties
+            }
             onChange={(e) => props.onChange(Number(e.target.value))}
           />
           <button className="step-btn" onClick={props.onInc} title="下一档">
@@ -100,6 +113,7 @@ function SliderRow(props: SliderRowProps) {
 
 /** 左侧滑出的二级菜单：收纳文件/导航/正文排版/界面/外观等操作。 */
 export function MenuPanel(props: MenuPanelProps) {
+  const [detailOpen, setDetailOpen] = useState(false);
   return (
     <div className="menu-panel">
       <div className="menu-head">
@@ -131,6 +145,15 @@ export function MenuPanel(props: MenuPanelProps) {
         onDec={props.onFontDec}
         onInc={props.onFontInc}
       />
+      <button
+        className={`menu-item detail-toggle${detailOpen ? " open" : ""}`}
+        onClick={() => setDetailOpen((v) => !v)}
+        title="展开/收起详细排版设置"
+      >
+        详细设置 <span className="detail-arrow">{detailOpen ? "▾" : "▸"}</span>
+      </button>
+      {detailOpen && (
+      <div className="detail-body">
       <SliderRow
         label="行高"
         valueText={fmtLineHeight(props.lineHeight)}
@@ -175,6 +198,8 @@ export function MenuPanel(props: MenuPanelProps) {
         onDec={props.onWordSpacingDec}
         onInc={props.onWordSpacingInc}
       />
+      </div>
+      )}
 
       <div className="menu-section">界面</div>
       <div className="theme-row">
@@ -203,6 +228,11 @@ export function MenuPanel(props: MenuPanelProps) {
           </button>
         ))}
       </div>
+
+      <div className="menu-section">其他</div>
+      <button className="menu-item reset-btn" onClick={props.onResetDefaults} title="恢复所有设置为默认值">
+        ↺ 恢复默认设置
+      </button>
     </div>
   );
 }

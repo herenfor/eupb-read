@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { loadBook, spineIndexForPath, spineItemPath, DrmError } from "./core/book";
 import type { Book } from "./core/types";
-import { splitHref } from "./core/paths";
+import { resolvePath, splitHref } from "./core/paths";
 import { ResourceServer } from "./render/resources";
-import { DEFAULT_SETTINGS, type ReaderSettings, type Theme } from "./render/settings";
+import {
+  DEFAULT_SETTINGS,
+  STANDARD_PAGE_CHARS,
+  type ReaderSettings,
+  type Theme,
+} from "./render/settings";
 import type { ChapterState } from "./render/paginator";
 import { Toolbar } from "./ui/Toolbar";
 import { MenuPanel } from "./ui/MenuPanel";
+import { FootnotePop } from "./ui/FootnotePop";
 import { TocPanel } from "./ui/TocPanel";
 import { LogPanel, type LogItem } from "./ui/LogPanel";
 import { ReaderView, type ReaderHandle } from "./ui/ReaderView";
@@ -45,6 +51,11 @@ export default function App() {
   const [spineIndex, setSpineIndex] = useState(0);
   const [anchor, setAnchor] = useState<string | undefined>(undefined);
   const [anchorNonce, setAnchorNonce] = useState(0);
+  const [startAtEnd, setStartAtEnd] = useState({ nonce: 0, atEnd: false });
+  const [footnote, setFootnote] = useState<{
+    text: string;
+    rect: { left: number; top: number; right: number; bottom: number };
+  } | null>(null);
   const [chapterState, setChapterState] = useState<ChapterState>({ status: "loading" });
   const [settings, setSettings] = useState<ReaderSettings>(() => {
     const saved = readSavedSettings();
@@ -75,6 +86,8 @@ export default function App() {
   const [initialAnchor, setInitialAnchor] = useState<{ index: number; ratio: number } | null>(
     null
   );
+  /** 各线性章节的有效字数（标准页进度分母） */
+  const [chapterChars, setChapterChars] = useState<number[]>([]);
   const [clock, setClock] = useState(() => new Date());
 
   const readerRef = useRef<ReaderHandle>(null);
@@ -93,6 +106,17 @@ export default function App() {
         return;
       }
       const srv = new ResourceServer(b);
+      // 各线性章节有效字数（去标签、去空白），供标准页进度推算
+      const stripTags = (t: string): string => t.replace(/<[^>]*>/g, "").replace(/\s/g, "");
+      const chars: number[] = b.spine.map((item) => {
+        if (!item.linear) return 0;
+        const mi = b.manifest.get(item.idref);
+        if (!mi) return 0;
+        const p = resolvePath(b.opfPath, mi.href);
+        const text = srv.textFor(p);
+        return text ? stripTags(text).length : 0;
+      });
+      setChapterChars(chars);
       const key = bookKeyOf(b, file.name, file.size);
       const saved = readProgress(key);
       const start = clamp(saved?.spineIndex ?? firstLinear(b), 0, b.spine.length - 1);
@@ -126,10 +150,16 @@ export default function App() {
     }
   }, []);
 
-  const handleRequestChapter = useCallback((index: number) => {
-    setSpineIndex(index);
-    setAnchor(undefined);
-  }, []);
+  const handleRequestChapter = useCallback(
+    (index: number, opts?: { atEnd?: boolean }) => {
+      setSpineIndex(index);
+      setAnchor(undefined);
+      // 对象每次请求都新建：连续回翻多次时每次都能触发 atEnd 武装
+      setStartAtEnd((prev) => ({ nonce: prev.nonce + 1, atEnd: opts?.atEnd === true }));
+      setFootnote(null);
+    },
+    []
+  );
 
   const handleIssues = useCallback((issues: string[]) => {
     if (issues.length > 0) setRuntimeIssues((prev) => [...prev, ...issues]);
@@ -152,7 +182,7 @@ export default function App() {
       setSpineIndex(idx);
       setAnchor(a || undefined);
       setAnchorNonce((n) => n + 1);
-      setTocOpen(false); // 悬浮式目录：选中后收起
+      // 保持目录展开：方便连续选择章节；用 ✕/遮罩/Esc 关闭
     }
   };
 
@@ -193,6 +223,11 @@ export default function App() {
     setSettings((s) => ({ ...s, theme }));
   };
 
+  const resetDefaults = (): void => {
+    setSettings({ ...DEFAULT_SETTINGS });
+    setUiScale(1);
+  };
+
   const adjustFont = (delta: number): void => {
     setSettings((s) => ({ ...s, fontSizePx: clamp(s.fontSizePx + delta, 12, 32) }));
   };
@@ -225,6 +260,18 @@ export default function App() {
       wordSpacingPx: stepValue(WORD_SPACINGS, s2.wordSpacingPx, dir),
     }));
 
+  // ---- 脚注弹层随重排重定位 ----
+  useEffect(() => {
+    if (!footnote) return;
+    const r = readerRef.current?.getFootnoteMarkerRect();
+    if (r) {
+      setFootnote((f) => (f ? { ...f, rect: r } : f));
+    } else {
+      setFootnote(null); // 文档被替换（字号变化等）：关闭弹层
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapterState, uiScale]);
+
   // ---- 状态栏时钟（时:分） ----
   useEffect(() => {
     const t = window.setInterval(() => setClock(new Date()), 1000);
@@ -245,6 +292,7 @@ export default function App() {
       if (e.key === "Escape") {
         setMenuOpen(false);
         setTocOpen(false);
+        setFootnote(null);
         return;
       }
       if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
@@ -279,6 +327,39 @@ export default function App() {
   const ready = phase.phase === "ready" && book !== null && server !== null;
   const reading = chapterState.status === "ready" && !chapterState.empty;
   const currentPath = ready ? spineItemPath(book!, spineIndex) : undefined;
+  // 阅读进度：以"标准页 = 1000 字"为尺度，按锚点所在字数位置推算
+  // （标题页等短章节只占零点几个百分点，长章节按字数占大头）
+  const linearIndices = book
+    ? book.spine.map((item, i) => (item.linear ? i : -1)).filter((i) => i >= 0)
+    : [];
+  const linearPos = linearIndices.indexOf(spineIndex);
+  const linearCount = linearIndices.length;
+  const totalBookChars = chapterChars.reduce((a, b) => a + b, 0);
+  const charsBefore =
+    chapterChars.length > 0
+      ? linearIndices
+          .slice(0, linearPos)
+          .reduce((acc, i) => acc + (chapterChars[i] ?? 0), 0)
+      : 0;
+  const anchorChars = (() => {
+    if (!reading) return 0;
+    const a = readerRef.current?.getReadingAnchor();
+    if (a && a.charsRead > 0) return a.charsRead;
+    // 兜底：按页数比例估算本章已读字数
+    if (chapterState.pageCount > 0) {
+      return ((chapterState.currentPage + 1) / chapterState.pageCount) *
+        (chapterChars[spineIndex] ?? 0);
+    }
+    return 0;
+  })();
+  // 标准页口径：固定 1000 字/页，进度 = 已读标准页 / 全书标准页
+  const stdPagesRead = (charsBefore + anchorChars) / STANDARD_PAGE_CHARS;
+  const stdPagesTotal = totalBookChars / STANDARD_PAGE_CHARS;
+  const progressPct =
+    reading && stdPagesTotal > 0
+      ? Math.min(100, Math.round((stdPagesRead / stdPagesTotal) * 100))
+      : 0;
+
   const currentChapterLabel = (() => {
     if (!ready || !currentPath) return "";
     const { path } = splitHref(currentPath);
@@ -351,6 +432,7 @@ export default function App() {
               onWordSpacingChange={(v) => setSettings((s2) => ({ ...s2, wordSpacingPx: v }))}
               onUiScaleChange={(v) => setUiScale(clamp(v, 0.75, 1.5))}
               onThemeChange={changeTheme}
+              onResetDefaults={resetDefaults}
               onClose={() => setMenuOpen(false)}
             />
           </>
@@ -360,7 +442,12 @@ export default function App() {
             {tocOpen && (
               <>
                 <div className="toc-backdrop" onClick={() => setTocOpen(false)} />
-                <TocPanel toc={book!.toc} activePath={currentPath} onNavigate={handleTocNavigate} />
+                <TocPanel
+                  toc={book!.toc}
+                  activePath={currentPath}
+                  onNavigate={handleTocNavigate}
+                  onClose={() => setTocOpen(false)}
+                />
               </>
             )}
             <ReaderView
@@ -376,7 +463,9 @@ export default function App() {
               onRequestChapter={handleRequestChapter}
               onIssues={handleIssues}
               onInternalLink={handleTocNavigate}
+              onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
               initialAnchor={initialAnchor}
+              startAtEnd={startAtEnd}
             />
           </>
         ) : (
@@ -409,14 +498,17 @@ export default function App() {
           </span>
           <span className="sb-progress">
             {reading
-              ? `第 ${chapterState.currentPage + 1}/${chapterState.pageCount} 页 · 章 ${spineIndex + 1}/${book!.spine.length} · ${Math.round(
-                  ((spineIndex + (chapterState.pageCount > 0 ? chapterState.currentPage / chapterState.pageCount : 0)) /
-                    book!.spine.length) *
-                    100
-                )}%`
+              ? `第 ${chapterState.currentPage + 1}/${chapterState.pageCount} 页 · 章 ${linearPos + 1}/${linearCount} · ${progressPct}%`
               : "加载中…"}
           </span>
         </div>
+      )}
+      {footnote && (
+        <FootnotePop
+          text={footnote.text}
+          rect={footnote.rect}
+          onClose={() => setFootnote(null)}
+        />
       )}
       {logOpen && (
         <LogPanel

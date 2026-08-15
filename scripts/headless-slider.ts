@@ -22,7 +22,33 @@ await page.waitForSelector(".reader iframe", { timeout: 30000 });
 await page.waitForTimeout(2000);
 await page.click(".toolbar .tb-btn >> nth=0");
 await page.waitForTimeout(400);
-console.log("滑块行数(现应5个):", await page.evaluate(`document.querySelectorAll(".slider-row").length`));
+console.log("菜单宽度:", await page.evaluate(`Math.round(document.querySelector(".menu-panel").getBoundingClientRect().width)`));
+console.log("菜单项样式:", await page.evaluate(`(() => {
+  const m = document.querySelector(".menu-item");
+  const cs = getComputedStyle(m);
+  return { h: Math.round(m.getBoundingClientRect().height), radius: cs.borderRadius };
+})()`));
+console.log("分区标题样式:", await page.evaluate(`(() => {
+  const sec = document.querySelector(".menu-section");
+  const cs = getComputedStyle(sec);
+  return { size: cs.fontSize, weight: cs.fontWeight, spacing: cs.letterSpacing };
+})()`));
+console.log("滑块 thumb:", await page.evaluate(`(() => {
+  const r = document.querySelector('input[type="range"]');
+  const cs = getComputedStyle(r);
+  return { h: cs.height, fill: r.style.getPropertyValue("--fill") };
+})()`));
+console.log("详细设置按钮:", await page.evaluate(`(() => {
+  const b = document.querySelector(".detail-toggle");
+  return b ? (b.textContent ?? "").trim() : null;
+})()`));
+await page.click(".detail-toggle");
+await page.waitForTimeout(300);
+console.log("展开后滑块行数(应=5):", await page.evaluate(`document.querySelectorAll(".slider-row").length`));
+console.log("展开后箭头:", await page.evaluate(`document.querySelector(".detail-arrow")?.textContent`));
+await page.click(".detail-toggle");
+await page.waitForTimeout(300);
+console.log("再点收起后行数(应=1):", await page.evaluate(`document.querySelectorAll(".slider-row").length`));
 console.log("界面缩放按钮:", await page.evaluate(`(() => {
   const rows = Array.from(document.querySelectorAll(".theme-row"));
   const scaleRow = rows[0];
