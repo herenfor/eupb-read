@@ -360,7 +360,8 @@ export async function sanitizeChapter(
     if (/\b(?:width|height|max-width|max-height|min-width|min-height)\s*:/.test(st)) {
       return true;
     }
-    return el.getAttribute("width") !== null || el.getAttribute("height") !== null;
+    // xmldom 对不存在的属性返回 ""（不是 null），要按空值判断
+    return Boolean(el.getAttribute("width")) || Boolean(el.getAttribute("height"));
   };
   if (images.length === 1 && bodyText.length === 0 && !hasOwnSize(images[0])) {
     viewer.setAttribute("class", "fullpage-image");
