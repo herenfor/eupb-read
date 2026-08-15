@@ -132,6 +132,41 @@ EPUB 3 官方测试套件（24 本 epub30-test-*）做了全量扫描：**全部
 在 Windows 上可再用官方校验器交叉验证：epubcheck（需 Java，
 https://github.com/w3c/epubcheck/releases ，`java -jar epubcheck.jar book.epub`）。
 
+## 阶段性打包（部署到其他电脑测试）
+
+一键脚本（Windows PowerShell，项目根目录执行）：
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+手动步骤（与脚本等价）：
+
+```powershell
+pnpm install
+pnpm build          # 前端：tsc 类型检查 + vite 生产构建
+pnpm tauri build    # Rust + NSIS 打包（首次 5-15 分钟）
+```
+
+产出：
+
+- 安装包：`src-tauri\target\release\bundle\nsis\EPUB Reader_0.1.0_x64-setup.exe`
+- 免安装版：`src-tauri\target\release\epub-reader.exe`
+
+**从 WSL 复制项目到 Windows 时**（排除平台无关的生成目录，Windows 侧重新安装依赖）：
+
+```powershell
+robocopy "\\wsl.localhost\Ubuntu-25.04\home\herenfor\test\epub-reader" "C:\epub-reader" /E /XD node_modules .pnpm-store dist .pw-browsers .pw-libs src-tauri\target /NFL /NDL /NJH
+```
+
+**分发注意事项**：
+
+- 目标电脑需有 **WebView2 Runtime**（Win10/11 自带；缺失时到
+  https://developer.microsoft.com/microsoft-edge/webview2/ 安装常青版）
+- 免安装 exe 需要与 WebView2 配合；安装包（NSIS）体验更完整（开始菜单/卸载入口）
+- 早期版本建议带上版本号分发（当前 0.1.0），改版本号：
+  `src-tauri/tauri.conf.json` 与 `package.json`、`src-tauri/Cargo.toml` 三处同步
+
 ## 常见问题
 
 - **pnpm 安装报 "Ignored build scripts: esbuild"**：`pnpm-workspace.yaml` 已放行
