@@ -30,7 +30,7 @@ Windows 桌面 EPUB 阅读器（EPUB 2/3），技术栈：
 工作目录：`/home/herenfor/test/epub-reader`
 
 ```bash
-pnpm test      # vitest 单测，当前 102 项全绿（src/**/*.test.ts）
+pnpm test      # vitest 单测，当前 103 项全绿（src/**/*.test.ts）
 pnpm build     # tsc 类型检查 + vite 生产构建（交给用户前必跑）
 pnpm dev       # 浏览器开发模式，端口 5517
 ```
@@ -97,6 +97,8 @@ npx tsx scripts/w90-repro.ts    # width:% 盒子在 1100/800/650 三窗口的宽
 10. **鐵人01 目录页条目左右 margin 不生效** → 已修：注入规则的 `margin-left/right: auto !important` 压掉了 `.toc/.bg1box/.bg2box` 的交错边距。改为 `:where(#viewer :not(img)){margin-left:auto;margin-right:auto}`（无 important）——书显式声明的 margin 优先，未声明的普通段落仍自动居中。真实书验证：bg1box 右 32px / bg2box 左 32px、x 坐标交错；普通正文 p 仍 640px 居中。sanitize.test.ts +1，测试 **100 → 101 项**。
 11. **星空书制作信息页靠左（条目 10 的回归）** → 已修并定型为最终层级：阅读器版心规则选择器改为 `:where(#viewer) :not(img)`，特异性 (0,0,1)——比书的通用元素规则（`div{margin:0}` 同为 0,0,1，注入在后所以胜出）高，比书的类规则（`.toc`、`.paper` 为 0,1,0）低。效果：默认居中/40em 上限生效，书用类声明的布局全部尊重。三书实测：星空 `.mesbox` margin 400px 居中；铁人目录条目 ml/mr 交错保留；诡屋 `.paper` 480px 保留。测试数不变（101）。
 12. **艾琳画集纯图片 title 页被拆成两页** → 已修：sanitize 的“无文字+有图 → fullpage-image”判定过宽，title 页有两张上下排列的图（t1 21em + t2 7em），每张都被强制 100%×100% 整页。改为**仅单图页面**注入 fullpage-image；多图页保留书自身排版。实测：title 页 1 页，两图上下排列，body 背景色 `#b5d0e5` 正常；单图插图页仍 fullpage-image 全屏。sanitize.test.ts +1，测试 **101 → 102 项**。
+13. **鐵人01 标题页作者/插画行不居中** → 已修：阅读器版心 `max-width:40em` 的 em 相对元素自身 font-size，`.c1`(0.75em) 得 480px、`.c2`(1.05em) 得 672px，再被书 `.titlebox p{margin:0}` 定死在左边。改为 `max-width:40rem`（相对根字号，所有元素一致且随用户字号设置缩放）。实测标题页所有行宽 640px、文字中心对齐页面中心；星空/铁人目录/诡屋三处旧修复全部回归正常。sanitize.test.ts 断言同步，测试数不变（102）。
+14. **鐵人01 正文 ◇◇◇ 分隔符靠左** → 已修：`.cut{margin:…}` 类规则覆盖了阅读器默认 auto，而阅读器给它 40rem 宽盒子，盒子贴左导致 text-align:center 只在盒内居中。修复：sanitize 阶段给 `#viewer` 的**直接子元素**打 `reader-top` 标记，注入规则 `:where(#viewer) .reader-top { margin-left/right: auto !important }`——页面级内容（标题/正文段/分隔符）强制版心居中，嵌套元素（目录条目等）不受影响、书布局生效。注意不能写 `>` 子选择器（序列化转义坑），因此用 class 标记；xmldom 无 `element.children`，用 childNodes 遍历。实测第一章三处分隔符都在所在列居中；标题页/目录/星空/诡屋旧修复全部回归。sanitize.test.ts +1，测试 **102 → 103 项**。
 
 **用户已明示还有别的问题没报**（"因为还有其他的问题"）——接手后第一件事应是问用户要具体问题，而不是先打包。
 

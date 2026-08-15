@@ -1,6 +1,6 @@
 import { parseXmlText, hasParserError, getSerializer } from "../core/parseXml";
 import { resolvePath, isExternalUrl, isFragmentOnly } from "../core/paths";
-import { findElements } from "../core/xml";
+import { findElements, type XmlElementLike } from "../core/xml";
 import { rewriteCssUrls } from "./cssRewrite";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 
@@ -94,16 +94,27 @@ function buildOverrideCss(s: ReaderSettings): string {
     .join(" ");
   return `
 html, body { position: relative; height: 100%; margin: 0 !important; padding: 0 !important; }
-/* 行文自适应：容器全宽；正文版心由块级元素限宽居中（em 随字号缩放）。
+/* 行文自适应：容器全宽；正文版心由块级元素限宽居中（rem 随正文字号缩放）。
+   max-width 必须用 rem 而不是 em：em 相对元素自身 font-size，
+   书中 0.75em/1.05em 这类不同字号的元素会得到不同版心宽度并错位。
    特异性分层：:where(#viewer) :not(img) = (0,0,1)
    - 高于/等于书的通用元素规则（如 div{margin:0}），且注入在最后 → 默认居中生效
    - 低于书的类规则（如 .toc{margin...}、.paper{max-width:30em}）→ 书布局声明优先 */
 #${VIEWER_ID} { height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }
 :where(#${VIEWER_ID}) :not(img) {
-  max-width: ${maxEm}em;
+  max-width: ${maxEm}rem;
   margin-left: auto;
   margin-right: auto;
   ${typeCss}
+}
+/* 页面级元素强制版心居中：标题、正文段、分隔符（.cut）等都是 viewer 的
+   直接子，即使书用类写了 margin:0 也必须水平居中（text-align:center 的
+   盒子若贴左，文字整体就偏左）。直接子在 sanitize 阶段被打上 reader-top
+   标记；嵌套元素（目录条目等）没有标记，书布局生效。
+   （不能用 ">" 子选择器：序列化会转义成 &gt;，RAWTEXT 不解码导致失效。） */
+:where(#${VIEWER_ID}) .reader-top {
+  margin-left: auto !important;
+  margin-right: auto !important;
 }
 ${footnoteCss}
 /* 正文普通图片：只限制溢出，不覆盖书定义的高度（如 .cut img{height:2em}）。
@@ -273,6 +284,15 @@ export async function sanitizeChapter(
     viewer.appendChild(bodyEl.firstChild);
   }
   bodyEl.appendChild(viewer);
+  // 标记 viewer 的直接子元素：页面级内容（标题/正文段/分隔符）需要强制
+  // 版心居中；嵌套元素不打标记，保留书的布局（如目录条目交错 margin）。
+  // 注意用 childNodes：xmldom 不实现 element.children。
+  for (let c = viewer.firstChild; c; c = c.nextSibling) {
+    if (c.nodeType !== 1) continue;
+    const child = c as Element;
+    const cls = child.getAttribute("class");
+    child.setAttribute("class", cls ? `${cls} reader-top` : "reader-top");
+  }
 
   // 5.4) 宽度百分比重写：书里的 width:X% 是按“页面≈版心”的阅读器写的，
   // 我们的页面=窗口全宽、版心=maxEm，若 % 相对整页，90% 的盒子会几乎占满整页。
@@ -331,11 +351,18 @@ export async function sanitizeChapter(
 
   // 5.5) 纯图片页（封面/插图）：标记并注入整屏填充样式
   // （覆盖书里 90vh 等高度限制，object-fit:contain 保证不超出屏幕地尽量填满）
-  // 仅单图页面整页填充；多图页面（如 title 页上下两张图）按书自身排版，
-  // 否则每张图都会占一整页，把一页拆成两页。
+  // 仅单图且图片没有自带尺寸约束（inline width/height 等）的页面整页填充；
+  // 多图页、限宽 title 图按书自身排版，否则会把一页拆成两页 / 把限宽图放大到全屏。
   const bodyText = (bodyEl.textContent ?? "").trim();
   const images = findElements(viewer, "img");
-  if (images.length === 1 && bodyText.length === 0) {
+  const hasOwnSize = (el: XmlElementLike): boolean => {
+    const st = el.getAttribute("style") ?? "";
+    if (/\b(?:width|height|max-width|max-height|min-width|min-height)\s*:/.test(st)) {
+      return true;
+    }
+    return el.getAttribute("width") !== null || el.getAttribute("height") !== null;
+  };
+  if (images.length === 1 && bodyText.length === 0 && !hasOwnSize(images[0])) {
     viewer.setAttribute("class", "fullpage-image");
     const imgStyle = doc.createElement("style");
     imgStyle.setAttribute("data-reader", "fullpage-image");

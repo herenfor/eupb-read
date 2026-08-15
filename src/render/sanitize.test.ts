@@ -146,8 +146,8 @@ describe("sanitizeChapter", () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><div class="paper">信件</div></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
     expect(out).toContain(`:where(#${VIEWER_ID}) :not(img)`);
-    expect(out).toContain("max-width: 40em;");
-    expect(out).not.toContain("max-width: 40em !important");
+    expect(out).toContain("max-width: 40rem;");
+    expect(out).not.toContain("max-width: 40rem !important");
   });
 
   it("居中 margin 只作为默认值，不覆盖书声明的左右 margin", async () => {
@@ -157,11 +157,24 @@ describe("sanitizeChapter", () => {
 </head><body><div class="toc bg1box">一</div><div class="toc bg2box">二</div></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
     expect(out).toContain("margin-left: auto;");
-    expect(out).not.toContain("margin-left: auto !important");
-    expect(out).not.toContain("margin-right: auto !important");
     // 书规则完整保留
     expect(out).toContain("margin-right:2em");
     expect(out).toContain("margin-left:2em");
+  });
+
+  it("viewer 直接子元素（正文段/分隔符）强制版心居中，嵌套元素不受影响", async () => {
+    // .cut 是页面直接内容，即使书写了 margin:0 也必须居中；
+    // 嵌套的目录条目不能被强制居中（否则破坏书的交错 margin）
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p class="cut">◇◇◇</p><div class="tocbox"><div class="toc">目录条目</div></div></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    // 直接子被标记 reader-top，嵌套元素没有标记
+    expect(out).toContain(`class="cut reader-top"`);
+    expect(out).toContain(`class="toc"`);
+    // 居中规则针对 reader-top（不能用 > 子选择器，序列化会转义）
+    expect(out).toContain(`:where(#${VIEWER_ID}) .reader-top`);
+    expect(out).toContain("margin-left: auto !important;");
+    expect(out).toContain("margin-right: auto !important;");
   });
 
   it("纯图片页注入 fullpage-image 类与整屏填充样式", async () => {
@@ -189,6 +202,15 @@ describe("sanitizeChapter", () => {
     // 保留书自身排版声明
     expect(out).toContain("width:21em");
     expect(out).toContain("width:7em");
+  });
+
+  it("自带限宽声明的单图页不注入 fullpage-image（title 限宽图不被放大到全屏）", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div style="margin:0 auto"><p><img alt="t1" src="t1.png" style="width:13em"/></p></div>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).not.toContain("fullpage-image");
+    expect(out).toContain("width:13em");
   });
 
   it("正文被包进 #epub-viewer 分页容器", async () => {
