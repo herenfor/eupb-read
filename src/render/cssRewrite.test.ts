@@ -50,4 +50,73 @@ b { background: url(data:image/png;base64,AAA=) }`;
     const twice = rewriteCssUrls(out, "OEBPS/Styles/stylesheet.css", urlFor);
     expect(twice).toBe(out);
   });
+
+  it("width:% 换算为版心宽度（40em 的对应比例）", () => {
+    const css = `.paper { width: 90%; padding: 1em; }
+.panel { width:100%; }
+@media screen { .note { width: 50%; } }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(".paper { width: 36em;");
+    expect(out).toContain(".panel { width: 40em;");
+    expect(out).toContain(".note { width: 20em;");
+  });
+
+  it("全页图块 / img / body 选择器的 width:% 不换算", () => {
+    const css = `.illus { width: 100%; }
+img { width: 100%; height: auto; }
+body { width: 90%; }
+.duokan-image-single img { width: 100%; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(".illus { width: 100%; }");
+    expect(out).toContain("img { width: 100%; height: auto; }");
+    expect(out).toContain("body { width: 90%; }");
+    expect(out).toContain(".duokan-image-single img { width: 100%; }");
+  });
+
+  it("@import 链被递归内联：被导入 CSS 的 width:% 与 url() 都按其自身路径改写", () => {
+    const getText = (p: string): string | undefined => {
+      if (p === "OEBPS/Styles/default.css") {
+        return `.paper { width: 90%; background: url(../Images/bg.png); }
+@font-face { font-family: x; src: url(../Fonts/x.ttf); }`;
+      }
+      return undefined;
+    };
+    const out = rewriteCssUrls(
+      `@import "default.css";`,
+      "OEBPS/Styles/stylesheet.css",
+      urlFor,
+      { getText }
+    );
+    expect(out).toContain("@import default.css → 内联");
+    expect(out).toContain(".paper { width: 36em;");
+    expect(out).toContain('url("blob:test/OEBPS/Images/bg.png")');
+    expect(out).toContain('url("blob:test/OEBPS/Fonts/x.ttf")');
+    // 不再残留 @import blob（内容已内联）
+    expect(out).not.toContain("@import url(");
+  });
+
+  it("@import 内联保留媒体条件", () => {
+    const getText = (p: string): string | undefined =>
+      p === "OEBPS/Styles/print.css" ? `.paper { width: 50%; }` : undefined;
+    const out = rewriteCssUrls(
+      `@import "print.css" print;`,
+      "OEBPS/Styles/main.css",
+      urlFor,
+      { getText }
+    );
+    expect(out).toContain("@media print {");
+    expect(out).toContain(".paper { width: 20em; }");
+  });
+
+  it("循环 @import 只内联一次并跳过后续", () => {
+    const css = `@import "a.css";`;
+    const getText = (p: string): string | undefined => {
+      if (p === "OEBPS/Styles/a.css") return `@import "b.css";`;
+      if (p === "OEBPS/Styles/b.css") return `@import "a.css"; .x { width: 90%; }`;
+      return undefined;
+    };
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor, { getText });
+    expect(out).toContain("循环 @import 已跳过：a.css");
+    expect(out).toContain(".x { width: 36em; }");
+  });
 });

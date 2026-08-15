@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { Theme } from "../render/settings";
 
 export interface MenuPanelProps {
@@ -62,7 +62,8 @@ function fmtPx(v?: number): string {
 
 interface SliderRowProps {
   label: string;
-  valueText: string;
+  /** 拖动条上方数值的格式化显示（基于预览值实时更新） */
+  formatValue(v: number): string;
   min: number;
   max: number;
   step: number;
@@ -72,35 +73,59 @@ interface SliderRowProps {
   onInc(): void;
 }
 
-/** 排版行：小 −/+ 按钮 + 中间拖动条，数值显示在拖动条上方。 */
+/**
+ * 排版行：小 −/+ 按钮 + 中间拖动条，数值显示在拖动条上方。
+ * 拖动只做本地预览；原生 change（松开鼠标/键盘确认/失焦）才提交，
+ * 避免拖动过程中每次 input 都触发整章重排。
+ */
 function SliderRow(props: SliderRowProps) {
+  const [draft, setDraft] = useState(props.value);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const latestValueRef = useRef(props.value);
+  latestValueRef.current = props.value;
+
+  // 外部值变化（± 按钮、恢复默认等）时同步预览值
+  useEffect(() => {
+    setDraft(props.value);
+  }, [props.value]);
+
+  // 原生 change 事件：拖动条松开/键盘一次修改完成/失焦时各触发一次
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const commit = (): void => {
+      const v = Number(el.value);
+      if (Number.isFinite(v) && v !== latestValueRef.current) props.onChange(v);
+    };
+    el.addEventListener("change", commit);
+    return () => el.removeEventListener("change", commit);
+  }, [props.onChange]);
+
+  const pct =
+    ((draft - props.min) / (props.max - props.min)) * 100;
+
   return (
     <div className="slider-row">
       <span className="menu-label">{props.label}</span>
       <div className="slider-main">
-        <span className="slider-value">{props.valueText}</span>
+        <span className="slider-value">{props.formatValue(draft)}</span>
         <div className="slider-line">
           <button className="step-btn" onClick={props.onDec} title="上一档">
             −
           </button>
           <input
+            ref={inputRef}
             type="range"
             min={props.min}
             max={props.max}
             step={props.step}
-            value={props.value}
+            value={draft}
             style={
               {
-                "--fill": `${Math.min(
-                  100,
-                  Math.max(
-                    0,
-                    ((props.value - props.min) / (props.max - props.min)) * 100
-                  )
-                )}%`,
+                "--fill": `${Math.min(100, Math.max(0, pct))}%`,
               } as CSSProperties
             }
-            onChange={(e) => props.onChange(Number(e.target.value))}
+            onChange={(e) => setDraft(Number(e.target.value))}
           />
           <button className="step-btn" onClick={props.onInc} title="下一档">
             +
@@ -136,7 +161,7 @@ export function MenuPanel(props: MenuPanelProps) {
       <div className="menu-section">正文</div>
       <SliderRow
         label="字号"
-        valueText={`${props.fontSize}px`}
+        formatValue={(v) => `${v}px`}
         min={12}
         max={32}
         step={2}
@@ -156,7 +181,7 @@ export function MenuPanel(props: MenuPanelProps) {
       <div className="detail-body">
       <SliderRow
         label="行高"
-        valueText={fmtLineHeight(props.lineHeight)}
+        formatValue={fmtLineHeight}
         min={1.4}
         max={2.2}
         step={0.2}
@@ -167,7 +192,7 @@ export function MenuPanel(props: MenuPanelProps) {
       />
       <SliderRow
         label="字重"
-        valueText={fmtWeight(props.fontWeight)}
+        formatValue={fmtWeight}
         min={400}
         max={700}
         step={100}
@@ -178,7 +203,7 @@ export function MenuPanel(props: MenuPanelProps) {
       />
       <SliderRow
         label="字间距"
-        valueText={fmtPx(props.letterSpacingPx)}
+        formatValue={fmtPx}
         min={0}
         max={8}
         step={2}
@@ -189,7 +214,7 @@ export function MenuPanel(props: MenuPanelProps) {
       />
       <SliderRow
         label="字符间距"
-        valueText={fmtPx(props.wordSpacingPx)}
+        formatValue={fmtPx}
         min={0}
         max={16}
         step={4}

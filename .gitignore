@@ -8,3 +8,7 @@ src-tauri/gen/
 .pw-browsers/ 
 .pw-libs/
 .pw-libs-debs/
+.toolchain/
+.xwin-cache/
+.cache/
+.img-repro.png

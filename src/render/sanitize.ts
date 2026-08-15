@@ -42,6 +42,20 @@ const STRIP_TAGS = new Set([
 
 export const VIEWER_ID = "epub-viewer";
 
+/** 仅接受 #hex 或安全色名，防止书里的 bgcolor 注入任意 CSS */
+function isSafeColor(v: string): boolean {
+  if (/^#[0-9a-fA-F]{3,8}$/.test(v.trim())) return true;
+  const SAFE_NAMES = new Set([
+    "white", "black", "ivory", "beige", "linen", "seashell", "floralwhite",
+    "oldlace", "snow", "mistyrose", "lavender", "lavenderblush", "honeydew",
+    "mintcream", "azure", "aliceblue", "lightyellow", "lightgoldenrodyellow",
+    "papayawhip", "antiquewhite", "bisque", "wheat", "cornsilk",
+    "lightgray", "lightgrey", "gainsboro", "silver", "gray", "grey",
+    "whitesmoke", "lightblue", "lightcyan", "lightpink", "lightgreen",
+  ]);
+  return SAFE_NAMES.has(v.trim().toLowerCase());
+}
+
 function buildOverrideCss(s: ReaderSettings): string {
   const bg =
     s.theme === "dark" ? "#1e1e1e" : s.theme === "sepia" ? "#f4ecd8" : "#ffffff";
@@ -62,8 +76,11 @@ function buildOverrideCss(s: ReaderSettings): string {
   vertical-align: top;
   border: 0;
 }
-/* 脚注内容（aside）：从正文流隐藏，由阅读器弹层显示 */
-#${VIEWER_ID} aside[epub\\:type="footnote"] { display: none !important; }`;
+/* 脚注内容（aside）：从正文流隐藏，由阅读器弹层显示。
+   第二段兼容 script.js（LK 参考脚本）的书：<note> 内 aside 即弹注内容，
+   即使书没标 epub:type 也要隐藏，否则正文会多出一块注释块。 */
+#${VIEWER_ID} aside[epub\\:type="footnote"],
+#${VIEWER_ID} note aside { display: none !important; }`;
   // 排版属性（未设置 = 跟随书的定义）
   const typeCss = [
     s.lineHeight !== undefined ? `line-height: ${s.lineHeight} !important;` : "",
@@ -77,17 +94,21 @@ function buildOverrideCss(s: ReaderSettings): string {
     .join(" ");
   return `
 html, body { position: relative; height: 100%; margin: 0 !important; padding: 0 !important; }
-/* 行文自适应：容器全宽；正文版心由块级元素限宽居中（em 随字号缩放） */
+/* 行文自适应：容器全宽；正文版心由块级元素限宽居中（em 随字号缩放）。
+   特异性分层：:where(#viewer) :not(img) = (0,0,1)
+   - 高于/等于书的通用元素规则（如 div{margin:0}），且注入在最后 → 默认居中生效
+   - 低于书的类规则（如 .toc{margin...}、.paper{max-width:30em}）→ 书布局声明优先 */
 #${VIEWER_ID} { height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }
-#${VIEWER_ID} :not(img) {
-  max-width: ${maxEm}em !important;
-  margin-left: auto !important;
-  margin-right: auto !important;
+:where(#${VIEWER_ID}) :not(img) {
+  max-width: ${maxEm}em;
+  margin-left: auto;
+  margin-right: auto;
   ${typeCss}
 }
 ${footnoteCss}
-#${VIEWER_ID} img { max-width: 100% !important; height: auto !important; }
-#${VIEWER_ID} table { max-width: 100% !important; }
+/* 正文普通图片：只限制溢出，不覆盖书定义的高度（如 .cut img{height:2em}）。
+   object-fit:contain 保证被列宽压缩时按比例缩放不拉伸变形。 */
+#${VIEWER_ID} img { max-width: 100% !important; object-fit: contain; }
 #${VIEWER_ID} img, #${VIEWER_ID} video, #${VIEWER_ID} svg { max-height: 100% !important; }
 /* 全页图片块：豁免版心限制，占满一整页（正文中的插图页） */
 #${VIEWER_ID} .illus, #${VIEWER_ID} .kuchie, #${VIEWER_ID} .cover,
@@ -110,7 +131,9 @@ ${footnoteCss}
   object-fit: contain;
 }
 html { font-size: ${s.fontSizePx}px !important; }
-body { color: ${fg}; background: ${bg}; font-family: ${family}; }
+/* 主题只覆盖背景色，不能写 background 简写：简写会把书在 body 上
+   声明的 background-image（如目录页背景图）重置为 none。 */
+body { color: ${fg}; background-color: ${bg}; font-family: ${family}; }
 `;
 }
 
@@ -212,7 +235,9 @@ export async function sanitizeChapter(
         // 优先：读取 CSS 内容并改写其内部引用（@font-face/background/@import 相对路径）
         const cssText = opts.getText?.(cssPath);
         if (cssText !== undefined && opts.makeUrl) {
-          const rewritten = rewriteCssUrls(cssText, cssPath, opts.urlFor);
+          const rewritten = rewriteCssUrls(cssText, cssPath, opts.urlFor, {
+            getText: opts.getText,
+          });
           link.setAttribute("href", opts.makeUrl(rewritten, "text/css"));
         } else {
           const url = opts.urlFor(cssPath);
@@ -229,6 +254,16 @@ export async function sanitizeChapter(
     }
   }
 
+  // 4.5) 页内 <style> 块：与样式表同规则改写（url() 引用 + width:% 版心换算）
+  for (const stEl of Array.from(doc.getElementsByTagName("style"))) {
+    const text = stEl.textContent;
+    if (text) {
+      const rewritten = rewriteCssUrls(text, opts.basePath, opts.urlFor);
+      while (stEl.firstChild) stEl.removeChild(stEl.firstChild);
+      stEl.appendChild(doc.createTextNode(rewritten));
+    }
+  }
+
   // 5) 把正文包进分页容器（paginator 依赖 #epub-viewer 做多栏分页）
   const bodyEl = doc.getElementsByTagName("body")[0] ?? root;
   const viewer = doc.createElement("div");
@@ -239,11 +274,68 @@ export async function sanitizeChapter(
   }
   bodyEl.appendChild(viewer);
 
+  // 5.4) 宽度百分比重写：书里的 width:X% 是按“页面≈版心”的阅读器写的，
+  // 我们的页面=窗口全宽、版心=maxEm，若 % 相对整页，90% 的盒子会几乎占满整页。
+  // 换算为版心宽度（em），盒子与正文行宽比例一致。
+  // 跳过：img/svg（自有缩放规则）、全页图块内部（% 相对整页有意义）、
+  // 已显式定宽祖先内部（% 应相对该祖先，保持原样）。
+  const FULLPAGE_CLASS_RE =
+    /(^|\s)(illus|kuchie|cover|duokan-image-single|duokan-image-fullscreen)(\s|$)/;
+  const hasFullpageClass = (el: Element): boolean =>
+    FULLPAGE_CLASS_RE.test(el.getAttribute("class") ?? "");
+  const insideFullpage = (el: Element): boolean => {
+    for (let n = el.parentNode; n && n !== viewer; n = n.parentNode) {
+      if (n.nodeType === 1 && hasFullpageClass(n as Element)) return true;
+    }
+    return false;
+  };
+  const ancestorHasWidth = (el: Element): boolean => {
+    for (let n = el.parentNode; n && n !== viewer; n = n.parentNode) {
+      if (n.nodeType !== 1) continue;
+      const e = n as Element;
+      if (/width\s*:/.test(e.getAttribute("style") ?? "")) return true;
+      if (e.getAttribute("width")) return true;
+    }
+    return false;
+  };
+  const pctToEm = (x: string): string =>
+    `${(parseFloat(x) * TEXT_MEASURE.maxEm) / 100}em`;
+  // 注意：findElements 按 localName 精确匹配，无法传 "*"，这里手动递归收集子树元素
+  const allEls: Element[] = [];
+  const collect = (n: Node): void => {
+    for (let c = n.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 1) {
+        allEls.push(c as Element);
+        collect(c);
+      }
+    }
+  };
+  collect(viewer);
+  for (const el of allEls) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "img" || tag === "svg") continue;
+    if (insideFullpage(el) || ancestorHasWidth(el)) continue;
+    const st = el.getAttribute("style");
+    if (st && /width\s*:\s*(\d+(?:\.\d+)?)\s*%/i.test(st)) {
+      el.setAttribute(
+        "style",
+        st.replace(/width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi, (_m, x: string) => `width: ${pctToEm(x)}`)
+      );
+    }
+    const wAttr = el.getAttribute("width");
+    if (wAttr && /^\s*\d+(?:\.\d+)?\s*%\s*$/.test(wAttr)) {
+      const merged = `${el.getAttribute("style") ?? ""} width: ${pctToEm(wAttr)};`.trim();
+      el.setAttribute("style", merged);
+    }
+  }
+
   // 5.5) 纯图片页（封面/插图）：标记并注入整屏填充样式
   // （覆盖书里 90vh 等高度限制，object-fit:contain 保证不超出屏幕地尽量填满）
+  // 仅单图页面整页填充；多图页面（如 title 页上下两张图）按书自身排版，
+  // 否则每张图都会占一整页，把一页拆成两页。
   const bodyText = (bodyEl.textContent ?? "").trim();
-  const hasImg = findElements(viewer, "img").length > 0;
-  if (hasImg && bodyText.length === 0) {
+  const images = findElements(viewer, "img");
+  if (images.length === 1 && bodyText.length === 0) {
     viewer.setAttribute("class", "fullpage-image");
     const imgStyle = doc.createElement("style");
     imgStyle.setAttribute("data-reader", "fullpage-image");
@@ -277,6 +369,17 @@ export async function sanitizeChapter(
   styleEl.setAttribute("data-reader", "overrides");
   styleEl.textContent = buildOverrideCss(opts.settings);
   head.appendChild(styleEl);
+
+  // 参考脚本优化：书声明了 body bgcolor 时，浅色主题下让版面底色跟随书的设定
+  // （只接受安全颜色写法，防止 CSS 注入）
+  const bgcolor = bodyEl.getAttribute("bgcolor");
+  if (bgcolor && opts.settings.theme === "light" && isSafeColor(bgcolor)) {
+    const bgStyle = doc.createElement("style");
+    bgStyle.setAttribute("data-reader", "bgcolor");
+    // 同样只用 background-color：body 上的背景图（目录页等）应继续显示
+    bgStyle.textContent = `body { background-color: ${bgcolor} !important; }`;
+    head.appendChild(bgStyle);
+  }
 
   const html = (await getSerializer()).serializeToString(doc);
   return { html, issues, downgraded };

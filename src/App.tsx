@@ -22,6 +22,12 @@ import {
   readSavedSettings,
   writeSavedSettings,
 } from "./ui/storage";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
+
+function isTauriEnv(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 type AppPhase =
   | { phase: "idle" }
@@ -89,6 +95,7 @@ export default function App() {
   /** 各线性章节的有效字数（标准页进度分母） */
   const [chapterChars, setChapterChars] = useState<number[]>([]);
   const [clock, setClock] = useState(() => new Date());
+  const [dragActive, setDragActive] = useState(false);
 
   const readerRef = useRef<ReaderHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -308,18 +315,54 @@ export default function App() {
   }, []);
 
   // ---- 拖拽打开 ----
+  // Tauri 环境：打包后 WebView2 会拦截原生拖放，HTML5 drop 事件不会触发，
+  // 必须走 Tauri 原生 onDragDropEvent（拿到的是文件路径，再经 read_epub_file 读字节）。
+  // 纯浏览器环境：用 HTML5 事件兜底。
   useEffect(() => {
-    const prevent = (e: DragEvent): void => e.preventDefault();
-    const drop = (e: DragEvent): void => {
-      e.preventDefault();
-      const f = e.dataTransfer?.files?.[0];
-      if (f && f.name.toLowerCase().endsWith(".epub")) void handleOpenFile(f);
-    };
-    window.addEventListener("dragover", prevent);
-    window.addEventListener("drop", drop);
+    if (!isTauriEnv()) {
+      const prevent = (e: DragEvent): void => e.preventDefault();
+      const drop = (e: DragEvent): void => {
+        e.preventDefault();
+        const f = e.dataTransfer?.files?.[0];
+        if (f && f.name.toLowerCase().endsWith(".epub")) void handleOpenFile(f);
+      };
+      window.addEventListener("dragover", prevent);
+      window.addEventListener("drop", drop);
+      return () => {
+        window.removeEventListener("dragover", prevent);
+        window.removeEventListener("drop", drop);
+      };
+    }
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "enter") {
+          setDragActive(true);
+        } else if (p.type === "leave") {
+          setDragActive(false);
+        } else if (p.type === "drop") {
+          setDragActive(false);
+          const path = p.paths.find((x) => x.toLowerCase().endsWith(".epub"));
+          if (!path) return;
+          const name = path.split(/[\\/]/).pop() || "book.epub";
+          invoke<ArrayBuffer>("read_epub_file", { path })
+            .then((buf) => handleOpenFile(new File([buf], name)))
+            .catch((err) => {
+              setPhase({ phase: "error", message: `无法读取文件：${String(err)}` });
+            });
+        }
+      })
+      .then((u) => {
+        if (!cancelled) unlisten = u;
+      })
+      .catch(() => {
+        /* 非 Tauri 运行时忽略 */
+      });
     return () => {
-      window.removeEventListener("dragover", prevent);
-      window.removeEventListener("drop", drop);
+      cancelled = true;
+      unlisten?.();
     };
   }, [handleOpenFile]);
 
@@ -381,7 +424,7 @@ export default function App() {
 
   return (
     <div
-      className="app"
+      className={`app${dragActive ? " drag-active" : ""}`}
       data-theme={settings.theme === "dark" ? "dark" : undefined}
       style={{ "--ui-scale": uiScale } as CSSProperties}
     >
@@ -464,6 +507,7 @@ export default function App() {
               onIssues={handleIssues}
               onInternalLink={handleTocNavigate}
               onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
+              onFootnoteClose={() => setFootnote(null)}
               initialAnchor={initialAnchor}
               startAtEnd={startAtEnd}
             />

@@ -50,6 +50,8 @@ interface ReaderViewProps {
     text: string,
     rect: { left: number; top: number; right: number; bottom: number }
   ): void;
+  /** 桌面端 hover 移出脚注标记时关闭弹层 */
+  onFootnoteClose(): void;
   /** 打开书时恢复的阅读锚点（可选，页码之外的精确定位） */
   initialAnchor?: { index: number; ratio: number } | null;
 }
@@ -135,7 +137,8 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
           right: rect.right + dx,
           bottom: rect.bottom + dy,
         });
-      }
+      },
+      () => props.onFootnoteClose()
     );
     paginatorRef.current = p;
     return () => {
@@ -178,22 +181,24 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
-  // 尺寸变化 → 重排（ResizeObserver 观察 iframe，rAF 防抖）。
-  // 关键：缩放时不重新捕获锚点——ResizeObserver 回调时布局已是中间尺寸，
-  // 此时取样会拿到动画中间状态。直接使用上一次稳定状态（翻页/上次重排）
-  // 存下的锚点：它记录的正是缩放前正在读的内容，动画全程追踪同一段文字。
+  // 尺寸变化 → 重排（左右拉伸窗口等场景）。
+  // 用 debounce：拉伸过程中 ResizeObserver 持续触发，只重置定时器、不做重排；
+  // 停止 250ms 后才重排一次。浏览器窗口边框拖动没有 mouseup 事件，
+  // 静默期就是"确认拉伸结束"的信号。
+  // 关键：重排时不重新捕获锚点——此时用上一次稳定状态（翻页/上次重排）
+  // 存下的锚点，保证正在读的内容在拉伸后仍回到页面中部。
   useEffect(() => {
     const el = iframeRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    let raf = 0;
+    let timer = 0;
     const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => paginatorRef.current?.reflow());
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => paginatorRef.current?.reflow(), 250);
     });
     ro.observe(el);
     return () => {
       ro.disconnect();
-      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
     };
   }, []);
 

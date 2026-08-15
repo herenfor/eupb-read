@@ -1,5 +1,6 @@
 import { sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { resolvePath, isExternalUrl, isFragmentOnly, splitHref } from "../core/paths";
+import { isFootnoteLink, resolveFootnote } from "./footnotes";
 import type { ResourceServer } from "./resources";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 
@@ -48,6 +49,8 @@ export class ChapterPaginator {
   private wheelHandler = (e: WheelEvent): void => this.handleWheel(e);
   private wheelAcc = 0;
   private keyHandler = (e: KeyboardEvent): void => this.handleKey(e);
+  private footnoteHoverInHandler = (e: Event): void => this.handleFootnoteHoverIn(e);
+  private footnoteHoverOutHandler = (e: MouseEvent): void => this.handleFootnoteHoverOut(e);
   private pendingAnchor: string | undefined;
   private lastState: ChapterState = { status: "loading" };
   private recomputeRetries = 0;
@@ -84,7 +87,9 @@ export class ChapterPaginator {
     private onFootnote?: (
       text: string,
       rect: { left: number; top: number; right: number; bottom: number }
-    ) => void
+    ) => void,
+    /** 桌面端 hover 离开脚注标记时关闭弹层（移动端无 hover，弹层由点击/✕ 关闭） */
+    private onFootnoteClose?: () => void
   ) {}
 
   /** 加载一章。path 为规范化内部路径。 */
@@ -158,6 +163,9 @@ export class ChapterPaginator {
     doc.addEventListener("load", this.imgHandler, true);
     // 拦截书内链接：防止 iframe 自身导航导致内容丢失
     doc.addEventListener("click", this.linkHandler, true);
+    // 桌面 hover 弹注（script.js 的鼠标行为）；移动端无 hover，走 click/touch
+    doc.addEventListener("mouseover", this.footnoteHoverInHandler, true);
+    doc.addEventListener("mouseout", this.footnoteHoverOutHandler, true);
     // 滚轮翻页（内容不可滚动，事件冒泡到文档即可捕获）
     doc.addEventListener("wheel", this.wheelHandler, { passive: false });
     // 键盘翻页：焦点在书页内时，方向键事件不会冒泡到主窗口，需在此监听
@@ -523,7 +531,7 @@ export class ChapterPaginator {
   private handleLinkClick(e: Event): void {
     const t = e.target as HTMLElement | null;
     if (!t) return;
-    const a = t.closest("a");
+    const a = t.closest<HTMLAnchorElement>("a");
     if (!a) return;
     const href = (a.getAttribute("href") ?? "").trim();
     if (!href) return;
@@ -531,29 +539,12 @@ export class ChapterPaginator {
     e.preventDefault();
     e.stopPropagation();
     if (isExternalUrl(href) || href.startsWith("//")) return;
-    // 脚注标记（多看/掌阅式）：提取目标 aside 的文本交给阅读器弹层
-    const isFootnote =
-      a.classList.contains("duokan-footnote") ||
-      a.getAttribute("epub:type") === "noteref" ||
-      a.querySelector(".zhangyue-footnote, .duokan-footnote") !== null;
-    if (isFootnote) {
-      const { anchor } = splitHref(href);
-      if (anchor) {
-        const aside = this.contentDoc?.getElementById(anchor);
-        if (aside) {
-          const text = (aside.textContent ?? "").replace(/\s+/g, " ").trim();
-          if (text) {
-            this.lastFootnoteEl = a;
-            const r = a.getBoundingClientRect();
-            this.onFootnote?.(text, {
-              left: r.left,
-              top: r.top,
-              right: r.right,
-              bottom: r.bottom,
-            });
-            return;
-          }
-        }
+    // 脚注标记：多看/掌阅式 + script.js 的 <note><sup><a href="#asideId"> 通用模式
+    if (isFootnoteLink(a) && this.contentDoc) {
+      const info = resolveFootnote(this.contentDoc, a);
+      if (info) {
+        this.showFootnote(a, info.text);
+        return;
       }
     }
     if (isFragmentOnly(href)) {
@@ -563,6 +554,35 @@ export class ChapterPaginator {
     const { path, anchor } = splitHref(href);
     const resolved = resolvePath(this._currentPath, path);
     this.onNavigate?.(anchor ? `${resolved}#${anchor}` : resolved);
+  }
+
+  /** 显示脚注弹层：记录标记（供重排重定位）并通知阅读器。 */
+  private showFootnote(a: HTMLAnchorElement, text: string): void {
+    this.lastFootnoteEl = a;
+    const r = a.getBoundingClientRect();
+    this.onFootnote?.(text, {
+      left: r.left,
+      top: r.top,
+      right: r.right,
+      bottom: r.bottom,
+    });
+  }
+
+  /** 桌面 hover 弹注（script.js 的 mouseover 行为）。 */
+  private handleFootnoteHoverIn(e: Event): void {
+    const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
+    if (!a || !this.contentDoc || !isFootnoteLink(a)) return;
+    const info = resolveFootnote(this.contentDoc, a);
+    if (info) this.showFootnote(a, info.text);
+  }
+
+  /** hover 移出标记时关闭弹层；在标记内部移动不关闭。 */
+  private handleFootnoteHoverOut(e: MouseEvent): void {
+    const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
+    if (!a || !isFootnoteLink(a)) return;
+    const rel = e.relatedTarget as Node | null;
+    if (rel && a.contains(rel)) return;
+    this.onFootnoteClose?.();
   }
 
   /** 当前脚注标记在 iframe 内的视口矩形（弹层随重排重定位用）；无则 null。 */
@@ -624,6 +644,8 @@ export class ChapterPaginator {
     this.contentDoc?.removeEventListener("click", this.linkHandler, true);
     this.contentDoc?.removeEventListener("wheel", this.wheelHandler);
     this.contentDoc?.removeEventListener("keydown", this.keyHandler);
+    this.contentDoc?.removeEventListener("mouseover", this.footnoteHoverInHandler, true);
+    this.contentDoc?.removeEventListener("mouseout", this.footnoteHoverOutHandler, true);
     this.contentDoc = null;
     this.viewer = null;
     if (this.blobUrl) {

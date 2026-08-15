@@ -77,7 +77,7 @@ pnpm tauri build
 
 产物：
 
-- 安装程序：`src-tauri/target/release/bundle/nsis/EPUB Reader_0.1.0_x64-setup.exe`
+- 安装程序：`src-tauri/target/release/bundle/nsis/EPUB Reader_0.1.1_x64-setup.exe`
 - 免安装版：`src-tauri/target/release/bundle/nsis/*.exe` 及
   `src-tauri/target/release/epub-reader.exe`
 
@@ -150,7 +150,7 @@ pnpm tauri build    # Rust + NSIS 打包（首次 5-15 分钟）
 
 产出：
 
-- 安装包：`src-tauri\target\release\bundle\nsis\EPUB Reader_0.1.0_x64-setup.exe`
+- 安装包：`src-tauri\target\release\bundle\nsis\EPUB Reader_0.1.1_x64-setup.exe`
 - 免安装版：`src-tauri\target\release\epub-reader.exe`
 
 **从 WSL 复制项目到 Windows 时**（排除平台无关的生成目录，Windows 侧重新安装依赖）：
@@ -164,7 +164,7 @@ robocopy "\\wsl.localhost\Ubuntu-25.04\home\herenfor\test\epub-reader" "C:\epub-
 - 目标电脑需有 **WebView2 Runtime**（Win10/11 自带；缺失时到
   https://developer.microsoft.com/microsoft-edge/webview2/ 安装常青版）
 - 免安装 exe 需要与 WebView2 配合；安装包（NSIS）体验更完整（开始菜单/卸载入口）
-- 早期版本建议带上版本号分发（当前 0.1.0），改版本号：
+- 早期版本建议带上版本号分发（当前 0.1.1），改版本号：
   `src-tauri/tauri.conf.json` 与 `package.json`、`src-tauri/Cargo.toml` 三处同步
 
 ## 常见问题
