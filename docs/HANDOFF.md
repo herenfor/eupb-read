@@ -30,7 +30,7 @@ Windows 桌面 EPUB 阅读器（EPUB 2/3），技术栈：
 工作目录：`/home/herenfor/test/epub-reader`
 
 ```bash
-pnpm test      # vitest 单测，当前 103 项全绿（src/**/*.test.ts）
+pnpm test      # vitest 单测，当前 104 项全绿（src/**/*.test.ts）
 pnpm build     # tsc 类型检查 + vite 生产构建（交给用户前必跑）
 pnpm dev       # 浏览器开发模式，端口 5517
 ```
@@ -99,6 +99,7 @@ npx tsx scripts/w90-repro.ts    # width:% 盒子在 1100/800/650 三窗口的宽
 12. **艾琳画集纯图片 title 页被拆成两页** → 已修：sanitize 的“无文字+有图 → fullpage-image”判定过宽，title 页有两张上下排列的图（t1 21em + t2 7em），每张都被强制 100%×100% 整页。改为**仅单图页面**注入 fullpage-image；多图页保留书自身排版。实测：title 页 1 页，两图上下排列，body 背景色 `#b5d0e5` 正常；单图插图页仍 fullpage-image 全屏。sanitize.test.ts +1，测试 **101 → 102 项**。
 13. **鐵人01 标题页作者/插画行不居中** → 已修：阅读器版心 `max-width:40em` 的 em 相对元素自身 font-size，`.c1`(0.75em) 得 480px、`.c2`(1.05em) 得 672px，再被书 `.titlebox p{margin:0}` 定死在左边。改为 `max-width:40rem`（相对根字号，所有元素一致且随用户字号设置缩放）。实测标题页所有行宽 640px、文字中心对齐页面中心；星空/铁人目录/诡屋三处旧修复全部回归正常。sanitize.test.ts 断言同步，测试数不变（102）。
 14. **鐵人01 正文 ◇◇◇ 分隔符靠左** → 已修：`.cut{margin:…}` 类规则覆盖了阅读器默认 auto，而阅读器给它 40rem 宽盒子，盒子贴左导致 text-align:center 只在盒内居中。修复：sanitize 阶段给 `#viewer` 的**直接子元素**打 `reader-top` 标记，注入规则 `:where(#viewer) .reader-top { margin-left/right: auto !important }`——页面级内容（标题/正文段/分隔符）强制版心居中，嵌套元素（目录条目等）不受影响、书布局生效。注意不能写 `>` 子选择器（序列化转义坑），因此用 class 标记；xmldom 无 `element.children`，用 childNodes 遍历。实测第一章三处分隔符都在所在列居中；标题页/目录/星空/诡屋旧修复全部回归。sanitize.test.ts +1，测试 **102 → 103 项**。
+15. **長山書标题页限宽图被全屏** → 已修：fullpage-image 判定再加一条——单图页面且图片自带尺寸约束（inline style 的 width/height/max-/min-，或 width/height 属性）时不注入整屏填充，按书排版显示。xmldom 的 getAttribute 对缺失属性返回 "" 而非 null，判空要用 Boolean()。实测：長山标题图 13em=208px 居中、1/1 页、背景图正常；艾琳单图插图页仍 fullpage-image 全屏。sanitize.test.ts +1，测试 **103 → 104 项**。
 
 **用户已明示还有别的问题没报**（"因为还有其他的问题"）——接手后第一件事应是问用户要具体问题，而不是先打包。
 
