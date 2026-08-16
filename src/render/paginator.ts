@@ -58,6 +58,16 @@ export class ChapterPaginator {
   private reflowSeq = 0;
   /** 最近点击的脚注标记元素（供弹层随重排重新定位） */
   private lastFootnoteEl: HTMLElement | null = null;
+  /** 第二遍 margin 处理写回过的元素与原始 inline 值（下次测量前恢复） */
+  private marginFixes: Array<{
+    el: HTMLElement;
+    left: string;
+    right: string;
+  }> = [];
+  /** fit-content 补偿写回过的元素与原始 inline max-width（下次测量前恢复） */
+  private fitContentFixes: Array<{ el: HTMLElement; maxWidth: string }> = [];
+  /** float 收缩补偿写回过的元素（下次测量前清除 width） */
+  private floatFixes: HTMLElement[] = [];
 
   /** 阅读位置锚点：页中心元素（子树元素序号 + 元素内横向比例 + 字数位置） */
   private anchor: {
@@ -89,7 +99,9 @@ export class ChapterPaginator {
       rect: { left: number; top: number; right: number; bottom: number }
     ) => void,
     /** 桌面端 hover 离开脚注标记时关闭弹层（移动端无 hover，弹层由点击/✕ 关闭） */
-    private onFootnoteClose?: () => void
+    private onFootnoteClose?: () => void,
+    /** 外部链接（http/https/mailto/tel）点击回调，由 App 层调系统默认浏览器打开 */
+    private onExternalLink?: (url: string) => void
   ) {}
 
   /** 加载一章。path 为规范化内部路径。 */
@@ -186,8 +198,22 @@ export class ChapterPaginator {
     const doc = this.contentDoc;
     const viewer = this.viewer;
     if (!doc || !viewer) return;
-    const pageW =
-      viewer.parentElement?.clientWidth || this.iframe.clientWidth || viewer.clientWidth;
+    // 第二遍 margin / fit-content 处理写回的 inline 值要先恢复，
+    // 避免字号/窗口变化后按旧值布局
+    this.restoreBookMargins();
+    this.restoreFitContentFix();
+    this.restoreFloatWidths();
+    const parent = viewer.parentElement;
+    const parentCs = parent && doc.defaultView ? doc.defaultView.getComputedStyle(parent) : null;
+    const baseW = parent?.clientWidth || this.iframe.clientWidth || viewer.clientWidth;
+    // 书可能声明 body padding（如 LK 的 0 5px），分页宽度要用内容区宽度，
+    // 否则 viewer 会溢出 body 右侧，出现横向滚动条。
+    const pageW = Math.max(
+      0,
+      baseW -
+        (parseFloat(parentCs?.paddingLeft ?? "") || 0) -
+        (parseFloat(parentCs?.paddingRight ?? "") || 0)
+    );
     const em = this.settings.fontSizePx;
     // 容器全宽：正文版心由注入 CSS 的 em 上限居中控制，
     // 全页图块（.illus 等）豁免限制、占满整页
@@ -227,6 +253,292 @@ export class ChapterPaginator {
       ),
       timeout(2000),
     ]);
+    this.applyBookMargins();
+    this.applyFitContentFix();
+    this.applyFloatShrinkFix();
+  }
+
+  /** 恢复上一轮 margin 后处理写回的 inline 值。 */
+  private restoreBookMargins(): void {
+    for (const fix of this.marginFixes) {
+      fix.el.removeAttribute("data-reader-margin-fixed");
+      if (fix.left === "") fix.el.style.removeProperty("margin-left");
+      else fix.el.style.setProperty("margin-left", fix.left);
+      if (fix.right === "") fix.el.style.removeProperty("margin-right");
+      else fix.el.style.setProperty("margin-right", fix.right);
+    }
+    this.marginFixes = [];
+  }
+
+  /**
+   * 第二遍 margin 处理（C-04）：
+   * 先让阅读器默认居中规则渲染（第一遍已发生），再检查页面直接子元素
+   * 在“纯书 CSS”下是否有非零左右 margin；有则写回书的真实 margin，
+   * 否则保持阅读器默认居中。书的通用 reset（div{margin:0}）得到的是 0，
+   * 不会进入写回，因此不会被误判为具体布局。
+   */
+  private applyBookMargins(): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !doc.defaultView) return;
+    const win = doc.defaultView;
+
+    const readerSheet = Array.from(doc.styleSheets).find(
+      (s) => (s.ownerNode as Element | null)?.getAttribute?.("data-reader") === "overrides"
+    );
+    const candidates = Array.from(viewer.children).filter(
+      (c): c is HTMLElement =>
+        c.nodeType === 1 &&
+        !c.classList.contains("illus") &&
+        !c.classList.contains("kuchie") &&
+        !c.classList.contains("cover") &&
+        !c.classList.contains("duokan-image-single") &&
+        !c.classList.contains("duokan-image-fullscreen")
+    );
+    if (candidates.length === 0) return;
+
+    // 第一遍：记录阅读器默认居中后的元素宽度与原始 max-width 意图。
+    // 注意：多栏里元素若跨列碎片，getBoundingClientRect().width 会把碎片
+    // 并成一个超宽矩形，必须用 computed width。
+    const widths = new Map<HTMLElement, number>();
+    const maxWidths = new Map<HTMLElement, string>();
+    for (const el of candidates) {
+      void el.offsetWidth;
+      const cs = win.getComputedStyle(el);
+      const usedW = parseFloat(cs.width);
+      widths.set(
+        el,
+        Number.isFinite(usedW) && usedW > 0 ? usedW : el.getBoundingClientRect().width
+      );
+      maxWidths.set(el, cs.maxWidth);
+    }
+
+    if (readerSheet) readerSheet.disabled = true;
+    try {
+      for (const el of candidates) {
+        // 同一测量周期内已修正过则跳过，避免把上次写回的 margin
+        // 再当成书 margin 叠加一次（导致 namebox 732/-32 这类错误）。
+        if (el.hasAttribute("data-reader-margin-fixed")) continue;
+        void el.offsetWidth;
+        const cs = win.getComputedStyle(el);
+        const left = cs.marginLeft;
+        const right = cs.marginRight;
+        const parent = el.parentElement;
+        const parentCs = parent && doc.defaultView ? doc.defaultView.getComputedStyle(parent) : null;
+        const parentW =
+          (parent?.clientWidth ?? viewer.clientWidth) -
+          (parseFloat(parentCs?.paddingLeft ?? "") || 0) -
+          (parseFloat(parentCs?.paddingRight ?? "") || 0);
+        const width = widths.get(el) ?? el.getBoundingClientRect().width;
+        const meaningful = (v: string): boolean =>
+          v !== "auto" && v !== "" && parseFloat(v) !== 0;
+        const originalMaxWidth = maxWidths.get(el) ?? "";
+
+        // 书明确写了“收缩到内容宽度”（fit-content / max-content）且没有
+        // 左右 margin：这是左对齐的内容容器，应放到版心列左缘，而不是
+        // 被 L3 强制居中或贴在窗口最左。
+        if (
+          !meaningful(left) &&
+          !meaningful(right) &&
+          /(?:fit-content|max-content)/.test(originalMaxWidth)
+        ) {
+          const columnW = TEXT_MEASURE.maxEm * this.settings.fontSizePx;
+          const desiredLeft = Math.max(0, (parentW - columnW) / 2);
+          this.marginFixes.push({
+            el,
+            left: el.style.marginLeft,
+            right: el.style.marginRight,
+          });
+          el.setAttribute("data-reader-margin-fixed", "1");
+          el.style.setProperty("margin-left", `${desiredLeft}px`, "important");
+          el.style.setProperty(
+            "margin-right",
+            `${parentW - desiredLeft - width}px`,
+            "important"
+          );
+          continue;
+        }
+
+        if (!meaningful(left) && !meaningful(right)) continue;
+
+        const autoCenter = (parentW - width) / 2;
+        const autoLike =
+          parseFloat(left) !== 0 &&
+          Math.abs(parseFloat(left) - parseFloat(right)) < 0.5 &&
+          Math.abs(parseFloat(left) - autoCenter) < 0.5;
+        if (autoLike) continue;
+
+        // 把书的不对称 margin 解释为“相对居中版心列的缩进”：
+        // 正文列左缘 = (parent - width)/2；书 margin-left:2em 意味着
+        // 元素左缘再缩进 2em，与正文首行 text-indent 对齐。
+        const ml = parseFloat(left) || 0;
+        const mr = parseFloat(right) || 0;
+        const base = (parentW - width) / 2;
+        let desiredLeft: number;
+        let desiredRight: number;
+        if (ml > 0) {
+          desiredLeft = base + ml;
+          desiredRight = parentW - desiredLeft - width;
+        } else if (mr > 0) {
+          desiredRight = base + mr;
+          desiredLeft = parentW - desiredRight - width;
+        } else {
+          continue;
+        }
+
+        this.marginFixes.push({
+          el,
+          left: el.style.marginLeft,
+          right: el.style.marginRight,
+        });
+        el.setAttribute("data-reader-margin-fixed", "1");
+        el.style.setProperty("margin-left", `${desiredLeft}px`, "important");
+        el.style.setProperty("margin-right", `${desiredRight}px`, "important");
+      }
+    } finally {
+      if (readerSheet) readerSheet.disabled = false;
+    }
+  }
+
+  /** 恢复上一轮 fit-content 补偿写回的 inline max-width。 */
+  private restoreFitContentFix(): void {
+    for (const fix of this.fitContentFixes) {
+      fix.el.style.setProperty("max-width", fix.maxWidth);
+    }
+    this.fitContentFixes = [];
+  }
+
+  /**
+   * L5-C09：CSS 多栏里 max-width:fit-content 计算异常（简介等会塌成
+   * 逐字窄条或拉成整页宽）。统一把这类元素的上限改为版心 40rem，
+   * 宽容器时得到正常版心宽度，窄容器时仍受父容器约束。
+   */
+  private applyFitContentFix(): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !doc.defaultView) return;
+    const win = doc.defaultView;
+    for (const el of Array.from(viewer.querySelectorAll("*")) as HTMLElement[]) {
+      if (el.closest(".illus, .kuchie, .cover, .duokan-image-single, .duokan-image-fullscreen")) {
+        continue;
+      }
+      const mw = win.getComputedStyle(el).maxWidth;
+      if (!mw.includes("fit-content")) continue;
+      this.fitContentFixes.push({ el, maxWidth: el.style.maxWidth });
+      el.style.setProperty("max-width", `${TEXT_MEASURE.maxEm}rem`);
+    }
+  }
+
+  /** 清除上一轮 float 收缩补偿写回的 width。 */
+  private restoreFloatWidths(): void {
+    for (const el of this.floatFixes) el.style.removeProperty("width");
+    this.floatFixes = [];
+  }
+
+  /**
+   * L5-C08：CSS 多栏里浮动元素的 shrink-to-fit 异常（气泡塌成逐字宽）。
+   * 用 Canvas 逐文本节点测量 max-content，按父容器可用宽度收缩并写回 px，
+   * 恢复“短内容包住文字、长内容到边换行”。只处理纯 inline 内容的浮动
+   * 元素；测量不到字体宽度（无可用字体）时跳过。
+   */
+  private applyFloatShrinkFix(): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !doc.defaultView) return;
+    const win = doc.defaultView;
+    const canvas = doc.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const familiesOf = (fontFamily: string): string[] =>
+      fontFamily
+        .split(",")
+        .map((f) => f.trim().replace(/^["']|["']$/g, ""))
+        .filter(Boolean);
+
+    const textWidth = (text: string, parent: Element | null): number => {
+      if (!text) return 0;
+      const cs = parent ? win.getComputedStyle(parent) : null;
+      const families = cs ? familiesOf(cs.fontFamily) : ["sans-serif"];
+      const style = cs
+        ? `${cs.fontWeight} ${cs.fontSize}`
+        : "400 16px";
+      for (const family of families) {
+        ctx.font = `${style} ${family}`;
+        const w = ctx.measureText(text).width;
+        if (w > 0) return w;
+      }
+      return 0;
+    };
+
+    const measureNode = (node: Node): number => {
+      if (node.nodeType === 3) {
+        return textWidth(node.textContent ?? "", node.parentElement);
+      }
+      if (node.nodeType !== 1) return 0;
+      const el = node as HTMLElement;
+      if (el.tagName.toLowerCase() === "br") return 0;
+      const cs = win.getComputedStyle(el);
+      const tag = el.tagName.toLowerCase();
+      if (tag !== "img" && tag !== "svg" && cs.display !== "inline") return 0;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0) return r.width;
+      const img = el as HTMLImageElement;
+      if (img.naturalWidth) return img.naturalWidth;
+      return 0;
+    };
+
+    for (const el of Array.from(viewer.querySelectorAll("*")) as HTMLElement[]) {
+      const cs = win.getComputedStyle(el);
+      if (cs.float === "none") continue;
+      if (/\bwidth\s*:/.test(el.getAttribute("style") ?? "")) continue;
+      // 只修复“塌缩成逐字宽”的浮动元素；已有明确宽度且正常布局
+      // （如目录标题 width:100% + float:left）不处理。
+      const currentWidth = parseFloat(cs.width);
+      if (!Number.isFinite(currentWidth) || currentWidth > 48) continue;
+      if (
+        Array.from(el.children).some((c) => {
+          const d = win.getComputedStyle(c as Element).display;
+          return (
+            d.startsWith("block") ||
+            d.startsWith("list-item") ||
+            d === "table" ||
+            d === "flex"
+          );
+        })
+      ) {
+        continue;
+      }
+      let maxContent = 0;
+      let lineWidth = 0;
+      for (const n of Array.from(el.childNodes)) {
+        if (n.nodeType === 1 && (n as HTMLElement).tagName.toLowerCase() === "br") {
+          maxContent = Math.max(maxContent, lineWidth);
+          lineWidth = 0;
+          continue;
+        }
+        lineWidth += measureNode(n);
+      }
+      maxContent = Math.max(maxContent, lineWidth);
+      if (maxContent <= 0) continue;
+      const padding =
+        (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+      const border =
+        (parseFloat(cs.borderLeftWidth) || 0) +
+        (parseFloat(cs.borderRightWidth) || 0);
+      const parent = el.parentElement;
+      const parentCs =
+        parent && doc.defaultView ? doc.defaultView.getComputedStyle(parent) : null;
+      const avail =
+        (parent ? parent.clientWidth : viewer.clientWidth) -
+        (parseFloat(parentCs?.paddingLeft ?? "") || 0) -
+        (parseFloat(parentCs?.paddingRight ?? "") || 0) -
+        (parseFloat(cs.marginLeft) || 0) -
+        (parseFloat(cs.marginRight) || 0);
+      const target = Math.max(0, Math.min(maxContent + padding + border, avail));
+      el.style.setProperty("width", `${target}px`);
+      this.floatFixes.push(el);
+    }
   }
 
   private recompute(useAnchor: boolean): void {
@@ -538,7 +850,12 @@ export class ChapterPaginator {
     // 一律拦截：书内链接走阅读器，外部链接不跳转（防 iframe 被导航走）
     e.preventDefault();
     e.stopPropagation();
-    if (isExternalUrl(href) || href.startsWith("//")) return;
+    if (isExternalUrl(href) || href.startsWith("//")) {
+      const url = href.startsWith("//") ? `https:${href}` : href;
+      // 只放行可由系统默认应用安全打开的协议；data:/blob:/file: 等保持忽略
+      if (/^(https?|mailto|tel):/i.test(url)) this.onExternalLink?.(url);
+      return;
+    }
     // 脚注标记：多看/掌阅式 + script.js 的 <note><sup><a href="#asideId"> 通用模式
     if (isFootnoteLink(a) && this.contentDoc) {
       const info = resolveFootnote(this.contentDoc, a);
@@ -615,6 +932,41 @@ export class ChapterPaginator {
         );
       }
       lines.push(`children=${viewer.children.length} textLen=${(viewer.textContent ?? "").trim().length}`);
+      const imgs = Array.from(viewer.querySelectorAll("img"))
+        .slice(0, 6)
+        .map((im) => {
+          const r = (im as HTMLElement).getBoundingClientRect();
+          return `${im.getAttribute("alt") || "-"}:${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.left)},${Math.round(r.top)}`;
+        })
+        .join(" ");
+      lines.push(`imgs=${imgs || "none"}`);
+      // 布局排障辅助：fit-content 在多栏里常异常；宽出栏宽的元素也需要列出来
+      const fitContentEls = Array.from(viewer.querySelectorAll("*"))
+        .filter((el) => {
+          const mw = doc.defaultView?.getComputedStyle(el as Element).maxWidth ?? "";
+          return mw.includes("fit-content");
+        })
+        .slice(0, 5)
+        .map((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return `${(el as Element).tagName.toLowerCase()}.${(el as Element).getAttribute("class") ?? ""}:${Math.round(r.width)}px`;
+        })
+        .join(" ");
+      lines.push(`fitContentEls=${fitContentEls || "none"}`);
+      const wideEls = Array.from(viewer.querySelectorAll("*"))
+        .filter((el) => {
+          // 多栏里 getBoundingClientRect 会把跨列碎片并成一个超宽矩形，
+          // 用 computed width 判断“真实盒宽”是否超栏，避免碎片误报。
+          const w = parseFloat(doc.defaultView?.getComputedStyle(el as Element).width ?? "");
+          return Number.isFinite(w) && w > this.step + 1;
+        })
+        .slice(0, 5)
+        .map((el) => {
+          const w = parseFloat(doc.defaultView?.getComputedStyle(el as Element).width ?? "");
+          return `${(el as Element).tagName.toLowerCase()}.${(el as Element).getAttribute("class") ?? ""}:${Math.round(w)}px`;
+        })
+        .join(" ");
+      lines.push(`wideEls=${wideEls || "none"}`);
       lines.push(`sheets=${doc.styleSheets.length}`);
       const fonts = (doc as unknown as { fonts?: { status?: string } }).fonts;
       lines.push(`fontsStatus=${fonts?.status ?? "n/a"}`);

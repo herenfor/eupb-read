@@ -45,6 +45,8 @@ interface ReaderViewProps {
   onIssues(issues: string[]): void;
   /** 书内链接跳转（已解析为书内路径，含可选 #anchor） */
   onInternalLink(href: string): void;
+  /** 外部链接（http/https/mailto/tel）交给系统默认浏览器/应用打开 */
+  onExternalLink(url: string): void;
   /** 脚注弹层（文本 + 标记在阅读区坐标系的矩形） */
   onFootnote(
     text: string,
@@ -138,7 +140,8 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
           bottom: rect.bottom + dy,
         });
       },
-      () => props.onFootnoteClose()
+      () => props.onFootnoteClose(),
+      (url) => props.onExternalLink(url)
     );
     paginatorRef.current = p;
     return () => {

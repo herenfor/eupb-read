@@ -67,6 +67,21 @@ describe("sanitizeChapter", () => {
     expect(out).toContain("#1e1e1e");
   });
 
+  it("书在 body 上声明的字体保留，阅读器 fallback 只在 html 层", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>body,iframe{font-family:main,emoji,sym;} @font-face{font-family:"main";src:url(../Fonts/main.ttf)}</style>
+</head><body><p>正文</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    // 书的 body 字体声明完整保留（含 url 改写）
+    expect(out).toContain("body,iframe{font-family:main,emoji,sym;}");
+    expect(out).toContain('url("blob:test/OEBPS/Fonts/main.ttf")');
+    // 阅读器 fallback 移到 html，body 规则不再覆盖 font-family
+    expect(out).toContain('font-family: "Segoe UI"');
+    expect(out).toContain("html { font-size: 16px !important; font-family:");
+    expect(out).toMatch(/body\s*\{\s*color:[^}]*\}/);
+    expect(out).not.toMatch(/body\s*\{\s*color:[^}]*font-family:/);
+  });
+
   it("严格 XML 失败时降级 HTML 并标记", async () => {
     // 重复属性在 XML 模式属于致命错误（浏览器 DOMParser 与 xmldom 均报告）
     const broken = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="a" id="b">重复属性</p></body></html>`;
@@ -103,6 +118,24 @@ describe("sanitizeChapter", () => {
     expect(out).toContain("正文第二段");
   });
 
+  it("非 void 标签的自闭合写法不吞后续文本（如目录页 C<span/>O<span/>N...）", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>.em05{font-size:0.5em}</style>
+</head><body><p class="fbox">C<span class="em05"/>O<span class="em05"/>N<span class="em05"/>T<span class="em05"/>S</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    // 空 span 被显式闭合，后面的字母不再落入 0.5em 的 span
+    expect(out).toContain('<span class="em05"></span>');
+    expect(out).toContain("</span>O<span");
+    expect(out).toContain("</span>S</p>");
+  });
+
+  it("void 标签（br/img）的自闭合写法保持原样", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>第一行<br/><img src="a.png" alt="x"/></p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).toContain("<br/>");
+    expect(out).toContain('src="blob:test/OEBPS/Text/a.png"');
+  });
+
   it("样式表内容被改写（@import 链 + url 相对路径）", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
 <link rel="stylesheet" href="../css/main.css"/>
@@ -137,7 +170,7 @@ describe("sanitizeChapter", () => {
     const rewritten = decodeURIComponent(
       /href="blob:css\/text\/css\/([^"]+)"/.exec(res.html)![1]
     );
-    expect(rewritten).toContain(".paper { width: 36em; }");
+    expect(rewritten).toContain(".paper { width: min(90%, 36rem); }");
     expect(rewritten).toContain(".paper { max-width: 30em; }");
     expect(rewritten).not.toContain("@import url(");
   });
@@ -145,7 +178,7 @@ describe("sanitizeChapter", () => {
   it("主题覆盖样式尊重书声明的更窄 max-width（类规则优先）", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><div class="paper">信件</div></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    expect(out).toContain(`:where(#${VIEWER_ID}) :not(img)`);
+    expect(out).toContain(`:where(#${VIEWER_ID} .reader-top)`);
     expect(out).toContain("max-width: 40rem;");
     expect(out).not.toContain("max-width: 40rem !important");
   });
@@ -156,7 +189,7 @@ describe("sanitizeChapter", () => {
 <style>.toc{margin:0 0 0.5em}.bg1box{margin-right:2em}.bg2box{margin-left:2em}</style>
 </head><body><div class="toc bg1box">一</div><div class="toc bg2box">二</div></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    expect(out).toContain("margin-left: auto;");
+    expect(out).toContain("margin-left: auto !important;");
     // 书规则完整保留
     expect(out).toContain("margin-right:2em");
     expect(out).toContain("margin-left:2em");
@@ -230,8 +263,8 @@ describe("sanitizeChapter", () => {
 <p class="cut"><img alt="kugiri" src="kugiri.png"/></p>
 </body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    // 通用图片规则：不再有 height: auto !important（会压掉 .cut img{height:2em}）
-    expect(out).toContain("max-width: 100% !important; object-fit: contain");
+    // 通用图片规则：零特异性默认值，书的 img 规则可覆盖
+    expect(out).toContain("max-width: 100%; object-fit: contain");
     expect(out).not.toContain("height: auto !important");
   });
 
@@ -254,14 +287,25 @@ describe("sanitizeChapter", () => {
     expect(out).not.toContain('data-reader="bgcolor"');
   });
 
-  it("width:% 内联样式换算为版心宽度（90% → 36em）", async () => {
+  it("width:% 内联样式与 width 属性改写为 min（90% → min(90%, 36rem)）", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
 <div style="width:90%; padding:1em" id="b">x</div>
 <table width="50%"><tr><td>y</td></tr></table>
 </body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    expect(out).toContain("width: 36em");
-    expect(out).toContain("width: 20em");
+    expect(out).toContain("width: min(90%, 36rem)");
+    expect(out).toContain("width: min(50%, 20rem)");
+  });
+
+  it("内联 style 的 max-width/min-width 百分比不改写", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div style="max-width:50%; min-width:50%">x</div>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).toContain("max-width:50%");
+    expect(out).toContain("min-width:50%");
+    expect(out).not.toContain("max-min(");
+    expect(out).not.toContain("min-min(");
   });
 
   it("全页图块内部 / 已定宽祖先内部 / img 的 width:% 不换算", async () => {
@@ -272,7 +316,7 @@ describe("sanitizeChapter", () => {
 </body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
     expect(out).toContain('style="width:90%"');
-    expect(out).not.toContain("width: 36em");
+    expect(out).not.toContain("width: min(90%, 36rem)");
   });
 
   it("table 不再豁免版心限宽（width:90% 的表格同样收进版心）", async () => {
@@ -287,8 +331,59 @@ describe("sanitizeChapter", () => {
 <style>.paper{width:90%;background:url(../img/bg.png)}</style>
 </head><body><div class="paper">x</div></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    expect(out).toContain("width: 36em");
+    expect(out).toContain("width: min(90%, 36rem)");
     expect(out).toContain('url("blob:test/OEBPS/img/bg.png")');
+  });
+
+  it("深色主题下 ruby 注音 rt 随主题前景色换色", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>ruby>rt{color:#333}</style>
+</head><body><p><ruby>漢<rt>kan</rt></ruby></p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "dark" },
+    });
+    expect(out).toContain(`#${VIEWER_ID} rt { color: #d4d4d4; }`);
+  });
+
+  it("fit-content 补偿不写死在 sanitize（由分页器运行时统一处理）", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><div class="summary"><h3>简介</h3><p>正文</p></div></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).not.toContain(`#${VIEWER_ID} .summary { max-width: 40rem; }`);
+    expect(out).toContain("fit-content 多栏异常");
+  });
+
+  it("深色主题下目录链接换为深色模式浅蓝（Sigil 风格）", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><div class="toc"><a href="x.xhtml"><p>条目</p></a></div></body></html>`;
+    const dark = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "dark" },
+    });
+    expect(dark.html).toContain(`#${VIEWER_ID} .toc a { color: #6cb2ff; }`);
+    const light = await sanitizeChapter(html, opts());
+    expect(light.html).not.toContain("#6cb2ff");
+  });
+
+  it("深色主题下着重号 text-emphasis 随前景色换色", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>.dot{text-emphasis:circle #000}</style>
+</head><body><p><span class="dot">着重</span></p></body></html>`;
+    const dark = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "dark" },
+    });
+    expect(dark.html).toContain("text-emphasis-color: #d4d4d4");
+    const light = await sanitizeChapter(html, opts());
+    expect(light.html).not.toContain("text-emphasis-color");
+  });
+
+  it("脚注标记图标用 middle 垂直对齐（书里的 top 会顶到上一行）", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>正文<sup><a class="duokan-footnote" href="#n1"><img class="zhangyue-footnote" alt="note" src="note.png"/></a></sup></p>
+<aside id="n1">注：内容</aside></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).toContain("vertical-align: middle;");
+    expect(out).not.toContain("vertical-align: top;");
   });
 
   it("script.js 模式的 <note> 内 aside 也被隐藏（正文中不显示注释块）", async () => {

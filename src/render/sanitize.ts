@@ -64,24 +64,15 @@ function buildOverrideCss(s: ReaderSettings): string {
     s.fontFamily ??
     `"Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif`;
   const maxEm = TEXT_MEASURE.maxEm;
-  const footnoteCss = `
-/* 脚注标记小图标：按书的设计随字号缩放，不被通用图片规则放大 */
-#${VIEWER_ID} sup img,
-#${VIEWER_ID} .duokan-footnote img,
-#${VIEWER_ID} .zhangyue-footnote img {
-  height: 1.2em !important;
-  width: auto !important;
-  max-width: none !important;
-  max-height: none !important;
-  vertical-align: top;
-  border: 0;
-}
-/* 脚注内容（aside）：从正文流隐藏，由阅读器弹层显示。
-   第二段兼容 script.js（LK 参考脚本）的书：<note> 内 aside 即弹注内容，
-   即使书没标 epub:type 也要隐藏，否则正文会多出一块注释块。 */
+
+  // ---- L1 安全/阅读器底线：脚注 aside 必须从正文流隐藏 ----
+  const securityCss = `
+/* [L1 安全] 脚注内容（aside）：从正文流隐藏，由阅读器弹层显示。
+   第二段兼容 script.js（LK 参考脚本）的书：<note> 内 aside 即弹注内容。 */
 #${VIEWER_ID} aside[epub\\:type="footnote"],
 #${VIEWER_ID} note aside { display: none !important; }`;
-  // 排版属性（未设置 = 跟随书的定义）
+
+  // ---- L2 用户设置：行高/字重/字距/词距，书不能覆盖 ----
   const typeCss = [
     s.lineHeight !== undefined ? `line-height: ${s.lineHeight} !important;` : "",
     s.fontWeight !== undefined ? `font-weight: ${s.fontWeight} !important;` : "",
@@ -92,36 +83,34 @@ function buildOverrideCss(s: ReaderSettings): string {
   ]
     .filter(Boolean)
     .join(" ");
-  return `
-html, body { position: relative; height: 100%; margin: 0 !important; padding: 0 !important; }
-/* 行文自适应：容器全宽；正文版心由块级元素限宽居中（rem 随正文字号缩放）。
-   max-width 必须用 rem 而不是 em：em 相对元素自身 font-size，
-   书中 0.75em/1.05em 这类不同字号的元素会得到不同版心宽度并错位。
-   特异性分层：:where(#viewer) :not(img) = (0,0,1)
-   - 高于/等于书的通用元素规则（如 div{margin:0}），且注入在最后 → 默认居中生效
-   - 低于书的类规则（如 .toc{margin...}、.paper{max-width:30em}）→ 书布局声明优先 */
-#${VIEWER_ID} { height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }
-:where(#${VIEWER_ID}) :not(img) {
+
+  // ---- L3 阅读器默认版心：只作用于页面直接子（reader-top） ----
+  // max-width 用 rem（em 相对元素自身字号，不同字号会得到不同版心宽度）；
+  // max-width 用零特异性，让书类规则（.paper{max-width:30em}）可覆盖；
+  // margin auto 需要 important，压过书的通用 reset（div{margin:0}）。
+  const measureCss = `
+/* [L3 默认版心] viewer 直接子打 reader-top 标记；嵌套元素不在默认层。 */
+:where(#${VIEWER_ID} .reader-top) {
   max-width: ${maxEm}rem;
-  margin-left: auto;
-  margin-right: auto;
-  ${typeCss}
 }
-/* 页面级元素强制版心居中：标题、正文段、分隔符（.cut）等都是 viewer 的
-   直接子，即使书用类写了 margin:0 也必须水平居中（text-align:center 的
-   盒子若贴左，文字整体就偏左）。直接子在 sanitize 阶段被打上 reader-top
-   标记；嵌套元素（目录条目等）没有标记，书布局生效。
-   （不能用 ">" 子选择器：序列化会转义成 &gt;，RAWTEXT 不解码导致失效。） */
 :where(#${VIEWER_ID}) .reader-top {
   margin-left: auto !important;
   margin-right: auto !important;
-}
-${footnoteCss}
-/* 正文普通图片：只限制溢出，不覆盖书定义的高度（如 .cut img{height:2em}）。
-   object-fit:contain 保证被列宽压缩时按比例缩放不拉伸变形。 */
-#${VIEWER_ID} img { max-width: 100% !important; object-fit: contain; }
-#${VIEWER_ID} img, #${VIEWER_ID} video, #${VIEWER_ID} svg { max-height: 100% !important; }
-/* 全页图片块：豁免版心限制，占满一整页（正文中的插图页） */
+}`;
+
+  // ---- L5 引擎兼容补偿：Chromium 多栏布局 bug 的最小兜底 ----
+  // fit-content 的补偿改为运行时统一处理（ChapterPaginator.applyFitContentFix），
+  // 这里不再为 .summary 写特判。
+  const compatCss = `/* [L5-C09] fit-content 多栏异常：由分页器运行时统一补偿。 */`;
+
+  // ---- L1 安全/L3 版式约束：图片防溢出 + 脚注图标 ----
+  const imageCss = `
+/* [L3/L1] 正文普通图片：只限制溢出，不覆盖书定义的高度；
+   object-fit:contain 保证被列宽压缩时按比例缩放不拉伸。
+   用零特异性，书的 img 规则（包括 class）可覆盖。 */
+:where(#${VIEWER_ID}) img { max-width: 100%; object-fit: contain; }
+:where(#${VIEWER_ID}) img, :where(#${VIEWER_ID}) video, :where(#${VIEWER_ID}) svg { max-height: 100%; }
+/* [L3] 全页图片块：豁免版心限制，占满一整页（正文中的插图页）。 */
 #${VIEWER_ID} .illus, #${VIEWER_ID} .kuchie, #${VIEWER_ID} .cover,
 #${VIEWER_ID} .duokan-image-single, #${VIEWER_ID} .duokan-image-fullscreen {
   max-width: none !important;
@@ -141,11 +130,50 @@ ${footnoteCss}
   border: none !important;
   object-fit: contain;
 }
-html { font-size: ${s.fontSizePx}px !important; }
-/* 主题只覆盖背景色，不能写 background 简写：简写会把书在 body 上
-   声明的 background-image（如目录页背景图）重置为 none。 */
-body { color: ${fg}; background-color: ${bg}; font-family: ${family}; }
-`;
+/* [L3] 脚注标记小图标：随字号缩放，middle 对齐（书常用 top 顶到上一行）。 */
+#${VIEWER_ID} sup img,
+#${VIEWER_ID} .duokan-footnote img,
+#${VIEWER_ID} .zhangyue-footnote img {
+  height: 1.2em !important;
+  width: auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  vertical-align: middle;
+  border: 0;
+}`;
+
+  // ---- L2 用户设置：字号/主题/字体 fallback（书 body 字体声明优先） ----
+  const themeCss = `
+/* [L2] 字体 fallback 只放 html；书在 body 上的内嵌字体声明优先。 */
+html { font-size: ${s.fontSizePx}px !important; font-family: ${family}; }
+/* [L2] 主题只覆盖背景色，不用 background 简写（会重置书的 body 背景图）。 */
+body { color: ${fg}; background-color: ${bg}; }
+/* [L2] ruby 注音 rt 随主题换色（书常固定 ruby>rt{color:#333}）。 */
+#${VIEWER_ID} rt { color: ${fg}; }
+${
+  s.theme === "dark"
+    ? `/* [L2] 深色主题下着重号（text-emphasis）随前景色换色；
+   书常写 text-emphasis:circle #000，深色背景上看不见。 */
+#${VIEWER_ID} * { -webkit-text-emphasis-color: ${fg}; text-emphasis-color: ${fg}; }
+/* [L2] 深色主题目录链接换色：书常写 .toc a{color:#000}。
+   与 Sigil 深色预览一致的浅蓝。 */
+#${VIEWER_ID} .toc a { color: #6cb2ff; }`
+    : ""
+}`;
+
+  return [
+    `html, body { position: relative; height: 100%; margin: 0 !important; }`,
+    `#${VIEWER_ID} { height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }`,
+    securityCss,
+    `/* [L2] 用户排版属性（未设置 = 跟随书）。 */
+:where(#${VIEWER_ID}) :not(img) {
+  ${typeCss}
+}`,
+    measureCss,
+    compatCss,
+    imageCss,
+    themeCss,
+  ].join("\n");
 }
 
 /**
@@ -164,6 +192,16 @@ export async function sanitizeChapter(
   // 后续全部内容直到 EOF 上不存在的 </script>——内容全部丢失。
   // 先补成正常闭合，再由消毒循环按常规 script 删除。
   htmlText = htmlText.replace(/<script\b([^>]*?)\/\s*>/gi, "<script$1></script>");
+  // 同类问题：<span class="em05"/> 等非 void 标签的自闭合写法会吞掉
+  // 后续文本（如目录页 C<span/>O<span/>N... 让后面字母全变小）。
+  // 统一把非 void 标签补成显式开闭标签；br/img 等 void 标签保持原样。
+  htmlText = htmlText.replace(
+    /<([A-Za-z][\w:.-]*)\b([^>]*?)\/\s*>/g,
+    (match, tag: string, attrs: string) =>
+      /^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(tag)
+        ? match
+        : `<${tag}${attrs}></${tag}>`
+  );
 
   const issues: string[] = [];
   let doc: Document;
@@ -294,9 +332,10 @@ export async function sanitizeChapter(
     child.setAttribute("class", cls ? `${cls} reader-top` : "reader-top");
   }
 
-  // 5.4) 宽度百分比重写：书里的 width:X% 是按“页面≈版心”的阅读器写的，
+  // 5.4) 宽度百分比改写：书里的 width:X% 是按“页面≈版心”的阅读器写的，
   // 我们的页面=窗口全宽、版心=maxEm，若 % 相对整页，90% 的盒子会几乎占满整页。
-  // 换算为版心宽度（em），盒子与正文行宽比例一致。
+  // 改写为 min(X%, X%×maxEm rem)：页面级取版心比例，窄容器（td 等）取书自己的 %。
+  // 仅 0 < X ≤ 100；X > 100 是刻意出血，保持原样。
   // 跳过：img/svg（自有缩放规则）、全页图块内部（% 相对整页有意义）、
   // 已显式定宽祖先内部（% 应相对该祖先，保持原样）。
   const FULLPAGE_CLASS_RE =
@@ -318,8 +357,8 @@ export async function sanitizeChapter(
     }
     return false;
   };
-  const pctToEm = (x: string): string =>
-    `${(parseFloat(x) * TEXT_MEASURE.maxEm) / 100}em`;
+  const pctToMin = (x: string): string =>
+    `min(${x}%, ${(parseFloat(x) * TEXT_MEASURE.maxEm) / 100}rem)`;
   // 注意：findElements 按 localName 精确匹配，无法传 "*"，这里手动递归收集子树元素
   const allEls: Element[] = [];
   const collect = (n: Node): void => {
@@ -336,16 +375,27 @@ export async function sanitizeChapter(
     if (tag === "img" || tag === "svg") continue;
     if (insideFullpage(el) || ancestorHasWidth(el)) continue;
     const st = el.getAttribute("style");
-    if (st && /width\s*:\s*(\d+(?:\.\d+)?)\s*%/i.test(st)) {
+    if (st) {
       el.setAttribute(
         "style",
-        st.replace(/width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi, (_m, x: string) => `width: ${pctToEm(x)}`)
+        st.replace(
+          /(^|;)(\s*)width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi,
+          (match, pre: string, sp: string, x: string) => {
+            const pct = parseFloat(x);
+            return Number.isFinite(pct) && pct > 0 && pct <= 100
+              ? `${pre}${sp}width: ${pctToMin(x)}`
+              : match;
+          }
+        )
       );
     }
     const wAttr = el.getAttribute("width");
     if (wAttr && /^\s*\d+(?:\.\d+)?\s*%\s*$/.test(wAttr)) {
-      const merged = `${el.getAttribute("style") ?? ""} width: ${pctToEm(wAttr)};`.trim();
-      el.setAttribute("style", merged);
+      const pct = parseFloat(wAttr);
+      if (Number.isFinite(pct) && pct > 0 && pct <= 100) {
+        const merged = `${el.getAttribute("style") ?? ""} width: ${pctToMin(String(pct))};`.trim();
+        el.setAttribute("style", merged);
+      }
     }
   }
 

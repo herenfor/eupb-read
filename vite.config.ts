@@ -5,8 +5,9 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: {
-    // 注意：1420 在本机被 Hyper-V 保留段占用（EADDRINUSE），改用 5517
-    port: 5517,
+    // 注意：1420 曾被 Hyper-V 保留段占用；后改 5517，但 2025-08 电脑重启后
+    // 5470-5569 也落入 Windows 保留段（EADDRINUSE），现改用 5173
+    port: 5173,
     strictPort: true,
   },
   build: {

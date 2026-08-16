@@ -51,14 +51,36 @@ b { background: url(data:image/png;base64,AAA=) }`;
     expect(twice).toBe(out);
   });
 
-  it("width:% 换算为版心宽度（40em 的对应比例）", () => {
+  it("width:% 改写为 min(书百分比, 版心比例)（窄容器由浏览器取书自己的 %）", () => {
     const css = `.paper { width: 90%; padding: 1em; }
 .panel { width:100%; }
-@media screen { .note { width: 50%; } }`;
+@media screen { .note { width: 50%; } }
+.toc-link { width:100%; }`;
     const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
-    expect(out).toContain(".paper { width: 36em;");
-    expect(out).toContain(".panel { width: 40em;");
-    expect(out).toContain(".note { width: 20em;");
+    expect(out).toContain(".paper { width: min(90%, 36rem);");
+    expect(out).toContain(".panel { width: min(100%, 40rem);");
+    expect(out).toContain(".note { width: min(50%, 20rem);");
+    // 命定之人目录：.toc-link 的 100% 相对 53px 的 td，
+    // min 让它保持 td 宽度，而不是被固定 40em 拉宽溢出。
+    expect(out).toContain(".toc-link { width: min(100%, 40rem);");
+  });
+
+  it("width:!important 保留重要级，只替换值", () => {
+    const css = `.cut { width: 36% !important; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain("width: min(36%, 14.4rem) !important");
+  });
+
+  it("width>100%（刻意出血）、0% 与 max-/min-width 不改写", () => {
+    const css = `.bleed { width: 120%; }
+.zero { width: 0%; }
+.bounds { max-width: 50%; min-width: 50%; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(".bleed { width: 120%; }");
+    expect(out).toContain(".zero { width: 0%; }");
+    // max-width/min-width 里的 “width:” 子串不能误匹配
+    expect(out).toContain(".bounds { max-width: 50%; min-width: 50%; }");
+    expect(out).not.toContain("min(");
   });
 
   it("全页图块 / img / body 选择器的 width:% 不换算", () => {
@@ -71,6 +93,37 @@ body { width: 90%; }
     expect(out).toContain("img { width: 100%; height: auto; }");
     expect(out).toContain("body { width: 90%; }");
     expect(out).toContain(".duokan-image-single img { width: 100%; }");
+  });
+
+  it("嵌套选择器（含后代组合器）的 width:% 不换算（相对限宽父容器）", () => {
+    const css = `.authorbox { width: 90%; max-width: 14em; }
+.authorbox table { margin: 0 auto; width: 100%; }
+.authorbox td { width: 50%; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    // 顶层简单选择器仍按版心换算
+    expect(out).toContain(".authorbox { width: min(90%, 36rem);");
+    // 嵌套选择器的 % 保留（相对 .authorbox，而非整页）
+    expect(out).toContain(".authorbox table { margin: 0 auto; width: 100%; }");
+    expect(out).toContain(".authorbox td { width: 50%; }");
+  });
+
+  it("纯标签选择器的 width:% 不换算（note/table 的 100% 相对父容器）", () => {
+    const css = `note { display: block; width: 100%; }
+table { width: 100%; }
+p.cut { width: 90%; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain("note { display: block; width: 100%; }");
+    expect(out).toContain("table { width: 100%; }");
+    // 带类选择器仍按版心换算
+    expect(out).toContain("p.cut { width: min(90%, 36rem); }");
+  });
+
+  it("声明了 float 的规则的 width:% 不换算（相对限宽包含块）", () => {
+    const css = `.ctt { width: 100%; float: left; }
+.paper { width: 90%; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(".ctt { width: 100%; float: left; }");
+    expect(out).toContain(".paper { width: min(90%, 36rem); }");
   });
 
   it("@import 链被递归内联：被导入 CSS 的 width:% 与 url() 都按其自身路径改写", () => {
@@ -88,7 +141,7 @@ body { width: 90%; }
       { getText }
     );
     expect(out).toContain("@import default.css → 内联");
-    expect(out).toContain(".paper { width: 36em;");
+    expect(out).toContain(".paper { width: min(90%, 36rem);");
     expect(out).toContain('url("blob:test/OEBPS/Images/bg.png")');
     expect(out).toContain('url("blob:test/OEBPS/Fonts/x.ttf")');
     // 不再残留 @import blob（内容已内联）
@@ -105,7 +158,7 @@ body { width: 90%; }
       { getText }
     );
     expect(out).toContain("@media print {");
-    expect(out).toContain(".paper { width: 20em; }");
+    expect(out).toContain(".paper { width: min(50%, 20rem); }");
   });
 
   it("循环 @import 只内联一次并跳过后续", () => {
@@ -117,6 +170,6 @@ body { width: 90%; }
     };
     const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor, { getText });
     expect(out).toContain("循环 @import 已跳过：a.css");
-    expect(out).toContain(".x { width: 36em; }");
+    expect(out).toContain(".x { width: min(90%, 36rem); }");
   });
 });

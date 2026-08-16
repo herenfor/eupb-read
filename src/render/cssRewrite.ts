@@ -71,22 +71,55 @@ export function rewriteCssUrls(
     (match, dq: string | undefined, sq: string | undefined, bare: string | undefined) =>
       resolveOrKeep((dq ?? sq ?? bare ?? "").trim(), basePath, resolveUrl, match)
   );
-  // width:X% → 换算为 40em 版心宽度（与 sanitize 的 DOM 级重写配套）。
+  // width:X% → 改写为 min(X%, X%×40rem)（与 sanitize 的 DOM 级重写配套）。
   // 书的 % 是按“页面≈版心”的阅读器写的，我们的页面=窗口全宽；
-  // 跳过规则：全页图块（% 相对整页有意义）、img/svg/html/body 选择器。
+  // min() 保留两个候选让浏览器按真实包含块取值：
+  //   - 页面级元素：% 相对窗口（1311px 等），min 取版心比例值，维持 90%→576px 的语义；
+  //   - 窄容器元素（td / authorbox / 浮动父容器）：% 相对窄包含块，
+  //     min 取书自己的 %，不再被固定 em 拉宽溢出。
+  // 仅改写 0 < X ≤ 100；X > 100 表示刻意超出包含块（出血），原样保留。
+  // 跳过规则：全页图块（% 相对整页有意义）、img/svg/html/body 选择器，
+  // 以及带组合器（后代/子代等）的嵌套选择器——它们的 % 相对某个限宽
+  // 父容器（如 .authorbox table{width:100%}），改写会破坏书布局。
+  const hasCombinator = (selector: string): boolean => {
+    // 注释不是选择器的一部分，先剥离再判断（内联 @import 会留下注释）
+    const s = selector.replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+    if (!s || s.startsWith("@")) return false; // @media 等 at-rule 交给内层规则
+    return s
+      .split(",")
+      .some((part) => /[\s>+~]/.test(part.trim()));
+  };
+  // 纯标签选择器（如 note{width:100%}、table{width:100%}）的 % 相对父容器，
+  // 不是页面版心比例，不能换算成固定 em——否则 note 被拉到 40em，
+  // 内部浮动元素可用宽度计算异常（聊天气泡逐字换行）。
+  const isBareTypeSelector = (selector: string): boolean => {
+    const s = selector.replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+    if (!s || s.startsWith("@")) return false;
+    return !/[.#]/.test(s);
+  };
   out = out.replace(/([^{}]*\{)([^{}]*\})/g, (block, head: string, body: string) => {
+    const selector = head.replace(/\s*\{$/, "");
     if (
       /(illus|kuchie|cover|duokan-image-single|duokan-image-fullscreen|\bimg\b|\bsvg\b|\bhtml\b|\bbody\b)/i.test(
-        head
-      )
+        selector
+      ) ||
+      hasCombinator(selector) ||
+      isBareTypeSelector(selector) ||
+      // 浮动元素的 width:% 相对其包含块（如目录页 .ctt{width:100%;float:left}
+      // 相对 21em 的 tocbox），不能按页面版心换算成固定 em。
+      /(?:^|;)\s*float\s*:/i.test(body)
     ) {
       return block;
     }
     return (
       head +
       body.replace(
-        /width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi,
-        (_w, x: string) => `width: ${(parseFloat(x) * TEXT_MEASURE.maxEm) / 100}em`
+        /(^|[;{])(\s*)width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi,
+        (_w, pre: string, sp: string, x: string) => {
+          const pct = parseFloat(x);
+          if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return _w;
+          return `${pre}${sp}width: min(${x}%, ${(pct * TEXT_MEASURE.maxEm) / 100}rem)`;
+        }
       )
     );
   });

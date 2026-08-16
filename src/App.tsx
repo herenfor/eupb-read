@@ -24,6 +24,7 @@ import {
 } from "./ui/storage";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -192,6 +193,19 @@ export default function App() {
       // 保持目录展开：方便连续选择章节；用 ✕/遮罩/Esc 关闭
     }
   };
+
+  // ---- 外部链接：Tauri 用系统默认浏览器，浏览器开发模式开新标签页 ----
+  const handleExternalLink = useCallback((rawUrl: string): void => {
+    const url = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+    if (!/^(https?|mailto|tel):/i.test(url)) return;
+    if (isTauriEnv()) {
+      void openUrl(url).catch((err: unknown) => {
+        setRuntimeIssues((prev) => [...prev, `打开外部链接失败：${String(err)}`]);
+      });
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }, []);
 
   // ---- 阅读进度保存 ----
   useEffect(() => {
@@ -506,6 +520,7 @@ export default function App() {
               onRequestChapter={handleRequestChapter}
               onIssues={handleIssues}
               onInternalLink={handleTocNavigate}
+              onExternalLink={handleExternalLink}
               onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
               onFootnoteClose={() => setFootnote(null)}
               initialAnchor={initialAnchor}
