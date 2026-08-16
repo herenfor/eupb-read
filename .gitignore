@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+targettmp/
 src-tauri/gen/
 .pnpm-store/
 *.log
@@ -12,5 +13,4 @@ src-tauri/gen/
 .xwin-cache/
 .cache/
 .img-repro.png
-targettmp/
 src-tauri/target2/

@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { Book } from "../core/types";
 import { nextLinearIndex, spineItemPath } from "../core/book";
-import { ChapterPaginator, type ChapterState } from "../render/paginator";
+import { ChapterPaginator, type ChapterState, type FootnotePayload } from "../render/paginator";
 import type { ResourceServer } from "../render/resources";
 import type { ReaderSettings } from "../render/settings";
 
@@ -19,6 +19,8 @@ export interface ReaderHandle {
     charsRead: number;
     totalChars: number;
   } | null;
+  /** 跳到页内锚点（注释返回链接等） */
+  jumpToAnchor(anchor: string): void;
   /** 脚注标记当前矩形（阅读区坐标系），弹层随重排重定位用。 */
   getFootnoteMarkerRect(): {
     left: number;
@@ -26,6 +28,8 @@ export interface ReaderHandle {
     right: number;
     bottom: number;
   } | null;
+  /** UI 层关闭固定脚注后同步分页器状态 */
+  dismissFootnote(): void;
 }
 
 interface ReaderViewProps {
@@ -47,11 +51,8 @@ interface ReaderViewProps {
   onInternalLink(href: string): void;
   /** 外部链接（http/https/mailto/tel）交给系统默认浏览器/应用打开 */
   onExternalLink(url: string): void;
-  /** 脚注弹层（文本 + 标记在阅读区坐标系的矩形） */
-  onFootnote(
-    text: string,
-    rect: { left: number; top: number; right: number; bottom: number }
-  ): void;
+  /** 脚注弹层（文本/HTML/固定状态 + 标记在阅读区坐标系的矩形） */
+  onFootnote(payload: FootnotePayload): void;
   /** 桌面端 hover 移出脚注标记时关闭弹层 */
   onFootnoteClose(): void;
   /** 打开书时恢复的阅读锚点（可选，页码之外的精确定位） */
@@ -74,15 +75,15 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   const paginatorRef = useRef<ChapterPaginator | null>(null);
   const spineIndexRef = useRef(spineIndex);
   const autoAdvanceRef = useRef(false);
-  const startAtEndRef = useRef(false);
+  const pendingStartAtEndRef = useRef(false);
   const lastStateRef = useRef<string>("loading");
 
   spineIndexRef.current = spineIndex;
 
-  // 每次请求（nonce 变化）时按 atEnd 武装；消费后归 false，渲染不再重武装
+  // 每次请求（nonce 变化）时按 atEnd 武装；chapter effect 消费后归 false
   useEffect(() => {
     if (props.startAtEnd.atEnd) {
-      startAtEndRef.current = true;
+      pendingStartAtEndRef.current = true;
     }
   }, [props.startAtEnd]);
 
@@ -105,11 +106,6 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
         lastStateRef.current = s.status;
         props.onPageState(s);
         if (s.status !== "ready") return;
-        // 向前回翻：进入上一章时直接翻到最后一页
-        if (startAtEndRef.current) {
-          startAtEndRef.current = false;
-          if (s.pageCount > 1) p.setPage(s.pageCount - 1);
-        }
         // 空章节：自动前进到下一线性章
         if (s.empty && !autoAdvanceRef.current) {
           autoAdvanceRef.current = true;
@@ -122,22 +118,25 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       (href) => props.onInternalLink(href),
       (dir) => turnPageRef.current(dir),
       (dir) => turnPageRef.current(dir),
-      (text, rect) => {
+      (payload) => {
         const iframe = iframeRef.current;
         const main = iframe?.parentElement;
         if (!iframe || !main) {
-          props.onFootnote(text, rect);
+          props.onFootnote(payload);
           return;
         }
         const ir = iframe.getBoundingClientRect();
         const mr = main.getBoundingClientRect();
         const dx = ir.left - mr.left;
         const dy = ir.top - mr.top;
-        props.onFootnote(text, {
-          left: rect.left + dx,
-          top: rect.top + dy,
-          right: rect.right + dx,
-          bottom: rect.bottom + dy,
+        props.onFootnote({
+          ...payload,
+          rect: {
+            left: payload.rect.left + dx,
+            top: payload.rect.top + dy,
+            right: payload.rect.right + dx,
+            bottom: payload.rect.bottom + dy,
+          },
         });
       },
       () => props.onFootnoteClose(),
@@ -164,8 +163,15 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     }
     void (async () => {
       // 目录/翻章是显式章节跳转：即使点的是当前章，也要回到开头或页内锚点，
-      // 而不是沿用旧页号与旧阅读锚点。
-      await p.load(path, { anchor: props.anchor, resetPage: true });
+      // 而不是沿用旧页号与旧阅读锚点。回翻上一章时把 atEnd 交给 paginator：
+      // 由它“翻到最后一页后再显示”，避免先闪第一页。
+      const startAtEnd = pendingStartAtEndRef.current;
+      pendingStartAtEndRef.current = false;
+      await p.load(path, {
+        anchor: props.anchor,
+        resetPage: true,
+        startAtEnd,
+      });
       // 打开书恢复阅读锚点：在 load 清空换章锚点之后、iframe 就绪之前设置
       if (initialAnchorRef.current) {
         p.setReadingAnchor({ path, ...initialAnchorRef.current });
@@ -250,6 +256,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       getReadingAnchor() {
         return paginatorRef.current?.getReadingAnchor() ?? null;
       },
+      jumpToAnchor(anchor) {
+        paginatorRef.current?.jumpToAnchor(anchor);
+      },
       getFootnoteMarkerRect() {
         const p = paginatorRef.current;
         const iframe = iframeRef.current;
@@ -266,6 +275,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
           right: r.right + dx,
           bottom: r.bottom + dy,
         };
+      },
+      dismissFootnote() {
+        paginatorRef.current?.dismissFootnote();
       },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

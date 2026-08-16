@@ -7,6 +7,9 @@
   --btn-hover: #e8e8e8;
   --error: #b3261e;
   --muted: #777777;
+  /* 阅读器弹层滚动条（书架 UI 单独设计，不使用此变量） */
+  --scroll-thumb: rgba(0, 0, 0, 0.25);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.45);
 }
 
 .app {
@@ -28,6 +31,8 @@
   --btn-hover: #333333;
   --error: #ff8a80;
   --muted: #999999;
+  --scroll-thumb: rgba(255, 255, 255, 0.28);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.5);
 }
 
 /* 羊皮纸阅读主题：书架与工具栏同样切换到暖色 UI */
@@ -45,6 +50,8 @@
   --btn-hover: #dfd0ae;
   --error: #b3261e;
   --muted: #8a7c66;
+  --scroll-thumb: rgba(74, 55, 28, 0.28);
+  --scroll-thumb-hover: rgba(74, 55, 28, 0.5);
 }
 
 * {
@@ -629,6 +636,84 @@ body {
   line-height: 1.6;
 }
 
+.footnote-pop.pinned .footnote-card {
+  border-color: var(--accent);
+}
+
+.footnote-html p {
+  margin: 4px 0;
+}
+
+.footnote-html ol,
+.footnote-html ul {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.footnote-html img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px auto;
+  border-radius: 6px;
+}
+
+/* 图片注释：让图片填满列表标号（如 19）左侧的空白，左边对齐卡片内容边缘 */
+.footnote-html li div:has(> img) {
+  margin-left: -20px;
+  margin-right: 0;
+  max-width: none !important;
+}
+
+.footnote-html a {
+  color: inherit;
+  text-decoration: none;
+  cursor: inherit;
+}
+
+/* ---- 阅读器弹层滚动条（目录/菜单/日志/脚注弹层；书架 UI 独立设计） ---- */
+.toc-panel,
+.menu-panel,
+.log-panel,
+.footnote-card {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.toc-panel::-webkit-scrollbar,
+.menu-panel::-webkit-scrollbar,
+.log-panel::-webkit-scrollbar,
+.footnote-card::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.toc-panel::-webkit-scrollbar-track,
+.menu-panel::-webkit-scrollbar-track,
+.log-panel::-webkit-scrollbar-track,
+.footnote-card::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.toc-panel::-webkit-scrollbar-thumb,
+.menu-panel::-webkit-scrollbar-thumb,
+.log-panel::-webkit-scrollbar-thumb,
+.footnote-card::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.toc-panel::-webkit-scrollbar-thumb:hover,
+.menu-panel::-webkit-scrollbar-thumb:hover,
+.log-panel::-webkit-scrollbar-thumb:hover,
+.footnote-card::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
 /* ---- 日志面板 ---- */
 .log-panel {
   color: var(--fg);
@@ -735,8 +820,13 @@ body {
   min-width: 0;
   height: 100%;
   overflow: auto;
-  padding: 14px 20px 32px;
+  padding: 0 20px 32px;
+  scrollbar-width: none; /* 书架隐藏滚动条：滚动区域用渐变/边界提示 */
   zoom: var(--ui-scale, 1);
+}
+
+.shelf-view::-webkit-scrollbar {
+  display: none;
 }
 
 .shelf-view.busy {
@@ -747,14 +837,17 @@ body {
 .shelf-head {
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 6px 0 14px;
+  /* 横向铺满滚动容器，滚动时封住顶部，内容不会从头部与工具栏之间漏出 */
+  margin: 0 -20px 16px;
+  padding: 10px 20px 12px;
   background: var(--bg);
+  border-bottom: 1px solid var(--panel-border);
 }
 
 .shelf-title-block {
@@ -797,23 +890,199 @@ body {
   border-color: var(--accent);
 }
 
-.shelf-sort {
-  padding: 7px 10px;
+/* 书架自定义下拉：胶囊按钮 + 圆角浮层，完全跟随主题 */
+.shelf-select-wrap {
+  position: relative;
+}
+
+.shelf-select-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 92px;
+  padding: 7px 12px 7px 14px;
   border: 1px solid var(--panel-border);
-  border-radius: 8px;
+  border-radius: 999px;
   background: var(--panel-bg);
   color: var(--fg);
   font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.shelf-select-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--panel-border));
+}
+
+.shelf-select-btn:focus-visible {
+  border-color: var(--accent);
+}
+
+.shelf-select-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.shelf-select-arrow {
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 0.14s ease;
+}
+
+.shelf-select-btn.open .shelf-select-arrow {
+  transform: rotate(225deg) translateY(0);
+}
+
+.shelf-select-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  min-width: 124px;
+  width: max-content;
+  max-width: min(180px, calc(100vw - 24px));
+  padding: 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--panel-bg);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.shelf-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.shelf-select-option:hover {
+  background: var(--btn-hover);
+}
+
+.shelf-select-option.selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.shelf-select-check {
+  font-size: 12px;
 }
 
 .shelf-import {
   font-weight: 600;
 }
 
+.shelf-batch-btn {
+  color: var(--error);
+  border: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+  background: color-mix(in srgb, var(--error) 10%, var(--panel-bg));
+}
+
+.shelf-batch-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 20%, var(--panel-bg));
+}
+
+.shelf-select-cancel {
+  font-weight: 600;
+}
+
+.shelf-select-delete {
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 12%, var(--panel-bg));
+  border: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+}
+
+.shelf-select-delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 22%, var(--panel-bg));
+}
+
+/* 批量选择：封面选中态 + 圆形勾选标记 */
+.shelf-view.selection-mode .shelf-card {
+  cursor: pointer;
+}
+
+.shelf-view.selection-mode .shelf-new,
+.shelf-view.selection-mode .shelf-continue {
+  display: none;
+}
+
+.shelf-card.selected .shelf-cover-box {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.shelf-card.selected .shelf-cover-box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.shelf-select-mark {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: var(--panel-bg);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.shelf-card.selected .shelf-select-mark {
+  background: var(--accent);
+  color: #fff;
+  border-color: #fff;
+}
+
 .shelf-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 22px 18px;
+}
+
+.shelf-view.density-comfortable .shelf-grid {
+  gap: 28px 24px;
+}
+
+.shelf-view.density-standard .shelf-grid {
+  gap: 22px 18px;
+}
+
+.shelf-view.density-compact .shelf-grid {
+  gap: 12px 10px;
+}
+
+.shelf-view.density-compact .shelf-card-title {
+  font-size: 12px;
+}
+
+.shelf-view.density-compact .shelf-card-meta {
+  min-height: 22px;
 }
 
 .shelf-card {
@@ -1066,28 +1335,42 @@ body {
   font-size: 13px;
 }
 
-/* 导入结果提示（成功/部分失败/失败） */
-.shelf-notice {
-  margin: 10px 20px 0;
-  padding: 9px 14px;
-  border-radius: 10px;
+/* 导入结果 toast：底部居中浮出，3 秒后 1 秒淡出；不拦截鼠标 */
+.shelf-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 280;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 10px 18px;
+  border-radius: 999px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.25);
   font-size: 13px;
   line-height: 1.5;
+  text-align: center;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 1s ease;
 }
 
-.shelf-notice.ok {
+.shelf-toast.fading {
+  opacity: 0;
+}
+
+.shelf-toast.ok {
+  background: color-mix(in srgb, #1f9d55 16%, var(--bg));
   border: 1px solid color-mix(in srgb, #1f9d55 55%, transparent);
-  background: color-mix(in srgb, #1f9d55 14%, transparent);
 }
 
-.shelf-notice.warn {
+.shelf-toast.warn {
+  background: color-mix(in srgb, #b8860b 16%, var(--bg));
   border: 1px solid color-mix(in srgb, #b8860b 55%, transparent);
-  background: color-mix(in srgb, #b8860b 14%, transparent);
 }
 
-.shelf-notice.error {
+.shelf-toast.error {
+  background: color-mix(in srgb, var(--error) 16%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--error) 55%, transparent);
-  background: color-mix(in srgb, var(--error) 14%, transparent);
 }
 
 .shelf-confirm-backdrop {

@@ -9,7 +9,7 @@ import {
   type ReaderSettings,
   type Theme,
 } from "./render/settings";
-import type { ChapterState } from "./render/paginator";
+import type { ChapterState, FootnotePayload } from "./render/paginator";
 import { Toolbar } from "./ui/Toolbar";
 import { MenuPanel } from "./ui/MenuPanel";
 import { FootnotePop } from "./ui/FootnotePop";
@@ -67,10 +67,7 @@ export default function App() {
   const [anchor, setAnchor] = useState<string | undefined>(undefined);
   const [anchorNonce, setAnchorNonce] = useState(0);
   const [startAtEnd, setStartAtEnd] = useState({ nonce: 0, atEnd: false });
-  const [footnote, setFootnote] = useState<{
-    text: string;
-    rect: { left: number; top: number; right: number; bottom: number };
-  } | null>(null);
+  const [footnote, setFootnote] = useState<FootnotePayload | null>(null);
   const [chapterState, setChapterState] = useState<ChapterState>({ status: "loading" });
   const [settings, setSettings] = useState<ReaderSettings>(() => {
     const saved = readSavedSettings();
@@ -113,11 +110,14 @@ export default function App() {
     kind: "ok" | "warn" | "error";
     text: string;
   } | null>(null);
+  const [shelfNoticeFading, setShelfNoticeFading] = useState(false);
   const [shelfBusy, setShelfBusy] = useState(false);
   const [currentShelfId, setCurrentShelfId] = useState<string | null>(null);
   const shelfBusyRef = useRef(false);
   const shelfEntriesRef = useRef<ShelfEntry[]>([]);
   shelfEntriesRef.current = shelfEntries;
+  /** 指针是否悬停在交互式浮层（脚注弹窗等）上：此时不响应翻页键/后续可扩展书签等 */
+  const overlayHoverRef = useRef(false);
 
   const readerRef = useRef<ReaderHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -222,11 +222,19 @@ export default function App() {
     };
   }, []);
 
-  // 导入结果提示：6 秒后自动消失
+  // 导入结果 toast：展示 3 秒后用 1 秒淡出，期间不拦截鼠标
   useEffect(() => {
-    if (!shelfNotice) return;
-    const timer = window.setTimeout(() => setShelfNotice(null), 6000);
-    return () => window.clearTimeout(timer);
+    if (!shelfNotice) {
+      setShelfNoticeFading(false);
+      return;
+    }
+    setShelfNoticeFading(false);
+    const fadeTimer = window.setTimeout(() => setShelfNoticeFading(true), 3000);
+    const closeTimer = window.setTimeout(() => setShelfNotice(null), 4000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(closeTimer);
+    };
   }, [shelfNotice]);
 
   // ---- 从书架打开 ----
@@ -310,6 +318,30 @@ export default function App() {
     }
   }, [currentShelfId]);
 
+  const handleShelfDeleteMany = useCallback(async (ids: string[]) => {
+    if (shelfBusyRef.current || ids.length === 0) return;
+    shelfBusyRef.current = true;
+    setShelfBusy(true);
+    const failed: string[] = [];
+    for (const id of ids) {
+      try {
+        await getShelfStore().deleteBook(id);
+        if (currentShelfId === id) setCurrentShelfId(null);
+      } catch (e) {
+        failed.push(String(e));
+      }
+    }
+    setShelfEntries((prev) => prev.filter((e) => !ids.includes(e.id)));
+    if (failed.length === 0) {
+      setShelfError(null);
+      setShelfNotice({ kind: "ok", text: `已删除 ${ids.length} 本` });
+    } else {
+      setShelfError(`删除失败 ${failed.length} 本：${failed.join("；")}`);
+    }
+    shelfBusyRef.current = false;
+    setShelfBusy(false);
+  }, [currentShelfId]);
+
   // ---- 章节状态回调（稳定引用；负责恢复页码） ----
   const onPageState = useCallback((s: ChapterState) => {
     setChapterState(s);
@@ -342,6 +374,16 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const handleFootnoteClose = useCallback(() => {
+    setFootnote(null);
+    readerRef.current?.dismissFootnote();
+  }, []);
+
+  const handleFootnoteAnchor = useCallback((anchor: string) => {
+    readerRef.current?.jumpToAnchor(anchor);
+    handleFootnoteClose();
+  }, [handleFootnoteClose]);
 
   // ---- 目录跳转 ----
   const handleTocNavigate = (href: string): void => {
@@ -475,9 +517,11 @@ export default function App() {
       if (e.key === "Escape") {
         setMenuOpen(false);
         setTocOpen(false);
-        setFootnote(null);
+        handleFootnoteClose();
         return;
       }
+      // 指针位于交互式浮层（脚注弹窗等）上时不翻页，滚轮/按钮交给浮层自身处理
+      if (overlayHoverRef.current) return;
       if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
         e.preventDefault();
         readerRef.current?.nextPage();
@@ -488,7 +532,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [handleFootnoteClose]);
 
   // ---- 拖拽打开 ----
   // Tauri 环境：打包后 WebView2 会拦截原生拖放，HTML5 drop 事件不会触发，
@@ -662,17 +706,15 @@ export default function App() {
                 {shelfError}
               </div>
             )}
-            {shelfNotice && (
-              <div className={`shelf-notice ${shelfNotice.kind}`} role="status">
-                {shelfNotice.text}
-              </div>
-            )}
             <ShelfView
               entries={shelfEntries}
               busy={shelfBusy}
+              theme={settings.theme}
+              onThemeChange={changeTheme}
               onOpen={(id) => void handleShelfOpen(id)}
               onImport={() => fileInputRef.current?.click()}
               onDelete={(id) => void handleShelfDelete(id)}
+              onDeleteMany={(ids) => void handleShelfDeleteMany(ids)}
             />
           </div>
         ) : (
@@ -749,8 +791,8 @@ export default function App() {
                   onIssues={handleIssues}
                   onInternalLink={handleTocNavigate}
                   onExternalLink={handleExternalLink}
-                  onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
-                  onFootnoteClose={() => setFootnote(null)}
+                  onFootnote={(payload) => setFootnote(payload)}
+                  onFootnoteClose={handleFootnoteClose}
                   initialAnchor={initialAnchor}
                   startAtEnd={startAtEnd}
                 />
@@ -787,8 +829,15 @@ export default function App() {
       {footnote && (
         <FootnotePop
           text={footnote.text}
+          html={footnote.html}
+          pinned={footnote.pinned}
           rect={footnote.rect}
-          onClose={() => setFootnote(null)}
+          onClose={handleFootnoteClose}
+          onExternalLink={handleExternalLink}
+          onAnchor={handleFootnoteAnchor}
+          onHoverChange={(over) => {
+            overlayHoverRef.current = over;
+          }}
         />
       )}
       {logOpen && (
@@ -800,6 +849,14 @@ export default function App() {
             setDiagText(null);
           }}
         />
+      )}
+      {shelfNotice && (
+        <div
+          className={`shelf-toast ${shelfNotice.kind}${shelfNoticeFading ? " fading" : ""}`}
+          role="status"
+        >
+          {shelfNotice.text}
+        </div>
       )}
       {shelfBusy && (
         <div className="app-busy" aria-busy="true">

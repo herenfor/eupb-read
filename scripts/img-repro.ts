@@ -8,7 +8,7 @@ import { sanitizeChapter } from "../src/render/sanitize";
 import { ResourceServer } from "../src/render/resources";
 import { DEFAULT_SETTINGS } from "../src/render/settings";
 
-const EPUB = "/home/herenfor/test/[简][七菜なな].能够率直说出喜欢的女生无双.04.epub";
+const EPUB = "/home/herenfor/test/测试用epub/[简][七菜なな].能够率直说出喜欢的女生无双.04.epub";
 const OUT = "/tmp/imgtest";
 
 const bytes = new Uint8Array(readFileSync(EPUB));

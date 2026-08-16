@@ -1,180 +1,133 @@
-# 交接文档（供新对话接手）
+# 开发文档
 
-> 最后更新：条目 34（非16px块居中通用修复；16px 制作信息现象待用户补充）。项目：`/home/herenfor/test/epub-reader`
-> 这份文档自包含；新对话请先通读，再继续处理用户报告的问题。
+本文档面向维护者与贡献者，介绍项目结构、开发命令、渲染分层规范与回归测试方式。
 
----
+> 项目自述与功能列表见根目录 [README.md](../README.md)。
 
-## 1. 项目是什么
+## 技术栈
 
-Windows 桌面 EPUB 阅读器（EPUB 2/3），技术栈：
+- 外壳：Tauri 2（Rust）
+- 前端：React 18 + TypeScript + Vite
+- EPUB 解包：fflate（纯前端 ZIP 解析）
+- 分页：CSS multi-column（自研分页控制器）
+- 测试：Vitest（单元测试）+ Playwright（端到端回归）
 
-- **外壳**：Tauri 2（Rust）+ WebView2，`src-tauri/`
-- **前端**：React 18 + TypeScript 5 + Vite 6，`src/`
-- **解包**：fflate（ZIP）在前端完成，**不依赖任何后端命令解析 EPUB**
-- **分页**：自研 CSS multi-column 分页（`#epub-viewer` 全宽，`column-width`=页宽，`column-fill:auto`，翻页=滚动 scrollLeft）
-- **架构要点**：
-  - `src/core/`：book.ts（加载编排）、zip/opf/ncx/nav（目录双模式）、fonts.ts（IDPF 字体混淆 SHA-1 XOR）、paths/xml/parseXml（浏览器 DOMParser / node xmldom 双实现）、types.ts
-  - `src/render/`：sanitize.ts（章节消毒+CSS 注入，**改动最频繁**）、cssRewrite.ts、paginator.ts（分页/翻页/锚点/脚注）、resources.ts（ResourceServer→blob URL）、settings.ts（ReaderSettings + TEXT_MEASURE）
-  - `src/ui/`：App.tsx（状态机）、ReaderView.tsx（paginator 生命周期）、Toolbar/MenuPanel/TocPanel/LogPanel/FootnotePop、storage.ts（进度/设置持久化）
-- **测试书**（在 `/home/herenfor/test/`）：
-  - `[简][七菜なな].能够率直说出喜欢的女生无双.04.epub`（LK 风格，插图/分隔图/目录样式齐全，图片问题主要用它复现）
-  - `[简][鐵人じゅす]…01.epub`（多章节、自闭合 script、脚注）
-  - `【测试专用】记忆的琴键.epub`（壳书）
-  - `script.js`：LK 阅读器的参考脚本（脚注弹层、bgcolor 优化、单图自适应），仅作**参考**，勿直接引入
+## 架构分层
 
----
+```
+src/
+  core/        解析内核（纯 TS，无 DOM 依赖）
+    zip.ts         ZIP 解包 + mimetype 校验
+    book.ts        加载编排（manifest/spine/guide/目录/字体/DRM）
+    opf/ncx/nav    包文档与目录解析
+    fonts.ts        IDPF 字体混淆还原
+    paths/xml      路径解析与 XML 解析
+  render/      渲染层
+    sanitize.ts     章节消毒 + 阅读器分层样式注入
+    cssRewrite.ts   CSS url() 改写与宽度兼容
+    paginator.ts    分页/翻页/锚点/进度/运行时排版修正
+    resources.ts    书内资源服务
+    footnotes.ts    脚注识别（含图片/富文本注释）
+  ui/          界面
+    ShelfView.tsx   书架（网格/搜索/排序/密度/主题/批量选择）
+    ReaderView.tsx  阅读视图
+    Toolbar / TocPanel / MenuPanel / FootnotePop / LogPanel
+    shelf.ts        书架存储抽象（Tauri 应用数据目录 + IndexedDB dev 回退）
+    storage.ts      设置与阅读进度
+  test/        测试夹具与单元测试
+src-tauri/    Tauri 2 壳（书架文件命令 + 拖拽读取）
+scripts/      构建/自检/测试工具
+```
 
-## 2. WSL 内的开发/测试命令
-
-工作目录：`/home/herenfor/test/epub-reader`
+## 开发命令
 
 ```bash
-pnpm test      # vitest 单测，当前 118 项全绿（src/**/*.test.ts）
-pnpm build     # tsc 类型检查 + vite 生产构建（交给用户前必跑）
-pnpm dev       # 浏览器开发模式，端口 5173
+pnpm install
+pnpm dev          # 浏览器开发模式（localhost:5173）
+pnpm test         # 单元测试（当前 129 项）
+pnpm build        # TypeScript 检查 + 生产构建
+pnpm tauri dev    # 桌面窗口调试（需要系统 Tauri 依赖）
+pnpm tauri build  # 桌面打包
 ```
 
-**无头浏览器实测**（环境无系统字体/浏览器，用项目内便携 Chromium）：
+Windows 一键打包见 `scripts/build-windows.ps1`。
 
-```bash
-pnpm pw-fonts   # 从测试书提取内嵌字体到 /home/herenfor/test/.pw-xdg/fonts
-export LD_LIBRARY_PATH=/home/herenfor/test/epub-reader/.pw-libs/root/usr/lib/x86_64-linux-gnu
-export PLAYWRIGHT_BROWSERS_PATH=/home/herenfor/test/epub-reader/.pw-browsers
-export XDG_DATA_HOME=/home/herenfor/test/.pw-xdg
-export XDG_CACHE_HOME=/home/herenfor/test/.pw-xdg-cache
-npx tsx scripts/img-repro.ts    # 七菜04 Section03：全屏图 p034 + 分隔图 kugiri 渲染盒实测
-npx tsx scripts/w90-repro.ts    # width:% 盒子在 1100/800/650 三窗口的宽度实测
+## 渲染分层规范
+
+阅读器注入样式遵循五层模型，避免规则互相打架：
+
+| 层 | 职责 | 示例 |
+|---|---|---|
+| L1 安全/消毒 | 删除脚本、危险属性、隐藏脚注 aside | `#viewer aside[epub:type=footnote]{display:none!important}` |
+| L2 用户设置 | 字号、主题、行高、字重、间距 | `html{font-size:...!important}`、主题色 |
+| L3 阅读器默认版心 | 40rem 版心、页面级居中、图片防溢出 | `:where(#viewer .reader-top){max-width:40rem}` |
+| L4 书内容布局 | 书的 margin/width/max-width/float/font 设计 | 不注入，运行时测量后决定 |
+| L5 引擎兼容补偿 | CSS 多栏的 fit-content / float 收缩异常 | 运行时按触发条件兜底 |
+
+完整说明、每条规则的冲突台账与新增规则检查清单见 [rendering-layers.md](rendering-layers.md)。
+
+## 关键设计
+
+### 分页与阅读位置
+
+- 页面宽度 = 窗口全宽，内容宽度由 40rem 版心控制；
+- 阅读位置 = 章节索引 + 页号 + 内容锚点（元素序号 + 元素内横向比例 + 字数位置）；
+- 字号/窗口变化后按锚点恢复，页号只在锚点失效时兜底。
+
+### 宽度百分比兼容
+
+书里的 `width:X%` 按“页面 ≈ 版心”书写，阅读器页面是全窗口宽。为避免 90% 的盒子占满整页、同时又避免误伤 td 等窄容器，改写为：
+
+```css
+width: X% → width: min(X%, X/100 × 40rem)
 ```
 
-> 中文路径下的书需要用 `readFileSync` 读取；脚本里已有范例。
+页面级取版心比例，窄容器由浏览器按真实包含块取较小值；`>100%` 的出血意图保持原样。
 
-**WSL Rust 工具链（0.1.4 起，供 cargo check / cargo test 用）**：
+### 脚注弹层
 
-```bash
-export PATH=/home/herenfor/test/rust-toolchain/bin:$PATH
-export LD_LIBRARY_PATH=/home/herenfor/test/rust-toolchain/lib:$LD_LIBRARY_PATH
-rustc --version   # 1.97.1，与用户 Windows rustc 同版本
-cargo --version
-```
+- 支持多看/掌阅类和脚本型 `<note>` 两类结构；
+- 支持图片注释（弹层渲染富内容 HTML）；
+- 悬停临时展示，点击固定；固定后可在弹层内滚动超长内容；
+- 弹层内滚轮不触发翻页；返回链接跳回正文标记；外链交系统浏览器。
 
-- 独立 tarball 安装（非 rustup），完整组件：rustc/cargo/rustfmt/clippy/rust-analyzer/llvm-tools；
-- 安装包缓存：`/home/herenfor/test/rust-dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz`；
-- `LD_LIBRARY_PATH` 必须指向 `rust-toolchain/lib`，否则 rustc wrapper 会把 sysroot 解析到错误目录；
-- 尚未准备 Linux 系统库：项目 `src-tauri` 的完整 `cargo check` 还需要 `pkg-config` 与 GTK/WebKitGTK 开发包（0.1.4 书架 Rust 命令开发时再按需准备）。
+### 书架存储
 
-### 环境坑（新对话务必知道）
+- Tauri 环境：书籍保存到系统应用数据目录 `app_data_dir()/books/<id>/book.epub`，索引为 `shelf.json`；
+- 浏览器开发环境：IndexedDB 等价回退；
+- 书籍 ID 由标识 + 文件名 + 文件大小哈希生成，重复导入只更新文件与元数据、保留进度。
 
-1. **沙箱**：只能写 `/home/herenfor/test/` 工作区；无 sudo/root；`~/.cache`、`~/.cargo` 等家目录不可写（装工具必须装进项目内，如曾经的 `.toolchain/`，已删除）。
-2. **网络**：间歇性断连（TLS reset/eof），下载务必带重试+断点续传（`curl -C - --retry`）。
-3. **端口**：当前 dev 端口 5173。Windows 保留段随重启会变：1420、5517（5470-5569 段）都曾先后落入 Hyper-V 保留区间导致 EADDRINUSE；换端口前先 `netsh interface ipv4 show excludedportrange protocol=tcp` 查保留段。
-4. **rustup 在此环境不可用**（rename 报 EXDEV，沙箱兼容问题）；若将来又要 Rust，直接下官方 tarball 手工解包（历史方案见会话记录，`.toolchain/` 已清理）。
-5. **代码级坑位目录**（前人踩过，改代码时注意）：
-   - 自闭合 `<script .../>` 会被 HTML5 解析器吞章节 → sanitize 里已预处理成 `</script>`
-   - `<style>` 注入的 CSS 里不能用 `>` 子选择器（序列化变 `&gt;`，RAWTEXT 不解码）→ 一律用后代选择器
-   - xmldom 不反射 `el.id=`，必须 `setAttribute`
-   - `findElements(root, "*")` 永远返回空（按 localName 精确匹配），要遍历全部元素需手动递归
-   - 页内 `<style>` 块、`<link>` 样式表、内联 style 三处都要过 rewriteCssUrls，别漏
+## 测试
 
----
+### 单元测试
 
-## 3. scripts/ 工具清单（已整理）
+`pnpm test`（129 项）覆盖解析内核、消毒与 CSS 改写、脚注识别、书架纯函数、怪书容错等。
 
-**顶层（正式工具）**：
+### 端到端回归
 
-| 文件 | 用途 |
-|---|---|
-| `build-windows.ps1` | Windows 一键打包（**纯英文 ASCII + CRLF**，PowerShell 5.1 兼容；中文会因 GBK 误读报语法错误） |
-| `check-book.ts` | 校验/解包 epub 的命令行工具（`pnpm check <book>`） |
-| `gen-icons.mjs` | 生成 Tauri 图标（`pnpm icons`） |
-| `pack-epub.mjs` | 把解包的源码树打包回合法 epub（`pnpm pack`） |
-| `img-repro.ts` | 图片渲染实测（本轮新增，见 §2） |
-| `w90-repro.ts` | 宽度百分比实测（本轮新增，见 §2） |
+使用项目内 Playwright 无头浏览器，重点覆盖：
 
-**`scripts/archive/`（历史调试脚本，全部可跑但属一次性）**：`headless-*.ts`（26 个特性回归：sticky 锚点/脚注/菜单/主题/滚轮/按键…）、`run-headless-*.ts`（对应 runner，依赖 `/home/herenfor/test/hltest/` 里的 `book.b64` 等产物）、`bg-repro.ts`、`ui-*-test.ts` 等。新功能回归可参考其写法，但当前以 `scripts/img-repro.ts` / `w90-repro.ts` 为最新范式（直接用 tsx + 项目内 Playwright，不需要 hltest 产物）。
+- 书架：导入/批量导入、去重、进度恢复、批量选择删除、搜索排序、主题同步；
+- 阅读：翻章、回翻上一章停在最后一页（无第一页闪帧）、目录跳转、页内锚点；
+- 脚注：图片注释、固定弹层、超长滚动、弹层上不翻页；
+- 渲染：多字号版心居中、书内百分比宽度兼容。
 
-**项目外辅助**（`/home/herenfor/test/` 下）：`hltest/`（旧 harness 的 book.b64、dejavu.ttf 字体注入源，归档脚本仍引用）、`.pnpm-store/`（pnpm 全局缓存）。
+运行端到端脚本需要先构建前端（`pnpm build`），并准备好无头浏览器依赖（见 `scripts/setup-pw-fonts.mjs` 与 Playwright 文档）。
 
----
+## 桌面构建
 
-## 4. 本会话最近完成的工作（新对话的起点）
+跨平台原则：各平台使用本机工具链原生编译，不做交叉编译。
 
-用户主线：在 WSL 修问题 → 在 Windows 打包自测。**当前所有修复都在 WSL 源码里，尚未重新打包**（用户明确说"先不走打包"）。
+- Windows：MSVC + WebView2，`scripts/build-windows.ps1`；
+- Linux：需 `pkg-config`、GTK/WebKitGTK 开发包；
+- macOS：需要 macOS 系统与 Xcode Command Line Tools。
 
-1. **打包版无法拖拽导入** → 已修：Tauri 打包版 WebView2 拦截 HTML5 drop，改为 `getCurrentWebview().onDragDropEvent` + 新增 Rust 命令 `read_epub_file`（`tauri::ipc::Response` 直返 ArrayBuffer）。涉及 `src/App.tsx`、`src-tauri/src/lib.rs`、`src/styles.css`（拖拽遮罩）、`package.json`（+`@tauri-apps/api`）。
-2. **正文普通图高度问题**（`.cut img{height:2em}` 被覆盖 CSS 的 `height:auto!important` 压掉）→ 已修：通用 img 规则改为 `max-width:100% + object-fit:contain`，不再强制 height:auto；全屏图块规则不变。顺手加 **bgcolor 优化**（书声明 body bgcolor 时浅色主题跟随，白名单校验防注入）。涉及 `src/render/sanitize.ts`。
-3. **width:90% 盒子几乎占满整页** → 已修：`width:X%` 统一换算为 `X/100×40em`（版心），覆盖内联 style / width 属性 / 页内 `<style>` 块 / `<link>` 样式表四处；全页图块、img/svg、已定宽祖先内部、html/body 选择器跳过；删掉 `#epub-viewer table{max-width:100%}` 特例（它压过版心限宽）。涉及 `src/render/sanitize.ts`、`src/render/cssRewrite.ts`。
-4. 测试从 75 → **84 项**（sanitize.test.ts +5、cssRewrite.test.ts +2 等），全部通过；`pnpm build` 通过。
-5. **目录页背景图不显示**（鐵人01：`body{background-image:url(...)}` 被主题覆盖样式的 `background:` 简写重置为 none）→ 已修：主题与 bgcolor 注入都改为只用 `background-color`，不再重置/遮挡书声明的 body 背景图。sanitize.test.ts 新增 2 个回归用例，测试 **84 → 86 项**；已用项目内 Playwright 打开真实书端到端验证（iframe 内 computed `background-image` 为 blob URL、viewer 背景透明）。
-6. **script.js（LK 参考脚本）弹注适配** → 已实现原生支持：新增 `src/render/footnotes.ts`（识别多看/掌阅类 + script.js 的 `<note><sup><a href="#asideId">` 通用模式、提取 aside 文本、zy-footnote 属性兜底）；sanitize 注入 CSS 隐藏 `#epub-viewer note aside`（脚本被禁时正文不再漏出注释块）；ChapterPaginator 新增 hover 弹注/移出关闭（桌面）+ 点击弹注（移动端友好），App/ReaderView 接线 `onFootnoteClose`。footnotes.test.ts 8 用例 + sanitize.test.ts 1 用例，测试 **86 → 95 项**；已用铁人01 第二章真实书验证：hover 出现弹层“注：SECOM…”、移出关闭、点击弹层、aside computed display:none。
-   - 注意：script.js 的“单图自适应（kuchie change 类）”部分**未适配**，将来有图片 bug 时再评估。
-7. **排版滑块拖动实时重排** → 已优化：`MenuPanel` 的 `SliderRow` 改为“拖动只更新本地预览值，原生 `change`（松开鼠标/键盘确认/失焦）才提交”。React `onChange` 绑定的是原生 `input`，以前每一步都触发整章重载。字号/行高/字重/字间距/字符间距五个滑块统一生效；± 按钮仍立即生效。已用 Playwright 验证：连续 input 事件期间 iframe src 与字号不变，change 后只重排一次。无新增单测（纯 UI 交互，无 React 测试设施）。
-8. **左右拉伸窗口实时重排** → 已修（用户确认该优化指的是窗口拉伸而非滑块）：`ReaderView` 的 `ResizeObserver` 从 rAF 每帧 `reflow()` 改为 **250ms debounce**——拉伸过程中只重置定时器不重排，停止拉伸 250ms 后重排一次（窗口边框拖动拿不到 mouseup，静默期即“拉伸结束”信号）。Playwright 验证：连续 5 次改 iframe 宽度（间隔 100ms）期间 viewer 布局保持旧值，停止后一次性变为最终宽度。
-9. **《诡屋.01》第二章信件盒（.paper width:90%）过宽** → 已修，根因两层：① 章节样式表用 `@import "default.css"` 引入 `.paper{width:90%}`，原 `rewriteCssUrls` 只改写顶层样式表、被 import 的 CSS 内容不参与 width:%→em 换算；② 注入的 `#viewer :not(img){max-width:40em !important}` 覆盖了书自己的 `.paper{max-width:30em}`。修复：`rewriteCssUrls` 支持 `getText` 选项，`@import` 本地样式表**递归内联并按其自身路径改写**（url() 与 width:% 一起修正，含媒体条件包裹、循环 import 保护）；sanitize 的版心上限改为 `:where(#viewer :not(img)){max-width:40em}`（零特异性，尊重书显式声明的更窄 max-width）。真实书验证：信件盒由 640px 回到书设计 480px(30em) 居中；w90-repro/img-repro 回归正常。测试 **95 → 100 项**（cssRewrite +3、sanitize +2）。
-10. **鐵人01 目录页条目左右 margin 不生效** → 已修：注入规则的 `margin-left/right: auto !important` 压掉了 `.toc/.bg1box/.bg2box` 的交错边距。改为 `:where(#viewer :not(img)){margin-left:auto;margin-right:auto}`（无 important）——书显式声明的 margin 优先，未声明的普通段落仍自动居中。真实书验证：bg1box 右 32px / bg2box 左 32px、x 坐标交错；普通正文 p 仍 640px 居中。sanitize.test.ts +1，测试 **100 → 101 项**。
-11. **星空书制作信息页靠左（条目 10 的回归）** → 已修并定型为最终层级：阅读器版心规则选择器改为 `:where(#viewer) :not(img)`，特异性 (0,0,1)——比书的通用元素规则（`div{margin:0}` 同为 0,0,1，注入在后所以胜出）高，比书的类规则（`.toc`、`.paper` 为 0,1,0）低。效果：默认居中/40em 上限生效，书用类声明的布局全部尊重。三书实测：星空 `.mesbox` margin 400px 居中；铁人目录条目 ml/mr 交错保留；诡屋 `.paper` 480px 保留。测试数不变（101）。
-12. **艾琳画集纯图片 title 页被拆成两页** → 已修：sanitize 的“无文字+有图 → fullpage-image”判定过宽，title 页有两张上下排列的图（t1 21em + t2 7em），每张都被强制 100%×100% 整页。改为**仅单图页面**注入 fullpage-image；多图页保留书自身排版。实测：title 页 1 页，两图上下排列，body 背景色 `#b5d0e5` 正常；单图插图页仍 fullpage-image 全屏。sanitize.test.ts +1，测试 **101 → 102 项**。
-13. **鐵人01 标题页作者/插画行不居中** → 已修：阅读器版心 `max-width:40em` 的 em 相对元素自身 font-size，`.c1`(0.75em) 得 480px、`.c2`(1.05em) 得 672px，再被书 `.titlebox p{margin:0}` 定死在左边。改为 `max-width:40rem`（相对根字号，所有元素一致且随用户字号设置缩放）。实测标题页所有行宽 640px、文字中心对齐页面中心；星空/铁人目录/诡屋三处旧修复全部回归正常。sanitize.test.ts 断言同步，测试数不变（102）。
-14. **鐵人01 正文 ◇◇◇ 分隔符靠左** → 已修：`.cut{margin:…}` 类规则覆盖了阅读器默认 auto，而阅读器给它 40rem 宽盒子，盒子贴左导致 text-align:center 只在盒内居中。修复：sanitize 阶段给 `#viewer` 的**直接子元素**打 `reader-top` 标记，注入规则 `:where(#viewer) .reader-top { margin-left/right: auto !important }`——页面级内容（标题/正文段/分隔符）强制版心居中，嵌套元素（目录条目等）不受影响、书布局生效。注意不能写 `>` 子选择器（序列化转义坑），因此用 class 标记；xmldom 无 `element.children`，用 childNodes 遍历。实测第一章三处分隔符都在所在列居中；标题页/目录/星空/诡屋旧修复全部回归。sanitize.test.ts +1，测试 **102 → 103 项**。
-15. **長山書标题页限宽图被全屏** → 已修：fullpage-image 判定再加一条——单图页面且图片自带尺寸约束（inline style 的 width/height/max-/min-，或 width/height 属性）时不注入整屏填充，按书排版显示。xmldom 的 getAttribute 对缺失属性返回 "" 而非 null，判空要用 Boolean()。实测：長山标题图 13em=208px 居中、1/1 页、背景图正常；艾琳单图插图页仍 fullpage-image 全屏。sanitize.test.ts +1，测试 **103 → 104 项**。
-16. **脚注“注”图标太高挡上一行** → 已修：注入规则里脚注图标 `vertical-align: top` 改为 `middle`，图标整体下移约 7px（实测 top 291→298），不再侵入上一行文字。sanitize.test.ts +1，测试 **104 → 105 项**。
-17. **初鹿野書作者页罗马音飞到页面最右** → 已修：`.authorbox table{width:100%}` 的 % 本应相对 224px 的 authorbox，但 cssRewrite 把嵌套选择器的 `width:100%` 换算成固定 40em，表格溢出父容器，右对齐罗马音被甩到页面右侧。修复：width:%→em 换算**跳过带组合器（后代/子代/+/~）的选择器**（其 % 通常相对限宽父容器）；判断前先剥离 CSS 注释。实测：authorbox 224px 居中、表格 224px、罗马音右端对齐 authorbox 右端。cssRewrite.test.ts +1，测试 **105 → 106 项**。
-18. **榛名书目录页 CONTENTS 几个字母变小** → 已修：XHTML 空元素 `<span class="em05"/>` 在 HTML 解析器里不是自闭合，会吞掉后续字母并把它们套进 0.5em 字号。修复：sanitize 预处理统一把**非 void 标签**的自闭合写法补成显式开闭标签（`<span/>`→`<span></span>`；br/img 等 void 保持）。实测 CONTENTS 八个字母全部正常字号、span 全空。sanitize.test.ts +2，测试 **106 → 108 项**。
-19. **外部链接功能** → 已实现：新增 `@tauri-apps/plugin-opener@2.5.4` + Rust `tauri-plugin-opener = "2"`，capabilities 加 `opener:default`。链路：ChapterPaginator 新增 `onExternalLink`（http/https/mailto/tel 白名单，data/blob/file 忽略）→ ReaderView → App：Tauri 环境 `openUrl()` 调系统默认浏览器，浏览器 dev 用 `window.open`；失败写入问题日志。浏览器端已验证 popup 打开 lightnovel.fun；**Tauri 桌面端需 Windows 重新 pnpm install + cargo 构建验证**。版本已升至 0.1.2。
-20. **书 body 声明的内嵌字体被阅读器覆盖** → 已修：注入的 body 规则去掉 `font-family`（只保留主题 color/background-color），阅读器系统字体 fallback 移到 `html` 层——书的 `body{font-family:main,emoji,sym}` 自身声明优先，继承 fallback 只在书没声明时兜底。实测铁人书：body/p 计算字体均为 `main, emoji, sym`，html 为系统 fallback。sanitize.test.ts +1，测试 **108 → 109 项**。
-21. **あさの书第1话带注释行逐字换行** → 已修：① cssRewrite 纯标签/float 的 width% 不再换算；② C-08 浮动元素 shrink-to-fit 补偿已落地（Canvas 逐文本节点测 max-content + 父容器可用宽收缩写回 px，只处理塌缩宽度 ≤48px 的 float，`<br>` 按最长行）。WSL 无系统字体已解决：`pnpm pw-fonts` 提取测试书字体到 `.pw-xdg/fonts`，Playwright 运行时设 `XDG_DATA_HOME=/home/herenfor/test/.pw-xdg`。实测短气泡收缩（清单？76px）、长气泡到边换行（注释行 378×44）。
-22. **三上书目录页 CONTENTS 不居中** → 已修宽度换算部分：cssRewrite 的 width:%→em 换算把 `.ctt{width:100%;float:left}` 的 100% 换成 40em，再按 .ctt 自身 1.2em 字号变成 768px，盒子甩出 336px 的 tocbox——现在**声明了 float 的规则不换算**。**第二条修复（注入 `#viewer .ctt{float:none;text-align:center!important}`）已按用户要求撤销**：书本身写的是 left/float:left，应尊重书。实测撤销后三上书 `.ctt` 恢复 `text-align:left;float:left`；铁人书书自带 center 不受影响。
-    **通用教训**：CSS 文本层的 width%→em 换算缺少 DOM 上下文，无法判断 % 是相对页面版心还是相对限宽父容器，已两次踩坑（note 的纯标签 100%、.ctt 的 float 100%）。更稳的方向是逐步把宽度换算移到 DOM/布局层，而不是继续在 CSS 文本里加特判。
-23. **深色模式下 ruby 注音 rt 不换色** → 已修：书 CSS 常写 `ruby>rt{color:#333}`，深色主题仍保持深色看不清。注入 `#viewer rt { color:<主题前景色> }`（id 特异性高于书规则）。实测三上书 rt：浅色 rgb(26,26,26)，深色 rgb(212,212,212)。sanitize.test.ts +1，测试 **112 → 113 项**。
-24. **鹤城书简介宽度异常（实际 fit-content 塌成 34px 窄条）** → 已修并升级为通用运行时补偿：sanitize 不再写 `.summary` 特判，分页器 `applyFitContentFix` 对 computed max-width 含 fit-content 的元素统一设 `max-width:40rem`（后续已调通）。诊断面板新增 `fitContentEls=`、`wideEls=` 两行。
-25. **按分层台账批量修复（C-04/C-05/C-08/C-09/C-12）**：
-    - C-04 直接子 margin 两阶段：默认居中渲染后屏蔽阅读器表，读纯书 margin；非零且非“auto 居中形态”则按 **居中版心列左缘 + 书 margin 缩进** 写回（鹤城 `.namebox` 最终 `382px/318px`，图片左缘与正文首行缩进完全对齐 x=387）。
-    - C-05 移除 `html,body{padding:0!important}`，LK 书 `body{padding:0 5px}` 恢复；同时分页宽度改为 body **内容区宽度**（clientWidth - padding），消除 5px 横向溢出滚动条。
-    - C-08 见条目 21，Canvas 测量补偿已启用并验证。
-    - C-09 fit-content 改为运行时通用补偿（移除 .summary 特判）。
-    - C-12 普通图片规则改为 `:where(#viewer) img` 零特异性默认值（书规则可覆盖）；全页图块仍 important。
-    - WSL 字体：`pnpm pw-fonts` + `XDG_DATA_HOME=/home/herenfor/test/.pw-xdg`（Playwright 测试命令见 §2）。
-    - 回归矩阵全绿：namebox 对齐、summary 640、body padding 0 5px、目录交错、cut 居中、mesbox 居中、paper480、ctt 书设计、聊天泡收缩/换行。测试 113 项、build 通过。
-26. **margin 两阶段的两个边界修复**：
-    - auto 居中判断从字符串相等改为数值容差（computed auto 左右可能有 516.594/516.609 的浮点差），修复逢緣书目录 tocbox 被推到最右（现恢复 516.6/516.6 居中）；
-    - 增加 `data-reader-margin-fixed` 标记防止重复测量时把上次写回值当书 margin 叠加，修复鹤城 namebox 第二次测量后变成 732/-32 的问题。两书复测正常，全量回归通过。
-27. **初鹿野简介页 margin 偏左** → 根因：margin 第二遍记录元素宽度时用了 `getBoundingClientRect().width`，而简介块跨两列碎片时该值会并成 1844px，auto 居中判定和 margin 换算全部错误（得到 178/-682）。改为用 **computed width**（480px）作为版心宽度。**通用原则：多栏布局里任何布局计算都不要用 getBoundingClientRect().width，碎片矩形不可靠；用 computed width 或 offsetWidth**。修复后初鹿野 summary margin 430/430 居中；鹤城/逢緣/全量回归通过。
-28. **深色模式下着重号不换色** → 已修：书 `.dot{text-emphasis:circle #000}` 在深色主题下仍黑色。深色主题注入 `#viewer * { -webkit-text-emphasis-color:<fg>; text-emphasis-color:<fg>; }`；浅色不注入（尊重书）。实测初鹿野 `.dot`：浅色 rgb(0,0,0)，深色 rgb(212,212,212)。sanitize.test.ts +1，测试 **113 → 114 项**。
-29. **伊尾微书深色模式目录链接不换色** → 已修：书显式 `.toc a{color:#000}`，深色下不可读。与用户确认采用 Sigil 深色预览风格浅蓝 `#6cb2ff`，深色主题注入 `#viewer .toc a { color:#6cb2ff }`；浅色不注入。实测 light rgb(0,0,0) / dark rgb(108,178,255)。sanitize.test.ts +1，测试 **114 → 115 项**。
-30. **駄犬书目录页左对齐容器被强制居中** → 已修并升级为通用规则：书里 `div{max-width:max-content}`（无 auto margin）表示“内容收缩 + 左对齐”，阅读器不再按 L3 强制居中，而是放到**版心列左缘**。margin 第二遍新增分支：原始 max-width 含 fit-content/max-content 且纯书左右 margin 为 0 → `margin-left = (parentW - 40rem)/2`。实测目录容器/条目在每页都从版心列左缘（窗口 x≈371）开始；鹤城 namebox、初鹿野 summary、逢緣 tocbox、あさの气泡回归正常。
-31. **命定之人是妻子的妹妹 1 目录页乱页（width%→em 第五个误伤）** → 已修并升级 C-07：旧公式把 `.toc-link{width:100%}`（相对 53px 的 td）写成固定 40em，目录图 230px 宽在 53px 列里重叠溢出、竖切 9 页。改为 `width:X% → min(X%, X/100×40rem)`：页面级仍取版心比例（90%→576px、100%→640px），窄容器由 CSS 引擎按真实包含块取书自己的 %（td 内 100%→53px）；仅 `0<X≤100` 改写，`>100` 出血保留；顺手修掉旧正则误匹配 `max-width/min-width` 里 “width:” 子串的问题；纯标签/组合器/float/img/fullpage 跳过清单不动。实测命定目录恢复单页、12 列 52px 无重叠；诡屋 paper 480px、逢緣 facebook 480px、三上 ctt 336px、初鹿野 authorbox table 224px 全部回归不变。测试 **115 → 118 项**；`pnpm test`/`pnpm build` 全绿。备份已覆盖更新至 `/home/herenfor/epub-reader-backup-before-css-fixes`。
-32. **目录里点击“当前章节”不回到开头** → 已修：`load()` 只在换章时清页号/锚点，同章 reload 时 `recompute(true)` 用旧 `metrics.currentPage` 和旧阅读锚点恢复原位置。新增 `LoadOptions.resetPage`：目录/翻章路径（ReaderView 章节 effect）传 `resetPage:true`，同章加载也清空页号与锚点、回到开头或页内锚点；设置重载 `reloadWithSettings` 与窗口 reflow 不传，仍保留位置。真实书端到端验证（铁人01 第二章 7 页）：章内翻到第 2 页 → 目录点当前章 → 回到 `第 1/7 页`、`scrollLeft=0`。测试数不变（118）。**此修复是 0.1.4 阶段第一项**。
+版本号需保持三处一致：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`。
 
-**版本阶段**：0.1.3 已打包并交人测试；当前 WSL 源码为 **0.1.4 开发阶段**（package.json / tauri.conf.json / Cargo.toml 三处已同步 0.1.4）。后续测试继续用 `pnpm dev`（WSL 5173），确认要发布时再走 robocopy + `build-windows.ps1`。
-33. **书架 v1（0.1.4，进行中）** → 存储采用**方案 B（跨平台）**：Tauri 环境由 Rust 把书存到 `app_data_dir()/books/<id>/book.epub` + `shelf.json` 索引；浏览器 dev 自动回退 IndexedDB（行为等价）。Rust 新增命令：`shelf_save_book / shelf_list / shelf_read_book / shelf_save_cover / shelf_read_cover / shelf_update_entry / shelf_delete_book`；bookId 只允许 `[A-Za-z0-9_-]`。前端新增 `src/ui/shelf.ts`（`ShelfStore` 接口 + Tauri/IndexedDB 实现 + 去重/排序/搜索/时间格式化纯函数）与 `src/ui/ShelfView.tsx`（响应式封面网格，封面槽位 **128:188**，object-fit cover，无封面生成书名占位卡；搜索/排序/删除确认/空状态）。`App.tsx` 增加 `view: shelf|reader`：启动进书架、导入入库并直接阅读、点卡片恢复进度、返回书架、删除、全局 busy 遮罩防重复操作；**阅读器核心（paginator/ReaderView/sanitize/cssRewrite/footnotes/resources）零改动**，Toolbar 仅加可选“返回书架”按钮，MenuPanel 仅文案改“导入新书”。测试：新增 `shelf.test.ts`（9 项），总数 **118 → 127**；Playwright dev 端到端通过：空书架→导入→刷新仍在→打开→返回→删除；进度恢复通过（铁人01 读到第二章第 2/7 页，返回书架显示 27%，重新打开恢复第 2/7 页）。
-    - **Rust 验证状态**：WSL 沙箱对跨目录 rename 返回 EXDEV（已定位为 workspace-write 权限行为），`cargo check` 只能在普通 WSL shell / 完整权限下运行。已由外部有权限 shell 跑通依赖（tauri 2.11.5 / webkit2gtk-sys 等全部编译成功），修复 E0382 后**重跑 `cargo check --lib` 已 `Finished`（1.73s）**，Linux 目标 Rust 代码验证完成；Windows 打包时 MSVC 还会再验证一次。
-    - **UI 修正（用户反馈）**：空书架状态已窗口居中（`.shelf-view{flex:1;min-width:0}`）；书架/工具栏 UI 与阅读器主题同步补全 **sepia 暖色**（`[data-theme="sepia"]` 变量 + `.app{color:var(--fg)}` 修正文字继承）。Playwright 验证：1400×900 空状态中心 (700,471)；sepia fg rgb(60,51,42)、dark fg rgb(212,212,212)。
-    - **导入流程修正（用户反馈第二批）**：① 导入成功后**停留书架**，不直接进书；② `ShelfEntry` 新增 `isNew`，新书显示绿色“新”徽章，第一次打开时由 `shelf_mark_opened` 清除（乐观更新 + 落盘）；③ 只有 `loadBook` 成功且 spine 非空才入库，失败书列出文件名与原因；④ **批量导入**：文件选择框 `multiple`，浏览器拖拽与 Tauri 原生拖拽都支持多文件，逐本解析，结果提示“已导入 N 本；失败 M 本（原因）”。Playwright 验证：一次导入 2 本好 EPUB + 1 个坏文件 → 停留在书架、2 卡片、2 个“新”徽章、提示“已导入 2 本；失败 1 本（bad.epub：无法解压 ZIP…）”；打开一本返回后“新”徽章剩 1，刷新后仍为 1。**Rust 端新增 `is_new` 字段与 `shelf_mark_opened` 命令后，已由有权限 shell 重跑 `cargo check --lib`，`Finished`（1.53s）验证通过。**
-    - **导入提示条修正（用户反馈第三批）**：提示条与书架是 `.main` 横向 flex 的兄弟节点，被拉伸成左侧竖直长条且不消失。改为 `.shelf-stack` 纵向容器包裹提示+书架，导入结果 6 秒自动消失。Playwright 验证：提示条矩形 `{x:20,y:39,w:1360,h:40}`（横贯内容区、高度正常），7 秒后数量 0。
-34. **非 16px 字号下块居中错乱（通用 bug，0.1.4）** → 已修。根因：`applyBookMargins` 第二遍测“纯书 margin”时把整个 `data-reader="overrides"` 样式表禁用；该表同时承载 L2 的 `html{font-size:字号}`。字号≠16px 时，禁表后 em 宽度回落 16px 基准，auto margin 数值与第一遍记录宽度对不上，被误判为“书的不对称 margin”，写出 `ml=1209.8px / mr=-10.6px` 这类错误 inline。修复：新增 `disableReaderTopMarginRules()`，只临时移除 `.reader-top` 的 `margin-left/right:auto` 两条规则（CSSOM 保存并恢复），**不再禁用整表**，字号/主题等 L2 规则全程有效。真实书验证（ふか田さめたろう《善于观察…02》）：目录页 18/20px 直接子恢复居中；制作信息 `.mesbox` 在 16/18/20/24px 均 ml=mr 对称居中（1080 与 1400 两窗口）。单测/build 通过。**遗留待确认**：用户报告该书“16px 制作信息同样出错”，但当前自动化未复现（mesbox 居中正常），需要用户给具体现象/截图再查。
-35. **字重支持低于常规（用户功能需求）** → 字重滑块/步进下限从 400 扩到 **300（细体）**，步进序列 `自动→300→400→500→600→700`；`fmtWeight` 显示细体/常规/中等/半粗/粗体。Playwright 验证：拖到 300 后正文 `<p>` computed `font-weight:300`。测试/build 通过。
+## 发布前检查清单
 
-**命定之人目录问题已按条目 31 修复；用户此前说过还有其他问题没报，接手后仍先问用户具体问题，不要急着打包。**
-
-## 5. Windows 打包现状
-
-- 用户机器上的项目副本：`D:\杂物\eupb-reader`（**不是** `C:\epub-reader`，注意中文路径）。
-- 用户 Windows 工具链已就绪并验证过：rustc 1.97.1 MSVC、Node 22、pnpm 11。
-- 更新副本 + 打包的标准命令（PowerShell）：
-
-```powershell
-robocopy "\\wsl.localhost\Ubuntu-25.04\home\herenfor\test\epub-reader" "D:\杂物\eupb-reader" /E /XD node_modules .pnpm-store dist .pw-browsers .pw-libs src-tauri\target /NFL /NDL /NJH
-cd "D:\杂物\eupb-reader"
-.\scripts\build-windows.ps1
-```
-
-- 产物：`src-tauri\target\release\epub-reader.exe` + `bundle\nsis\*-setup.exe`。
-- 版本号三处同步：`src-tauri/tauri.conf.json`、`package.json`、`src-tauri/Cargo.toml`（当前 0.1.2）；`build-windows.ps1` 会自动从 `tauri.conf.json` 读取版本号生成安装包路径，不再硬编码。
-- 注意：`eupb-read/`（项目根旁）是用户的 git 旧快照，**源码唯一真源是 `epub-reader/`**，改代码只改这里。
-
-## 6. 待办 / 可选优化（历史会话遗留，用户未确认）
-
-- 标准页 x/y 显示（第 x/y 标准页）、标准页字数设置（800/1000/1200）
-- 装饰页（分隔图等）深色模式压暗选项
-- Tauri 标题栏定制（titleBarStyle overlay）
-- 未来自动化打包：GitHub Actions Windows runner（用户曾问过 WSL 交叉打包，因网络/沙箱阻力放弃，主机打包为主）
+1. `pnpm test` 全部通过；
+2. `pnpm build` 通过；
+3. 真机（各目标平台）至少执行一次书架导入/阅读/返回/重启恢复；
+4. 版本号三处一致；
+5. 更新 README 功能列表与本文档变更记录。

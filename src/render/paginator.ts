@@ -1,6 +1,6 @@
 import { sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { resolvePath, isExternalUrl, isFragmentOnly, splitHref } from "../core/paths";
-import { isFootnoteLink, resolveFootnote } from "./footnotes";
+import { isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes";
 import type { ResourceServer } from "./resources";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 
@@ -10,6 +10,17 @@ export type ChapterState =
   | { status: "ready"; pageCount: number; currentPage: number; empty: boolean }
   | { status: "error"; message: string };
 
+/** 脚注弹层数据（由分页器发往 UI 层）。 */
+export interface FootnotePayload {
+  text: string;
+  /** 图片注释/富文本注释的 HTML；无则为 undefined */
+  html?: string;
+  /** 标记在 iframe 内视口的矩形 */
+  rect: { left: number; top: number; right: number; bottom: number };
+  /** 点击标记固定（不再随鼠标移出关闭） */
+  pinned: boolean;
+}
+
 export interface LoadOptions {
   /** 跳转到页内锚点（目录跳转用） */
   anchor?: string;
@@ -18,6 +29,12 @@ export interface LoadOptions {
    * 目录里点击“当前章节”时使用；设置重载/窗口重排不传，继续保留位置。
    */
   resetPage?: boolean;
+  /**
+   * 进入章节后停在最后一页（向前回翻上一章时使用）。
+   * paginator 会在新内容布局完成、翻到最后一页之后才显示内容，
+   * 避免先渲染第一页再跳到最后页的闪页。
+   */
+  startAtEnd?: boolean;
 }
 
 /**
@@ -57,12 +74,16 @@ export class ChapterPaginator {
   private footnoteHoverInHandler = (e: Event): void => this.handleFootnoteHoverIn(e);
   private footnoteHoverOutHandler = (e: MouseEvent): void => this.handleFootnoteHoverOut(e);
   private pendingAnchor: string | undefined;
+  /** 本次加载需要“停在最后一页且翻好页再显示”（回翻上一章防闪页） */
+  private pendingStartAtEnd = false;
   private lastState: ChapterState = { status: "loading" };
   private recomputeRetries = 0;
   /** reflow 序号：丢弃过期测量结果，防快速缩放时旧布局覆盖新布局 */
   private reflowSeq = 0;
   /** 最近点击的脚注标记元素（供弹层随重排重新定位） */
   private lastFootnoteEl: HTMLElement | null = null;
+  /** 当前脚注是否被点击固定（固定时不随 hover 移出关闭） */
+  private footnotePinned = false;
   /** 第二遍 margin 处理写回过的元素与原始 inline 值（下次测量前恢复） */
   private marginFixes: Array<{
     el: HTMLElement;
@@ -98,11 +119,8 @@ export class ChapterPaginator {
     private onWheelNavigate?: (dir: 1 | -1) => void,
     /** 键盘翻页回调（焦点在书页内时也有效） */
     private onKeyNavigate?: (dir: 1 | -1) => void,
-    /** 脚注点击回调（文本 + 标记在 iframe 内的视口矩形，由阅读器弹层定位显示） */
-    private onFootnote?: (
-      text: string,
-      rect: { left: number; top: number; right: number; bottom: number }
-    ) => void,
+    /** 脚注弹层回调（含文本/HTML/固定状态），由阅读器 UI 显示 */
+    private onFootnote?: (payload: FootnotePayload) => void,
     /** 桌面端 hover 离开脚注标记时关闭弹层（移动端无 hover，弹层由点击/✕ 关闭） */
     private onFootnoteClose?: () => void,
     /** 外部链接（http/https/mailto/tel）点击回调，由 App 层调系统默认浏览器打开 */
@@ -124,6 +142,7 @@ export class ChapterPaginator {
     }
     this._currentPath = path;
     this.pendingAnchor = opts.anchor;
+    this.pendingStartAtEnd = opts.startAtEnd === true;
     this.emit({ status: "loading" });
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
@@ -177,10 +196,16 @@ export class ChapterPaginator {
       return;
     }
     this.viewer = viewer;
+    // 回翻上一章（startAtEnd）：新内容在布局完成、翻到最后一页之前保持隐藏，
+    // 否则 fonts.ready + 双 rAF 期间第一页已经可见，随后才跳到最后页形成闪页。
+    const atEnd = this.pendingStartAtEnd;
+    viewer.style.visibility = atEnd ? "hidden" : "";
     this.emit({ status: "measuring" });
     doc.addEventListener("load", this.imgHandler, true);
     // 拦截书内链接：防止 iframe 自身导航导致内容丢失
     doc.addEventListener("click", this.linkHandler, true);
+    // 固定脚注：点击正文空白处关闭（标记点击由 linkHandler 处理）
+    doc.addEventListener("click", this.handleDocClick, true);
     // 桌面 hover 弹注（script.js 的鼠标行为）；移动端无 hover，走 click/touch
     doc.addEventListener("mouseover", this.footnoteHoverInHandler, true);
     doc.addEventListener("mouseout", this.footnoteHoverOutHandler, true);
@@ -188,15 +213,24 @@ export class ChapterPaginator {
     doc.addEventListener("wheel", this.wheelHandler, { passive: false });
     // 键盘翻页：焦点在书页内时，方向键事件不会冒泡到主窗口，需在此监听
     doc.addEventListener("keydown", this.keyHandler);
-    void this.measure().then(() => {
-      if (seq !== this.loadSeq || this.disposed) return;
-      this.recompute(true);
-      // 目录跳转：定位到锚点所在页
-      if (this.pendingAnchor) {
-        this.jumpToAnchor(this.pendingAnchor);
-        this.pendingAnchor = undefined;
-      }
-    });
+    const showViewer = (): void => {
+      if (this.viewer === viewer) viewer.style.visibility = "";
+    };
+    void this.measure()
+      .then(() => {
+        if (seq !== this.loadSeq || this.disposed) return;
+        this.recompute(true);
+        // 目录跳转：定位到锚点所在页
+        if (this.pendingAnchor) {
+          this.jumpToAnchor(this.pendingAnchor);
+          this.pendingAnchor = undefined;
+        }
+        if (atEnd) {
+          this.pendingStartAtEnd = false;
+          this.setPage(Math.max(0, this.metrics.pageCount - 1));
+        }
+      })
+      .finally(showViewer);
   };
 
   /** 设置分栏并等待字体就绪后测量（带超时保护：任何一步挂起都不能阻塞 ready）。 */
@@ -906,7 +940,13 @@ export class ChapterPaginator {
     if (isFootnoteLink(a) && this.contentDoc) {
       const info = resolveFootnote(this.contentDoc, a);
       if (info) {
-        this.showFootnote(a, info.text);
+        // 点击 = 固定弹窗；再次点击同一标记 = 取消固定并关闭
+        if (this.footnotePinned && this.lastFootnoteEl === a) {
+          this.footnotePinned = false;
+          this.onFootnoteClose?.();
+          return;
+        }
+        this.showFootnote(a, info, true);
         return;
       }
     }
@@ -920,32 +960,49 @@ export class ChapterPaginator {
   }
 
   /** 显示脚注弹层：记录标记（供重排重定位）并通知阅读器。 */
-  private showFootnote(a: HTMLAnchorElement, text: string): void {
+  private showFootnote(a: HTMLAnchorElement, info: FootnoteInfo, pinned: boolean): void {
     this.lastFootnoteEl = a;
+    this.footnotePinned = pinned;
     const r = a.getBoundingClientRect();
-    this.onFootnote?.(text, {
-      left: r.left,
-      top: r.top,
-      right: r.right,
-      bottom: r.bottom,
+    this.onFootnote?.({
+      text: info.text,
+      html: info.html,
+      pinned,
+      rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
     });
   }
 
-  /** 桌面 hover 弹注（script.js 的 mouseover 行为）。 */
+  /** 桌面 hover 弹注（script.js 的 mouseover 行为）；已固定时不切换。 */
   private handleFootnoteHoverIn(e: Event): void {
+    if (this.footnotePinned) return;
     const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
     if (!a || !this.contentDoc || !isFootnoteLink(a)) return;
     const info = resolveFootnote(this.contentDoc, a);
-    if (info) this.showFootnote(a, info.text);
+    if (info) this.showFootnote(a, info, false);
   }
 
-  /** hover 移出标记时关闭弹层；在标记内部移动不关闭。 */
+  /** hover 移出标记时关闭弹层；在标记内部移动不关闭；固定状态不关闭。 */
   private handleFootnoteHoverOut(e: MouseEvent): void {
+    if (this.footnotePinned) return;
     const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
     if (!a || !isFootnoteLink(a)) return;
     const rel = e.relatedTarget as Node | null;
     if (rel && a.contains(rel)) return;
     this.onFootnoteClose?.();
+  }
+
+  /** 固定脚注后点击正文空白处关闭。 */
+  private handleDocClick = (e: Event): void => {
+    if (!this.footnotePinned) return;
+    const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
+    if (a && isFootnoteLink(a)) return; // 标记点击由 linkHandler 处理并 stopPropagation
+    this.footnotePinned = false;
+    this.onFootnoteClose?.();
+  };
+
+  /** UI 层主动关闭固定脚注后，同步分页器状态（避免 hover 被锁住）。 */
+  dismissFootnote(): void {
+    this.footnotePinned = false;
   }
 
   /** 当前脚注标记在 iframe 内的视口矩形（弹层随重排重定位用）；无则 null。 */
@@ -1038,8 +1095,10 @@ export class ChapterPaginator {
 
   private cleanupDoc(): void {
     this.lastFootnoteEl = null;
+    this.footnotePinned = false;
     this.contentDoc?.removeEventListener("load", this.imgHandler, true);
     this.contentDoc?.removeEventListener("click", this.linkHandler, true);
+    this.contentDoc?.removeEventListener("click", this.handleDocClick, true);
     this.contentDoc?.removeEventListener("wheel", this.wheelHandler);
     this.contentDoc?.removeEventListener("keydown", this.keyHandler);
     this.contentDoc?.removeEventListener("mouseover", this.footnoteHoverInHandler, true);

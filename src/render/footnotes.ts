@@ -53,7 +53,9 @@ export function isFootnoteLink(a: HTMLAnchorElement): boolean {
 
 export interface FootnoteInfo {
   text: string;
-  /** 注释内容元素（当前只用于诊断/后续扩展） */
+  /** 注释含图片等富内容时的 HTML（已消毒章内 DOM，图片 src 已是 blob URL） */
+  html?: string;
+  /** 注释内容元素（用于后续扩展） */
   target: HTMLElement;
 }
 
@@ -70,7 +72,11 @@ export function resolveFootnote(doc: Document, a: HTMLAnchorElement): FootnoteIn
   let target = findAsideById(a.closest("note"), anchor) ?? findAsideById(doc, anchor);
   if (!target) return null;
   const asideText = cleanText(target);
-  if (asideText) return { text: asideText, target };
+  if (asideText) {
+    // 图片注释/带排版结构的注释：弹层需要渲染富内容而不是纯文本
+    const html = target.querySelector("img") ? target.innerHTML : undefined;
+    return { text: asideText, html, target };
+  }
   const attrText = cleanText(a.querySelector("img") ?? a);
   const zyText = (a.querySelector("img")?.getAttribute("zy-footnote") ?? "")
     .replace(/\s+/g, " ")

@@ -68,6 +68,24 @@ describe("script.js（LK 参考脚本）脚注模式识别", () => {
     expect(resolveFootnote(d, a)?.text).toBe("注：来自属性");
   });
 
+  it("图片注释提取为富文本 HTML（供弹层渲染）", () => {
+    const d = doc(`
+<note><p>正文<sup><a class="duokan-footnote" href="#n1"><img alt="note"/></a></sup></p>
+<aside id="n1"><p>注：内容</p><div><img alt="note3" src="note3.webp"/></div></aside></note>`);
+    const a = anchor(d, "a");
+    const info = resolveFootnote(d, a);
+    expect(info?.text).toBe("注：内容");
+    expect(info?.html).toContain('<img alt="note3"');
+  });
+
+  it("纯文本注释不生成 HTML", () => {
+    const d = doc(`
+<note><p><sup><a href="#n1">*</a></sup></p>
+<aside id="n1"><p>纯文本注释</p></aside></note>`);
+    const a = anchor(d, "a");
+    expect(resolveFootnote(d, a)?.html).toBeUndefined();
+  });
+
   it("目标缺失时 resolve 返回 null（交给常规链接跳转逻辑）", () => {
     const d = doc(`
 <note><p><sup><a class="duokan-footnote" href="other.xhtml#n1">*</a></sup></p></note>`);

@@ -5,8 +5,9 @@ import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 
-const bookDir = "/home/herenfor/test";
-const outDir = resolve(process.argv[2] ?? join(bookDir, ".pw-xdg", "fonts"));
+const rootDir = "/home/herenfor/test";
+const bookDir = join(rootDir, "测试用epub");
+const outDir = resolve(process.argv[2] ?? join(rootDir, ".pw-xdg", "fonts"));
 mkdirSync(outDir, { recursive: true });
 
 const epubs = readdirSync(bookDir).filter((f) => f.toLowerCase().endsWith(".epub"));

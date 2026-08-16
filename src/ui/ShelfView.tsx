@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { Theme } from "../render/settings";
 import {
   filterShelfEntries,
   formatShelfTime,
@@ -8,13 +9,19 @@ import {
   type ShelfSort,
 } from "./shelf";
 
+export type ShelfDensity = "comfortable" | "standard" | "compact";
+
 export interface ShelfViewProps {
   entries: ShelfEntry[];
   /** 全局忙（导入/打开/删除中），书架禁用交互防止重复操作 */
   busy: boolean;
+  theme: Theme;
+  onThemeChange(theme: Theme): void;
   onOpen(id: string): void;
   onImport(): void;
   onDelete(id: string): void;
+  /** 批量删除（选中多本时由确认弹窗调用） */
+  onDeleteMany(ids: string[]): void;
 }
 
 function Cover({ entry }: { entry: ShelfEntry }) {
@@ -55,54 +62,201 @@ function Cover({ entry }: { entry: ShelfEntry }) {
   return <img className="shelf-cover" src={url} alt={entry.title} loading="lazy" />;
 }
 
+interface ShelfSelectOption {
+  value: string;
+  label: string;
+}
+
+function ShelfSelect(props: {
+  value: string;
+  options: ShelfSelectOption[];
+  onChange(value: string): void;
+  title?: string;
+  busy?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const current = props.options.find((o) => o.value === props.value) ?? props.options[0];
+
+  return (
+    <div className="shelf-select-wrap" ref={ref}>
+      <button
+        className={`shelf-select-btn${open ? " open" : ""}`}
+        title={props.title}
+        disabled={props.busy}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>{current.label}</span>
+        <span className="shelf-select-arrow" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="shelf-select-pop" role="listbox">
+          {props.options.map((o) => (
+            <button
+              key={o.value}
+              className={`shelf-select-option${o.value === props.value ? " selected" : ""}`}
+              role="option"
+              aria-selected={o.value === props.value}
+              onClick={() => {
+                props.onChange(o.value);
+                setOpen(false);
+              }}
+            >
+              {o.label}
+              {o.value === props.value ? <span className="shelf-select-check">✓</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ShelfView(props: ShelfViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<ShelfSort>("recent");
-  const [deleteTarget, setDeleteTarget] = useState<ShelfEntry | null>(null);
-
+  const [density, setDensity] = useState<ShelfDensity>("standard");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleteTargets, setDeleteTargets] = useState<ShelfEntry[] | null>(null);
   const visible = useMemo(() => {
     const q = filterShelfEntries(props.entries, query);
     return sortShelfEntries(q, sort);
   }, [props.entries, query, sort]);
 
+  const toggleSelected = (id: string): void => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const enterSelection = (): void => {
+    setSelectedIds(new Set());
+    setSelectionMode(true);
+  };
+
+  const exitSelection = (): void => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  };
+
   const now = Date.now();
 
   return (
-    <div className={`shelf-view${props.busy ? " busy" : ""}`} aria-busy={props.busy}>
+    <div
+      className={`shelf-view density-${density}${selectionMode ? " selection-mode" : ""}${props.busy ? " busy" : ""}`}
+      aria-busy={props.busy}
+    >
       <header className="shelf-head">
-        <div className="shelf-title-block">
-          <span className="shelf-title">书架</span>
-          <span className="shelf-count">{props.entries.length} 本</span>
-        </div>
-        <div className="shelf-controls">
-          <input
-            className="shelf-search"
-            type="search"
-            placeholder="搜索书名或作者"
-            value={query}
-            disabled={props.busy}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <select
-            className="shelf-sort"
-            value={sort}
-            disabled={props.busy}
-            onChange={(e) => setSort(e.target.value as ShelfSort)}
-            title="排序方式"
-          >
-            <option value="recent">最近阅读</option>
-            <option value="added">最近添加</option>
-            <option value="title">书名</option>
-          </select>
-          <button
-            className="shelf-import tb-btn"
-            onClick={props.onImport}
-            disabled={props.busy}
-            title="导入 EPUB 到书架"
-          >
-            ＋ 导入
-          </button>
-        </div>
+        {selectionMode ? (
+          <>
+            <div className="shelf-title-block selection-title">
+              <span className="shelf-title">已选 {selectedIds.size} 本</span>
+            </div>
+            <div className="shelf-controls selection-actions">
+              <button className="shelf-select-cancel tb-btn" onClick={exitSelection}>
+                取消
+              </button>
+              <button
+                className="shelf-select-delete tb-btn"
+                disabled={selectedIds.size === 0 || props.busy}
+                onClick={() => {
+                  const targets = props.entries.filter((e) => selectedIds.has(e.id));
+                  if (targets.length > 0) setDeleteTargets(targets);
+                }}
+              >
+                🗑 确认删除{selectedIds.size > 0 ? `（${selectedIds.size}）` : ""}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="shelf-title-block">
+              <span className="shelf-title">书架</span>
+              <span className="shelf-count">{props.entries.length} 本</span>
+            </div>
+            <div className="shelf-controls">
+              <input
+                className="shelf-search"
+                type="search"
+                placeholder="搜索书名或作者"
+                value={query}
+                disabled={props.busy}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <ShelfSelect
+                value={sort}
+                busy={props.busy}
+                title="排序方式"
+                options={[
+                  { value: "recent", label: "最近阅读" },
+                  { value: "added", label: "最近添加" },
+                  { value: "title", label: "书名" },
+                ]}
+                onChange={(v) => setSort(v as ShelfSort)}
+              />
+              <ShelfSelect
+                value={density}
+                busy={props.busy}
+                title="排布密度"
+                options={[
+                  { value: "comfortable", label: "舒适" },
+                  { value: "standard", label: "标准" },
+                  { value: "compact", label: "紧凑" },
+                ]}
+                onChange={(v) => setDensity(v as ShelfDensity)}
+              />
+              <ShelfSelect
+                value={props.theme}
+                busy={props.busy}
+                title="书架主题"
+                options={[
+                  { value: "light", label: "浅色" },
+                  { value: "dark", label: "深色" },
+                  { value: "sepia", label: "羊皮纸" },
+                ]}
+                onChange={(v) => props.onThemeChange(v as Theme)}
+              />
+              <button
+                className="shelf-batch-btn tb-btn"
+                onClick={enterSelection}
+                disabled={props.busy || props.entries.length === 0}
+                title="批量选择书籍"
+              >
+                🗑 批量删除
+              </button>
+              <button
+                className="shelf-import tb-btn"
+                onClick={props.onImport}
+                disabled={props.busy}
+                title="导入 EPUB 到书架"
+              >
+                ＋ 导入
+              </button>
+            </div>
+          </>
+        )}
       </header>
 
       {props.entries.length === 0 ? (
@@ -129,17 +283,25 @@ export function ShelfView(props: ShelfViewProps) {
             return (
               <div
                 key={entry.id}
-                className="shelf-card"
+                className={`shelf-card${selectedIds.has(entry.id) ? " selected" : ""}`}
                 role="button"
                 tabIndex={0}
-                onClick={() => props.onOpen(entry.id)}
+                onClick={() => {
+                  if (selectionMode) toggleSelected(entry.id);
+                  else props.onOpen(entry.id);
+                }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !props.busy) props.onOpen(entry.id);
+                  if (e.key !== "Enter") return;
+                  if (selectionMode) toggleSelected(entry.id);
+                  else props.onOpen(entry.id);
                 }}
                 title={`${entry.title}${entry.creator ? ` · ${entry.creator}` : ""}`}
               >
                 <div className="shelf-cover-box">
                   <Cover entry={entry} />
+                  {selectionMode && (
+                    <span className="shelf-select-mark">{selectedIds.has(entry.id) ? "✓" : ""}</span>
+                  )}
                   {entry.progressPct > 0 && (
                     <div className="shelf-progress-wrap">
                       <div className="shelf-progress">
@@ -154,25 +316,27 @@ export function ShelfView(props: ShelfViewProps) {
                   {recent && entry.progressPct > 0 && (
                     <span className="shelf-continue">继续阅读</span>
                   )}
-                  {entry.isNew && <span className="shelf-new">新</span>}
-                  <span
-                    className="shelf-delete"
-                    title="从书架删除"
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!props.busy) setDeleteTarget(entry);
-                    }}
-                    onKeyDown={(e) => {
-                      if ((e.key === "Enter" || e.key === " ") && !props.busy) {
+                  {entry.isNew && !selectionMode && <span className="shelf-new">新</span>}
+                  {!selectionMode && (
+                    <span
+                      className="shelf-delete"
+                      title="从书架删除"
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
                         e.stopPropagation();
-                        props.onDelete(entry.id);
-                      }
-                    }}
-                  >
-                    ✕
-                  </span>
+                        if (!props.busy) setDeleteTargets([entry]);
+                      }}
+                      onKeyDown={(e) => {
+                        if ((e.key === "Enter" || e.key === " ") && !props.busy) {
+                          e.stopPropagation();
+                          if (!props.busy) setDeleteTargets([entry]);
+                        }
+                      }}
+                    >
+                      ✕
+                    </span>
+                  )}
                 </div>
                 <div className="shelf-card-title">{entry.title}</div>
                 <div className="shelf-card-meta">
@@ -188,27 +352,45 @@ export function ShelfView(props: ShelfViewProps) {
         </div>
       )}
 
-      {deleteTarget && (
-        <div className="shelf-confirm-backdrop" onClick={() => setDeleteTarget(null)}>
+      {deleteTargets && (
+        <div className="shelf-confirm-backdrop" onClick={() => setDeleteTargets(null)}>
           <div
             className="shelf-confirm"
             role="dialog"
             aria-modal="true"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="shelf-confirm-title">从书架删除？</div>
-            <div className="shelf-confirm-name">{deleteTarget.title}</div>
+            <div className="shelf-confirm-title">
+              {deleteTargets.length > 1
+                ? `删除选中的 ${deleteTargets.length} 本？`
+                : "从书架删除？"}
+            </div>
+            <div className="shelf-confirm-name">
+              {deleteTargets.length > 1
+                ? deleteTargets
+                    .slice(0, 3)
+                    .map((t) => t.title)
+                    .join("、") + (deleteTargets.length > 3 ? "…" : "")
+                : deleteTargets[0].title}
+            </div>
             <div className="shelf-confirm-hint">不会删除原始文件；阅读进度也会一并移除。</div>
             <div className="shelf-confirm-actions">
-              <button className="tb-btn" onClick={() => setDeleteTarget(null)}>
+              <button className="tb-btn" onClick={() => setDeleteTargets(null)}>
                 取消
               </button>
               <button
                 className="tb-btn danger"
                 onClick={() => {
-                  const id = deleteTarget.id;
-                  setDeleteTarget(null);
-                  props.onDelete(id);
+                  const ids = deleteTargets.map((t) => t.id);
+                  setDeleteTargets(null);
+                  if (selectionMode) {
+                    // 批量选择模式：无论选 1 本还是多本，确认后都退出选择模式
+                    if (ids.length > 1) props.onDeleteMany(ids);
+                    else props.onDelete(ids[0]);
+                    exitSelection();
+                  } else {
+                    props.onDelete(ids[0]);
+                  }
                 }}
               >
                 删除

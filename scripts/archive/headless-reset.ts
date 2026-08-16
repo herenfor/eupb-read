@@ -17,7 +17,7 @@ await new Promise<void>((r) => server.listen(8111, "127.0.0.1", r));
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 await page.goto("http://127.0.0.1:8111/");
-await page.setInputFiles('input[type="file"]', "/home/herenfor/test/【测试专用】记忆的琴键.epub");
+await page.setInputFiles('input[type="file"]', "/home/herenfor/test/测试用epub/【测试专用】记忆的琴键.epub");
 await page.waitForSelector(".reader iframe", { timeout: 30000 });
 await page.waitForTimeout(2000);
 

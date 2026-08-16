@@ -12,7 +12,7 @@ import { ResourceServer } from "../src/render/resources";
 import { loadBook } from "../src/core/book";
 
 const BOOK =
-  "/home/herenfor/test/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub";
+  "/home/herenfor/test/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub";
 
 const bytes = new Uint8Array(readFileSync(BOOK));
 const book: Book = await loadBook(bytes);

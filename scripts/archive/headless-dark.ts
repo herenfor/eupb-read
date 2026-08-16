@@ -17,7 +17,7 @@ await new Promise<void>((r) => server.listen(8083, "127.0.0.1", r));
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 await page.goto("http://127.0.0.1:8083/");
-await page.setInputFiles('input[type="file"]', "/home/herenfor/test/【测试专用】记忆的琴键.epub");
+await page.setInputFiles('input[type="file"]', "/home/herenfor/test/测试用epub/【测试专用】记忆的琴键.epub");
 await page.waitForSelector(".toc-panel .toc-item", { timeout: 30000 });
 await page.waitForTimeout(1200);
 const colors = () =>

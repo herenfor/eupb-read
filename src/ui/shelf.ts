@@ -167,21 +167,29 @@ class IndexedDbShelfStore implements ShelfStore {
   async save(input: ShelfSaveInput): Promise<ShelfEntry> {
     const db = await openDb();
     try {
+      const existing = (await reqAsPromise(
+        db.transaction("meta", "readonly").objectStore("meta").get(input.entry.id)
+      )) as ShelfEntry | undefined;
+      // 重复导入同一本书：只更新文件与元数据，保留阅读进度与“新”标记
       const entry: ShelfEntry = {
         id: input.entry.id,
         title: input.entry.title,
         creator: input.entry.creator,
         fileName: input.entry.fileName,
         fileSize: input.entry.fileSize,
-        coverMime: input.coverMime ?? input.entry.coverMime ?? "",
-        addedAtMs: input.entry.addedAtMs ?? Date.now(),
-        lastReadAtMs: input.entry.lastReadAtMs ?? Date.now(),
-        spineIndex: input.entry.spineIndex ?? 0,
-        page: input.entry.page ?? 0,
-        progressPct: input.entry.progressPct ?? 0,
-        anchorIndex: input.entry.anchorIndex ?? null,
-        anchorRatio: input.entry.anchorRatio ?? null,
-        isNew: input.entry.isNew ?? true,
+        coverMime:
+          input.coverMime ??
+          input.entry.coverMime ??
+          existing?.coverMime ??
+          "",
+        addedAtMs: existing?.addedAtMs ?? input.entry.addedAtMs ?? Date.now(),
+        lastReadAtMs: existing?.lastReadAtMs ?? input.entry.lastReadAtMs ?? Date.now(),
+        spineIndex: existing?.spineIndex ?? input.entry.spineIndex ?? 0,
+        page: existing?.page ?? input.entry.page ?? 0,
+        progressPct: existing?.progressPct ?? input.entry.progressPct ?? 0,
+        anchorIndex: existing?.anchorIndex ?? input.entry.anchorIndex ?? null,
+        anchorRatio: existing?.anchorRatio ?? input.entry.anchorRatio ?? null,
+        isNew: existing?.isNew ?? input.entry.isNew ?? true,
       };
       const tx = db.transaction(["meta", "books", "covers"], "readwrite");
       tx.objectStore("meta").put(entry);
@@ -195,7 +203,7 @@ class IndexedDbShelfStore implements ShelfStore {
           mime: entry.coverMime,
           bytes: new Blob([input.coverBytes.slice().buffer as ArrayBuffer]),
         });
-      } else {
+      } else if (!existing) {
         tx.objectStore("covers").delete(entry.id);
       }
       await txDone(tx);

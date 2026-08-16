@@ -17,7 +17,7 @@ await new Promise<void>((r) => server.listen(8076, "127.0.0.1", r));
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 await page.goto("http://127.0.0.1:8076/");
-await page.setInputFiles('input[type="file"]', "/home/herenfor/test/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub");
+await page.setInputFiles('input[type="file"]', "/home/herenfor/test/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub");
 await page.waitForSelector(".reader iframe", { timeout: 30000 });
 await page.waitForTimeout(3000);
 
