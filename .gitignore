@@ -11,3 +11,4 @@ src-tauri/gen/
 .toolchain/
 .xwin-cache/
 .cache/
+.img-repro.png
