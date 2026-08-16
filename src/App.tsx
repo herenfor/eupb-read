@@ -16,11 +16,19 @@ import { FootnotePop } from "./ui/FootnotePop";
 import { TocPanel } from "./ui/TocPanel";
 import { LogPanel, type LogItem } from "./ui/LogPanel";
 import { ReaderView, type ReaderHandle } from "./ui/ReaderView";
+import { ShelfView } from "./ui/ShelfView";
+import {
+  getShelfStore,
+  shelfIdFor,
+  type ShelfEntry,
+  type ShelfProgressPatch,
+} from "./ui/shelf";
 import {
   readProgress,
   writeProgress,
   readSavedSettings,
   writeSavedSettings,
+  type SavedProgress,
 } from "./ui/storage";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { invoke } from "@tauri-apps/api/core";
@@ -97,36 +105,39 @@ export default function App() {
   const [chapterChars, setChapterChars] = useState<number[]>([]);
   const [clock, setClock] = useState(() => new Date());
   const [dragActive, setDragActive] = useState(false);
+  // ---- 书架（0.1.4） ----
+  const [view, setView] = useState<"shelf" | "reader">("shelf");
+  const [shelfEntries, setShelfEntries] = useState<ShelfEntry[]>([]);
+  const [shelfError, setShelfError] = useState<string | null>(null);
+  const [shelfNotice, setShelfNotice] = useState<{
+    kind: "ok" | "warn" | "error";
+    text: string;
+  } | null>(null);
+  const [shelfBusy, setShelfBusy] = useState(false);
+  const [currentShelfId, setCurrentShelfId] = useState<string | null>(null);
+  const shelfBusyRef = useRef(false);
+  const shelfEntriesRef = useRef<ShelfEntry[]>([]);
+  shelfEntriesRef.current = shelfEntries;
 
   const readerRef = useRef<ReaderHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialPagePendingRef = useRef(false);
   const initialPageRef = useRef(0);
 
-  // ---- 打开文件 ----
-  const handleOpenFile = useCallback(async (file: File) => {
-    setPhase({ phase: "loading", fileName: file.name });
-    try {
-      const buf = new Uint8Array(await file.arrayBuffer());
-      const b = await loadBook(buf);
-      if (b.spine.length === 0) {
-        setPhase({ phase: "error", message: "书中没有可阅读的内容（spine 为空）" });
-        return;
-      }
-      const srv = new ResourceServer(b);
-      // 各线性章节有效字数（去标签、去空白），供标准页进度推算
-      const stripTags = (t: string): string => t.replace(/<[^>]*>/g, "").replace(/\s/g, "");
-      const chars: number[] = b.spine.map((item) => {
-        if (!item.linear) return 0;
-        const mi = b.manifest.get(item.idref);
-        if (!mi) return 0;
-        const p = resolvePath(b.opfPath, mi.href);
-        const text = srv.textFor(p);
-        return text ? stripTags(text).length : 0;
-      });
+  // ---- 打开书（书架导入/书架打开共用；只承载阅读器状态，不改渲染核心） ----
+  const openParsedBook = useCallback(
+    (
+      b: Book,
+      srv: ResourceServer,
+      chars: number[],
+      fileName: string,
+      fileSize: number,
+      savedOverride: SavedProgress | null,
+      shelfId: string | null
+    ) => {
       setChapterChars(chars);
-      const key = bookKeyOf(b, file.name, file.size);
-      const saved = readProgress(key);
+      const key = bookKeyOf(b, fileName, fileSize);
+      const saved = savedOverride ?? readProgress(key);
       const start = clamp(saved?.spineIndex ?? firstLinear(b), 0, b.spine.length - 1);
       setBook(b);
       setServer(srv);
@@ -138,15 +149,166 @@ export default function App() {
       initialPagePendingRef.current = true;
       initialPageRef.current = saved?.page ?? 0;
       setInitialAnchor(saved?.anchor ?? null);
+      setCurrentShelfId(shelfId);
+      setView("reader");
       setPhase({ phase: "ready" });
-    } catch (e) {
-      setPhase({
-        phase: "error",
-        message:
-          e instanceof DrmError ? e.message : `无法打开文件：${(e as Error).message}`,
-      });
+    },
+    []
+  );
+
+  // ---- 批量导入 EPUB 并入库（可读取才算导入成功；导入后停留在书架） ----
+  const handleImportFiles = useCallback(async (files: File[]) => {
+    const list = files.filter((f) => f.name.toLowerCase().endsWith(".epub"));
+    if (list.length === 0 || shelfBusyRef.current) return;
+    shelfBusyRef.current = true;
+    setShelfBusy(true);
+    setShelfNotice(null);
+    const ok: string[] = [];
+    const failed: string[] = [];
+    for (const file of list) {
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        const b = await loadBook(buf);
+        if (b.spine.length === 0) {
+          throw new Error("书中没有可阅读的内容（spine 为空）");
+        }
+        const id = shelfIdFor(b.metadata.identifier || "", file.name, file.size);
+        const cover = b.coverHref ? b.resources.get(b.coverHref) : undefined;
+        const savedEntry = await getShelfStore().save({
+          entry: {
+            id,
+            title: b.metadata.title || file.name.replace(/\.epub$/i, ""),
+            creator: b.metadata.creator ?? "",
+            fileName: file.name,
+            fileSize: file.size,
+            coverMime: cover?.mediaType ?? "",
+            addedAtMs: Date.now(),
+          },
+          bytes: buf,
+          coverBytes: cover?.data,
+          coverMime: cover?.mediaType,
+        });
+        setShelfEntries((prev) => [savedEntry, ...prev.filter((e) => e.id !== id)]);
+        ok.push(savedEntry.title);
+      } catch (e) {
+        failed.push(
+          `${file.name}：${e instanceof DrmError ? e.message : (e as Error).message}`
+        );
+      }
     }
+    const okText = ok.length > 0 ? `已导入 ${ok.length} 本` : "";
+    const failText = failed.length > 0 ? `；失败 ${failed.length} 本（${failed.join("；")}）` : "";
+    setShelfNotice({
+      kind: failed.length > 0 ? (ok.length > 0 ? "warn" : "error") : "ok",
+      text: `${okText}${failText}` || "没有可导入的文件",
+    });
+    shelfBusyRef.current = false;
+    setShelfBusy(false);
   }, []);
+
+  // ---- 书架启动加载 ----
+  useEffect(() => {
+    let cancelled = false;
+    getShelfStore()
+      .list()
+      .then((entries) => {
+        if (!cancelled) setShelfEntries(entries);
+      })
+      .catch((e) => {
+        if (!cancelled) setShelfError(`无法读取书架：${String(e)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 导入结果提示：6 秒后自动消失
+  useEffect(() => {
+    if (!shelfNotice) return;
+    const timer = window.setTimeout(() => setShelfNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [shelfNotice]);
+
+  // ---- 从书架打开 ----
+  const handleShelfOpen = useCallback(
+    async (id: string) => {
+      if (shelfBusyRef.current) return;
+      const entry = shelfEntriesRef.current.find((e) => e.id === id);
+      if (!entry) return;
+      shelfBusyRef.current = true;
+      setShelfBusy(true);
+      setShelfError(null);
+      setPhase({ phase: "loading", fileName: entry.fileName });
+      try {
+        const buf = await getShelfStore().readBook(id);
+        const b = await loadBook(buf);
+        if (b.spine.length === 0) {
+          setShelfError("这本书没有可阅读的内容");
+          shelfBusyRef.current = false;
+          setShelfBusy(false);
+          return;
+        }
+        const srv = new ResourceServer(b);
+        const stripTags = (t: string): string => t.replace(/<[^>]*>/g, "").replace(/\s/g, "");
+        const chars: number[] = b.spine.map((item) => {
+          if (!item.linear) return 0;
+          const mi = b.manifest.get(item.idref);
+          if (!mi) return 0;
+          const p = resolvePath(b.opfPath, mi.href);
+          const text = srv.textFor(p);
+          return text ? stripTags(text).length : 0;
+        });
+        const saved: SavedProgress = {
+          spineIndex: entry.spineIndex,
+          page: entry.page,
+          anchor:
+            entry.anchorIndex !== null && entry.anchorIndex !== undefined &&
+            entry.anchorRatio !== null && entry.anchorRatio !== undefined
+              ? { index: entry.anchorIndex, ratio: entry.anchorRatio }
+              : null,
+        };
+        // 第一次打开：立即清除“新”标记（后端落盘异步完成，不阻塞阅读）
+        if (entry.isNew) {
+          setShelfEntries((prev) =>
+            prev.map((e) => (e.id === id ? { ...e, isNew: false } : e))
+          );
+          void getShelfStore()
+            .markOpened(id)
+            .then((savedEntry) =>
+              setShelfEntries((prev) => prev.map((e) => (e.id === id ? savedEntry : e)))
+            )
+            .catch(() => {
+              /* 下次打开时再尝试清除 */
+            });
+        }
+        openParsedBook(b, srv, chars, entry.fileName, entry.fileSize, saved, id);
+        shelfBusyRef.current = false;
+        setShelfBusy(false);
+      } catch (e) {
+        shelfBusyRef.current = false;
+        setShelfBusy(false);
+        setShelfError(`打开失败：${(e as Error).message}`);
+      }
+    },
+    [openParsedBook]
+  );
+
+  const handleShelfDelete = useCallback(async (id: string) => {
+    if (shelfBusyRef.current) return;
+    shelfBusyRef.current = true;
+    setShelfBusy(true);
+    try {
+      await getShelfStore().deleteBook(id);
+      setShelfEntries((prev) => prev.filter((e) => e.id !== id));
+      if (currentShelfId === id) setCurrentShelfId(null);
+      setShelfError(null);
+    } catch (e) {
+      setShelfError(`删除失败：${String(e)}`);
+    } finally {
+      shelfBusyRef.current = false;
+      setShelfBusy(false);
+    }
+  }, [currentShelfId]);
 
   // ---- 章节状态回调（稳定引用；负责恢复页码） ----
   const onPageState = useCallback((s: ChapterState) => {
@@ -255,7 +417,7 @@ export default function App() {
 
   // 排版属性步进（undefined=自动跟随书，循环切换）
   const LINE_HEIGHTS: Array<number | undefined> = [undefined, 1.4, 1.6, 1.8, 2.0, 2.2];
-  const FONT_WEIGHTS: Array<number | undefined> = [undefined, 400, 500, 700];
+  const FONT_WEIGHTS: Array<number | undefined> = [undefined, 300, 400, 500, 600, 700];
   const SPACINGS: Array<number | undefined> = [undefined, 2, 4, 6, 8];
   const WORD_SPACINGS: Array<number | undefined> = [undefined, 4, 8, 12, 16];
   const stepValue = (
@@ -337,8 +499,10 @@ export default function App() {
       const prevent = (e: DragEvent): void => e.preventDefault();
       const drop = (e: DragEvent): void => {
         e.preventDefault();
-        const f = e.dataTransfer?.files?.[0];
-        if (f && f.name.toLowerCase().endsWith(".epub")) void handleOpenFile(f);
+        const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
+          f.name.toLowerCase().endsWith(".epub")
+        );
+        if (files.length > 0) void handleImportFiles(files);
       };
       window.addEventListener("dragover", prevent);
       window.addEventListener("drop", drop);
@@ -358,13 +522,18 @@ export default function App() {
           setDragActive(false);
         } else if (p.type === "drop") {
           setDragActive(false);
-          const path = p.paths.find((x) => x.toLowerCase().endsWith(".epub"));
-          if (!path) return;
-          const name = path.split(/[\\/]/).pop() || "book.epub";
-          invoke<ArrayBuffer>("read_epub_file", { path })
-            .then((buf) => handleOpenFile(new File([buf], name)))
+          const paths = p.paths.filter((x) => x.toLowerCase().endsWith(".epub"));
+          if (paths.length === 0) return;
+          Promise.all(
+            paths.map(async (path) => {
+              const buf = await invoke<ArrayBuffer>("read_epub_file", { path });
+              const name = path.split(/[\\/]/).pop() || "book.epub";
+              return new File([buf], name);
+            })
+          )
+            .then((files) => handleImportFiles(files))
             .catch((err) => {
-              setPhase({ phase: "error", message: `无法读取文件：${String(err)}` });
+              setShelfError(`无法读取文件：${String(err)}`);
             });
         }
       })
@@ -378,7 +547,7 @@ export default function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [handleOpenFile]);
+  }, [handleImportFiles]);
 
   // ---- 派生 ----
   const ready = phase.phase === "ready" && book !== null && server !== null;
@@ -417,6 +586,42 @@ export default function App() {
       ? Math.min(100, Math.round((stdPagesRead / stdPagesTotal) * 100))
       : 0;
 
+  // ---- 书架进度回写（阅读器状态→书架索引，不修改阅读器本体） ----
+  const persistShelfProgress = useCallback(() => {
+    if (view !== "reader" || !currentShelfId || chapterState.status !== "ready") return;
+    const a = readerRef.current?.getReadingAnchor();
+    const patch: ShelfProgressPatch = {
+      lastReadAtMs: Date.now(),
+      spineIndex,
+      page: chapterState.currentPage,
+      progressPct,
+      anchorIndex: a?.index ?? null,
+      anchorRatio: a?.ratio ?? null,
+    };
+    void getShelfStore()
+      .updateProgress(currentShelfId, patch)
+      .then((entry) =>
+        setShelfEntries((prev) => prev.map((e) => (e.id === entry.id ? entry : e)))
+      )
+      .catch(() => {
+        /* 进度回写失败不打断阅读 */
+      });
+  }, [view, currentShelfId, chapterState, spineIndex, progressPct]);
+
+  useEffect(() => {
+    persistShelfProgress();
+  }, [persistShelfProgress]);
+
+  const handleBackToShelf = useCallback(() => {
+    persistShelfProgress();
+    setFootnote(null);
+    setTocOpen(false);
+    setMenuOpen(false);
+    setLogOpen(false);
+    setDiagText(null);
+    setView("shelf");
+  }, [persistShelfProgress]);
+
   const currentChapterLabel = (() => {
     if (!ready || !currentPath) return "";
     const { path } = splitHref(currentPath);
@@ -439,117 +644,134 @@ export default function App() {
   return (
     <div
       className={`app${dragActive ? " drag-active" : ""}`}
-      data-theme={settings.theme === "dark" ? "dark" : undefined}
+      data-theme={settings.theme === "dark" ? "dark" : settings.theme === "sepia" ? "sepia" : undefined}
       style={{ "--ui-scale": uiScale } as CSSProperties}
     >
       <Toolbar
-        title={ready ? book!.metadata.title : "EPUB 阅读器"}
+        title={view === "reader" && ready ? book!.metadata.title : "EPUB 阅读器"}
         issueCount={logItems.length}
-        onToggleMenu={() => setMenuOpen((v) => !v)}
-        onToggleLog={handleToggleLog}
+        onBackToShelf={view === "reader" ? handleBackToShelf : undefined}
+        onToggleMenu={view === "reader" ? () => setMenuOpen((v) => !v) : undefined}
+        onToggleLog={view === "reader" ? handleToggleLog : undefined}
       />
       <div className="main">
-        {menuOpen && (
-          <>
-            <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
-            <MenuPanel
-              fontSize={settings.fontSizePx}
-              uiScale={uiScale}
-              theme={settings.theme}
-              lineHeight={settings.lineHeight}
-              fontWeight={settings.fontWeight}
-              letterSpacingPx={settings.letterSpacingPx}
-              wordSpacingPx={settings.wordSpacingPx}
-              onOpenFile={() => {
-                fileInputRef.current?.click();
-                setMenuOpen(false);
-              }}
-              onOpenToc={() => {
-                setTocOpen(true);
-                setMenuOpen(false);
-              }}
-              onFontDec={() => adjustFont(-2)}
-              onFontInc={() => adjustFont(2)}
-              onFontSizeChange={(v) =>
-                setSettings((s2) => ({ ...s2, fontSizePx: clamp(v, 12, 32) }))
-              }
-              onLineHeightDec={() => adjustLineHeight(-1)}
-              onLineHeightInc={() => adjustLineHeight(1)}
-              onLineHeightChange={(v) => setSettings((s2) => ({ ...s2, lineHeight: v }))}
-              onWeightDec={() => adjustWeight(-1)}
-              onWeightInc={() => adjustWeight(1)}
-              onWeightChange={(v) => setSettings((s2) => ({ ...s2, fontWeight: v }))}
-              onLetterSpacingDec={() => adjustLetterSpacing(-1)}
-              onLetterSpacingInc={() => adjustLetterSpacing(1)}
-              onLetterSpacingChange={(v) =>
-                setSettings((s2) => ({ ...s2, letterSpacingPx: v }))
-              }
-              onWordSpacingDec={() => adjustWordSpacing(-1)}
-              onWordSpacingInc={() => adjustWordSpacing(1)}
-              onWordSpacingChange={(v) => setSettings((s2) => ({ ...s2, wordSpacingPx: v }))}
-              onUiScaleChange={(v) => setUiScale(clamp(v, 0.75, 1.5))}
-              onThemeChange={changeTheme}
-              onResetDefaults={resetDefaults}
-              onClose={() => setMenuOpen(false)}
+        {view === "shelf" ? (
+          <div className="shelf-stack">
+            {shelfError && (
+              <div className="shelf-error" role="alert">
+                {shelfError}
+              </div>
+            )}
+            {shelfNotice && (
+              <div className={`shelf-notice ${shelfNotice.kind}`} role="status">
+                {shelfNotice.text}
+              </div>
+            )}
+            <ShelfView
+              entries={shelfEntries}
+              busy={shelfBusy}
+              onOpen={(id) => void handleShelfOpen(id)}
+              onImport={() => fileInputRef.current?.click()}
+              onDelete={(id) => void handleShelfDelete(id)}
             />
-          </>
-        )}
-        {ready ? (
+          </div>
+        ) : (
           <>
-            {tocOpen && (
+            {menuOpen && (
               <>
-                <div className="toc-backdrop" onClick={() => setTocOpen(false)} />
-                <TocPanel
-                  toc={book!.toc}
-                  activePath={currentPath}
-                  onNavigate={handleTocNavigate}
-                  onClose={() => setTocOpen(false)}
+                <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
+                <MenuPanel
+                  fontSize={settings.fontSizePx}
+                  uiScale={uiScale}
+                  theme={settings.theme}
+                  lineHeight={settings.lineHeight}
+                  fontWeight={settings.fontWeight}
+                  letterSpacingPx={settings.letterSpacingPx}
+                  wordSpacingPx={settings.wordSpacingPx}
+                  onOpenFile={() => {
+                    fileInputRef.current?.click();
+                    setMenuOpen(false);
+                  }}
+                  onOpenToc={() => {
+                    setTocOpen(true);
+                    setMenuOpen(false);
+                  }}
+                  onFontDec={() => adjustFont(-2)}
+                  onFontInc={() => adjustFont(2)}
+                  onFontSizeChange={(v) =>
+                    setSettings((s2) => ({ ...s2, fontSizePx: clamp(v, 12, 32) }))
+                  }
+                  onLineHeightDec={() => adjustLineHeight(-1)}
+                  onLineHeightInc={() => adjustLineHeight(1)}
+                  onLineHeightChange={(v) => setSettings((s2) => ({ ...s2, lineHeight: v }))}
+                  onWeightDec={() => adjustWeight(-1)}
+                  onWeightInc={() => adjustWeight(1)}
+                  onWeightChange={(v) => setSettings((s2) => ({ ...s2, fontWeight: v }))}
+                  onLetterSpacingDec={() => adjustLetterSpacing(-1)}
+                  onLetterSpacingInc={() => adjustLetterSpacing(1)}
+                  onLetterSpacingChange={(v) =>
+                    setSettings((s2) => ({ ...s2, letterSpacingPx: v }))
+                  }
+                  onWordSpacingDec={() => adjustWordSpacing(-1)}
+                  onWordSpacingInc={() => adjustWordSpacing(1)}
+                  onWordSpacingChange={(v) => setSettings((s2) => ({ ...s2, wordSpacingPx: v }))}
+                  onUiScaleChange={(v) => setUiScale(clamp(v, 0.75, 1.5))}
+                  onThemeChange={changeTheme}
+                  onResetDefaults={resetDefaults}
+                  onClose={() => setMenuOpen(false)}
                 />
               </>
             )}
-            <ReaderView
-              key={bookKey}
-              ref={readerRef}
-              book={book!}
-              server={server!}
-              spineIndex={spineIndex}
-              anchor={anchor}
-              anchorNonce={anchorNonce}
-              settings={settings}
-              onPageState={onPageState}
-              onRequestChapter={handleRequestChapter}
-              onIssues={handleIssues}
-              onInternalLink={handleTocNavigate}
-              onExternalLink={handleExternalLink}
-              onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
-              onFootnoteClose={() => setFootnote(null)}
-              initialAnchor={initialAnchor}
-              startAtEnd={startAtEnd}
-            />
+            {ready ? (
+              <>
+                {tocOpen && (
+                  <>
+                    <div className="toc-backdrop" onClick={() => setTocOpen(false)} />
+                    <TocPanel
+                      toc={book!.toc}
+                      activePath={currentPath}
+                      onNavigate={handleTocNavigate}
+                      onClose={() => setTocOpen(false)}
+                    />
+                  </>
+                )}
+                <ReaderView
+                  key={bookKey}
+                  ref={readerRef}
+                  book={book!}
+                  server={server!}
+                  spineIndex={spineIndex}
+                  anchor={anchor}
+                  anchorNonce={anchorNonce}
+                  settings={settings}
+                  onPageState={onPageState}
+                  onRequestChapter={handleRequestChapter}
+                  onIssues={handleIssues}
+                  onInternalLink={handleTocNavigate}
+                  onExternalLink={handleExternalLink}
+                  onFootnote={(t, r) => setFootnote({ text: t, rect: r })}
+                  onFootnoteClose={() => setFootnote(null)}
+                  initialAnchor={initialAnchor}
+                  startAtEnd={startAtEnd}
+                />
+              </>
+            ) : (
+              <div className={`placeholder ${phase.phase === "error" ? "error" : ""}`}>
+                {phase.phase === "idle" && <div className="big">正在准备书架…</div>}
+                {phase.phase === "loading" && <div>正在打开《{phase.fileName}》…</div>}
+                {phase.phase === "error" && (
+                  <>
+                    <div className="big">无法打开</div>
+                    <div>{phase.message}</div>
+                    <button onClick={() => fileInputRef.current?.click()}>重新选择文件</button>
+                  </>
+                )}
+              </div>
+            )}
           </>
-        ) : (
-          <div className={`placeholder ${phase.phase === "error" ? "error" : ""}`}>
-            {phase.phase === "idle" && (
-              <>
-                <div className="big">EPUB 阅读器</div>
-                <div className="drop-hint">
-                  点击下方按钮选择 .epub 文件，或将文件直接拖入窗口
-                </div>
-                <button onClick={() => fileInputRef.current?.click()}>打开 EPUB 文件</button>
-              </>
-            )}
-            {phase.phase === "loading" && <div>正在打开《{phase.fileName}》…</div>}
-            {phase.phase === "error" && (
-              <>
-                <div className="big">无法打开</div>
-                <div>{phase.message}</div>
-                <button onClick={() => fileInputRef.current?.click()}>重新选择文件</button>
-              </>
-            )}
-          </div>
         )}
       </div>
-      {ready && (
+      {view === "reader" && ready && (
         <div className="status-bar">
           <span className="sb-clock">{clockText}</span>
           <span className="sb-title" title={currentChapterLabel}>
@@ -579,14 +801,21 @@ export default function App() {
           }}
         />
       )}
+      {shelfBusy && (
+        <div className="app-busy" aria-busy="true">
+          <div className="app-busy-spinner" />
+          <div className="app-busy-text">正在处理…</div>
+        </div>
+      )}
       <input
         ref={fileInputRef}
         type="file"
         accept=".epub,application/epub+zip"
+        multiple
         style={{ display: "none" }}
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) void handleOpenFile(f);
+          const files = Array.from(e.target.files ?? []);
+          if (files.length > 0) void handleImportFiles(files);
           e.target.value = "";
         }}
       />

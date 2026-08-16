@@ -51,8 +51,10 @@ function fmtLineHeight(v?: number): string {
 
 function fmtWeight(v?: number): string {
   if (v === undefined) return "自动";
+  if (v <= 300) return "细体";
   if (v <= 400) return "常规";
   if (v <= 500) return "中等";
+  if (v <= 600) return "半粗";
   return "粗体";
 }
 
@@ -150,7 +152,7 @@ export function MenuPanel(props: MenuPanelProps) {
 
       <div className="menu-section">文件</div>
       <button className="menu-item" onClick={props.onOpenFile}>
-        打开 EPUB 文件
+        导入新书
       </button>
 
       <div className="menu-section">导航</div>
@@ -193,7 +195,7 @@ export function MenuPanel(props: MenuPanelProps) {
       <SliderRow
         label="字重"
         formatValue={fmtWeight}
-        min={400}
+        min={300}
         max={700}
         step={100}
         value={props.fontWeight ?? 400}

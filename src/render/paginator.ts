@@ -13,6 +13,11 @@ export type ChapterState =
 export interface LoadOptions {
   /** 跳转到页内锚点（目录跳转用） */
   anchor?: string;
+  /**
+   * 显式章节跳转：同章重新加载也从开头开始（清空旧页号与旧阅读锚点）。
+   * 目录里点击“当前章节”时使用；设置重载/窗口重排不传，继续保留位置。
+   */
+  resetPage?: boolean;
 }
 
 /**
@@ -110,8 +115,9 @@ export class ChapterPaginator {
     this.disposed = false;
     this.recomputeRetries = 0;
     // 换章加载：丢弃旧锚点与旧页号（页号只对同章重排有意义，
-    // 否则新章会沿袭上一章的页号，如"上一章13页→下一章也跳到第13页"）
-    if (path !== this._currentPath) {
+    // 否则新章会沿袭上一章的页号，如"上一章13页→下一章也跳到第13页"）。
+    // 目录里点击当前章（同章 + resetPage）：同样从开头/锚点重新开始。
+    if (path !== this._currentPath || opts.resetPage) {
       this.anchor = null;
       this.anchorPath = undefined;
       this.metrics.currentPage = 0;
@@ -313,7 +319,9 @@ export class ChapterPaginator {
       maxWidths.set(el, cs.maxWidth);
     }
 
-    if (readerSheet) readerSheet.disabled = true;
+    const restoreReaderMargins = readerSheet
+      ? this.disableReaderTopMarginRules(readerSheet)
+      : () => {};
     try {
       for (const el of candidates) {
         // 同一测量周期内已修正过则跳过，避免把上次写回的 margin
@@ -396,8 +404,46 @@ export class ChapterPaginator {
         el.style.setProperty("margin-right", `${desiredRight}px`, "important");
       }
     } finally {
-      if (readerSheet) readerSheet.disabled = false;
+      restoreReaderMargins();
     }
+  }
+
+  /**
+   * 临时移除阅读器注入的 `.reader-top` margin auto 规则（C-04 纯书 margin 测量）。
+   * 只动这两条 margin 规则，不禁用整个阅读器样式表：
+   * 否则 L2 的 html{font-size} 也一起失效，em 宽度会在两次测量间跳变
+   * （如目录容器 width:10.6em，18px 字号下被误判成不对称 margin）。
+   */
+  private disableReaderTopMarginRules(sheet: CSSStyleSheet): () => void {
+    const saved: Array<{
+      style: CSSStyleDeclaration;
+      left: string;
+      leftPriority: string;
+      right: string;
+      rightPriority: string;
+    }> = [];
+    for (const rule of Array.from(sheet.cssRules)) {
+      if (rule.type !== CSSRule.STYLE_RULE) continue;
+      const style = (rule as CSSStyleRule).style;
+      const selector = (rule as CSSStyleRule).selectorText ?? "";
+      if (!selector.includes("reader-top")) continue;
+      if (style.marginLeft !== "auto" && style.marginRight !== "auto") continue;
+      saved.push({
+        style,
+        left: style.getPropertyValue("margin-left"),
+        leftPriority: style.getPropertyPriority("margin-left"),
+        right: style.getPropertyValue("margin-right"),
+        rightPriority: style.getPropertyPriority("margin-right"),
+      });
+      style.removeProperty("margin-left");
+      style.removeProperty("margin-right");
+    }
+    return () => {
+      for (const item of saved) {
+        item.style.setProperty("margin-left", item.left, item.leftPriority);
+        item.style.setProperty("margin-right", item.right, item.rightPriority);
+      }
+    };
   }
 
   /** 恢复上一轮 fit-content 补偿写回的 inline max-width。 */

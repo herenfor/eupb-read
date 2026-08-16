@@ -12,3 +12,5 @@ src-tauri/gen/
 .xwin-cache/
 .cache/
 .img-repro.png
+targettmp/
+src-tauri/target2/

@@ -163,7 +163,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       return;
     }
     void (async () => {
-      await p.load(path, { anchor: props.anchor });
+      // 目录/翻章是显式章节跳转：即使点的是当前章，也要回到开头或页内锚点，
+      // 而不是沿用旧页号与旧阅读锚点。
+      await p.load(path, { anchor: props.anchor, resetPage: true });
       // 打开书恢复阅读锚点：在 load 清空换章锚点之后、iframe 就绪之前设置
       if (initialAnchorRef.current) {
         p.setReadingAnchor({ path, ...initialAnchorRef.current });

@@ -1,6 +1,6 @@
 # 交接文档（供新对话接手）
 
-> 最后更新：条目 31（width:%→min 重写，命定之人目录修复）之后。项目：`/home/herenfor/test/epub-reader`
+> 最后更新：条目 34（非16px块居中通用修复；16px 制作信息现象待用户补充）。项目：`/home/herenfor/test/epub-reader`
 > 这份文档自包含；新对话请先通读，再继续处理用户报告的问题。
 
 ---
@@ -48,6 +48,20 @@ npx tsx scripts/w90-repro.ts    # width:% 盒子在 1100/800/650 三窗口的宽
 ```
 
 > 中文路径下的书需要用 `readFileSync` 读取；脚本里已有范例。
+
+**WSL Rust 工具链（0.1.4 起，供 cargo check / cargo test 用）**：
+
+```bash
+export PATH=/home/herenfor/test/rust-toolchain/bin:$PATH
+export LD_LIBRARY_PATH=/home/herenfor/test/rust-toolchain/lib:$LD_LIBRARY_PATH
+rustc --version   # 1.97.1，与用户 Windows rustc 同版本
+cargo --version
+```
+
+- 独立 tarball 安装（非 rustup），完整组件：rustc/cargo/rustfmt/clippy/rust-analyzer/llvm-tools；
+- 安装包缓存：`/home/herenfor/test/rust-dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz`；
+- `LD_LIBRARY_PATH` 必须指向 `rust-toolchain/lib`，否则 rustc wrapper 会把 sysroot 解析到错误目录；
+- 尚未准备 Linux 系统库：项目 `src-tauri` 的完整 `cargo check` 还需要 `pkg-config` 与 GTK/WebKitGTK 开发包（0.1.4 书架 Rust 命令开发时再按需准备）。
 
 ### 环境坑（新对话务必知道）
 
@@ -129,6 +143,16 @@ npx tsx scripts/w90-repro.ts    # width:% 盒子在 1100/800/650 三窗口的宽
 29. **伊尾微书深色模式目录链接不换色** → 已修：书显式 `.toc a{color:#000}`，深色下不可读。与用户确认采用 Sigil 深色预览风格浅蓝 `#6cb2ff`，深色主题注入 `#viewer .toc a { color:#6cb2ff }`；浅色不注入。实测 light rgb(0,0,0) / dark rgb(108,178,255)。sanitize.test.ts +1，测试 **114 → 115 项**。
 30. **駄犬书目录页左对齐容器被强制居中** → 已修并升级为通用规则：书里 `div{max-width:max-content}`（无 auto margin）表示“内容收缩 + 左对齐”，阅读器不再按 L3 强制居中，而是放到**版心列左缘**。margin 第二遍新增分支：原始 max-width 含 fit-content/max-content 且纯书左右 margin 为 0 → `margin-left = (parentW - 40rem)/2`。实测目录容器/条目在每页都从版心列左缘（窗口 x≈371）开始；鹤城 namebox、初鹿野 summary、逢緣 tocbox、あさの气泡回归正常。
 31. **命定之人是妻子的妹妹 1 目录页乱页（width%→em 第五个误伤）** → 已修并升级 C-07：旧公式把 `.toc-link{width:100%}`（相对 53px 的 td）写成固定 40em，目录图 230px 宽在 53px 列里重叠溢出、竖切 9 页。改为 `width:X% → min(X%, X/100×40rem)`：页面级仍取版心比例（90%→576px、100%→640px），窄容器由 CSS 引擎按真实包含块取书自己的 %（td 内 100%→53px）；仅 `0<X≤100` 改写，`>100` 出血保留；顺手修掉旧正则误匹配 `max-width/min-width` 里 “width:” 子串的问题；纯标签/组合器/float/img/fullpage 跳过清单不动。实测命定目录恢复单页、12 列 52px 无重叠；诡屋 paper 480px、逢緣 facebook 480px、三上 ctt 336px、初鹿野 authorbox table 224px 全部回归不变。测试 **115 → 118 项**；`pnpm test`/`pnpm build` 全绿。备份已覆盖更新至 `/home/herenfor/epub-reader-backup-before-css-fixes`。
+32. **目录里点击“当前章节”不回到开头** → 已修：`load()` 只在换章时清页号/锚点，同章 reload 时 `recompute(true)` 用旧 `metrics.currentPage` 和旧阅读锚点恢复原位置。新增 `LoadOptions.resetPage`：目录/翻章路径（ReaderView 章节 effect）传 `resetPage:true`，同章加载也清空页号与锚点、回到开头或页内锚点；设置重载 `reloadWithSettings` 与窗口 reflow 不传，仍保留位置。真实书端到端验证（铁人01 第二章 7 页）：章内翻到第 2 页 → 目录点当前章 → 回到 `第 1/7 页`、`scrollLeft=0`。测试数不变（118）。**此修复是 0.1.4 阶段第一项**。
+
+**版本阶段**：0.1.3 已打包并交人测试；当前 WSL 源码为 **0.1.4 开发阶段**（package.json / tauri.conf.json / Cargo.toml 三处已同步 0.1.4）。后续测试继续用 `pnpm dev`（WSL 5173），确认要发布时再走 robocopy + `build-windows.ps1`。
+33. **书架 v1（0.1.4，进行中）** → 存储采用**方案 B（跨平台）**：Tauri 环境由 Rust 把书存到 `app_data_dir()/books/<id>/book.epub` + `shelf.json` 索引；浏览器 dev 自动回退 IndexedDB（行为等价）。Rust 新增命令：`shelf_save_book / shelf_list / shelf_read_book / shelf_save_cover / shelf_read_cover / shelf_update_entry / shelf_delete_book`；bookId 只允许 `[A-Za-z0-9_-]`。前端新增 `src/ui/shelf.ts`（`ShelfStore` 接口 + Tauri/IndexedDB 实现 + 去重/排序/搜索/时间格式化纯函数）与 `src/ui/ShelfView.tsx`（响应式封面网格，封面槽位 **128:188**，object-fit cover，无封面生成书名占位卡；搜索/排序/删除确认/空状态）。`App.tsx` 增加 `view: shelf|reader`：启动进书架、导入入库并直接阅读、点卡片恢复进度、返回书架、删除、全局 busy 遮罩防重复操作；**阅读器核心（paginator/ReaderView/sanitize/cssRewrite/footnotes/resources）零改动**，Toolbar 仅加可选“返回书架”按钮，MenuPanel 仅文案改“导入新书”。测试：新增 `shelf.test.ts`（9 项），总数 **118 → 127**；Playwright dev 端到端通过：空书架→导入→刷新仍在→打开→返回→删除；进度恢复通过（铁人01 读到第二章第 2/7 页，返回书架显示 27%，重新打开恢复第 2/7 页）。
+    - **Rust 验证状态**：WSL 沙箱对跨目录 rename 返回 EXDEV（已定位为 workspace-write 权限行为），`cargo check` 只能在普通 WSL shell / 完整权限下运行。已由外部有权限 shell 跑通依赖（tauri 2.11.5 / webkit2gtk-sys 等全部编译成功），修复 E0382 后**重跑 `cargo check --lib` 已 `Finished`（1.73s）**，Linux 目标 Rust 代码验证完成；Windows 打包时 MSVC 还会再验证一次。
+    - **UI 修正（用户反馈）**：空书架状态已窗口居中（`.shelf-view{flex:1;min-width:0}`）；书架/工具栏 UI 与阅读器主题同步补全 **sepia 暖色**（`[data-theme="sepia"]` 变量 + `.app{color:var(--fg)}` 修正文字继承）。Playwright 验证：1400×900 空状态中心 (700,471)；sepia fg rgb(60,51,42)、dark fg rgb(212,212,212)。
+    - **导入流程修正（用户反馈第二批）**：① 导入成功后**停留书架**，不直接进书；② `ShelfEntry` 新增 `isNew`，新书显示绿色“新”徽章，第一次打开时由 `shelf_mark_opened` 清除（乐观更新 + 落盘）；③ 只有 `loadBook` 成功且 spine 非空才入库，失败书列出文件名与原因；④ **批量导入**：文件选择框 `multiple`，浏览器拖拽与 Tauri 原生拖拽都支持多文件，逐本解析，结果提示“已导入 N 本；失败 M 本（原因）”。Playwright 验证：一次导入 2 本好 EPUB + 1 个坏文件 → 停留在书架、2 卡片、2 个“新”徽章、提示“已导入 2 本；失败 1 本（bad.epub：无法解压 ZIP…）”；打开一本返回后“新”徽章剩 1，刷新后仍为 1。**Rust 端新增 `is_new` 字段与 `shelf_mark_opened` 命令后，已由有权限 shell 重跑 `cargo check --lib`，`Finished`（1.53s）验证通过。**
+    - **导入提示条修正（用户反馈第三批）**：提示条与书架是 `.main` 横向 flex 的兄弟节点，被拉伸成左侧竖直长条且不消失。改为 `.shelf-stack` 纵向容器包裹提示+书架，导入结果 6 秒自动消失。Playwright 验证：提示条矩形 `{x:20,y:39,w:1360,h:40}`（横贯内容区、高度正常），7 秒后数量 0。
+34. **非 16px 字号下块居中错乱（通用 bug，0.1.4）** → 已修。根因：`applyBookMargins` 第二遍测“纯书 margin”时把整个 `data-reader="overrides"` 样式表禁用；该表同时承载 L2 的 `html{font-size:字号}`。字号≠16px 时，禁表后 em 宽度回落 16px 基准，auto margin 数值与第一遍记录宽度对不上，被误判为“书的不对称 margin”，写出 `ml=1209.8px / mr=-10.6px` 这类错误 inline。修复：新增 `disableReaderTopMarginRules()`，只临时移除 `.reader-top` 的 `margin-left/right:auto` 两条规则（CSSOM 保存并恢复），**不再禁用整表**，字号/主题等 L2 规则全程有效。真实书验证（ふか田さめたろう《善于观察…02》）：目录页 18/20px 直接子恢复居中；制作信息 `.mesbox` 在 16/18/20/24px 均 ml=mr 对称居中（1080 与 1400 两窗口）。单测/build 通过。**遗留待确认**：用户报告该书“16px 制作信息同样出错”，但当前自动化未复现（mesbox 居中正常），需要用户给具体现象/截图再查。
+35. **字重支持低于常规（用户功能需求）** → 字重滑块/步进下限从 400 扩到 **300（细体）**，步进序列 `自动→300→400→500→600→700`；`fmtWeight` 显示细体/常规/中等/半粗/粗体。Playwright 验证：拖到 300 后正文 `<p>` computed `font-weight:300`。测试/build 通过。
 
 **命定之人目录问题已按条目 31 修复；用户此前说过还有其他问题没报，接手后仍先问用户具体问题，不要急着打包。**
 
