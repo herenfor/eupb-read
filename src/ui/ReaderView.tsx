@@ -4,6 +4,7 @@ import { nextLinearIndex, spineItemPath } from "../core/book";
 import { ChapterPaginator, type ChapterState, type FootnotePayload } from "../render/paginator";
 import type { ResourceServer } from "../render/resources";
 import type { ReaderSettings } from "../render/settings";
+import { TurnIntentBuffer, WheelTurnAccumulator } from "./turnIntent";
 
 export interface ReaderHandle {
   nextPage(): void;
@@ -77,6 +78,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   const autoAdvanceRef = useRef(false);
   const pendingStartAtEndRef = useRef(false);
   const lastStateRef = useRef<string>("loading");
+  const lastReadyEmptyRef = useRef(false);
+  const turnIntentRef = useRef(new TurnIntentBuffer());
+  const outerWheelRef = useRef(new WheelTurnAccumulator());
 
   spineIndexRef.current = spineIndex;
 
@@ -104,13 +108,25 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       book.version === 2,
       (s) => {
         lastStateRef.current = s.status;
+        if (s.status === "loading" || s.status === "measuring") {
+          turnIntentRef.current.markLoading();
+          lastReadyEmptyRef.current = false;
+        } else if (s.status === "error") {
+          turnIntentRef.current.reset();
+          lastReadyEmptyRef.current = false;
+        } else {
+          lastReadyEmptyRef.current = s.empty;
+        }
         props.onPageState(s);
         if (s.status !== "ready") return;
         // 空章节：自动前进到下一线性章
         if (s.empty && !autoAdvanceRef.current) {
           autoAdvanceRef.current = true;
           const next = nextLinearIndex(book, spineIndexRef.current, 1);
-          if (next >= 0) props.onRequestChapter(next);
+          if (next >= 0) {
+            turnIntentRef.current.markLoading();
+            props.onRequestChapter(next);
+          }
         }
       },
       (issues) => props.onIssues(issues),
@@ -140,10 +156,19 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
         });
       },
       () => props.onFootnoteClose(),
-      (url) => props.onExternalLink(url)
+      (url) => props.onExternalLink(url),
+      () => {
+        // paginator 的普通 ready 可能早于目录锚点/startAtEnd 最终定位；
+        // 这里只消费“显示门已解除”的稳定边界，避免缓冲输入抢跑。
+        if (lastStateRef.current !== "ready" || lastReadyEmptyRef.current) return;
+        const pending = turnIntentRef.current.markReady();
+        if (pending !== null) turnPageRef.current(pending);
+      }
     );
     paginatorRef.current = p;
     return () => {
+      turnIntentRef.current.reset();
+      outerWheelRef.current.reset();
       p.dispose();
       paginatorRef.current = null;
     };
@@ -158,9 +183,11 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     autoAdvanceRef.current = false;
     const path = spineItemPath(book, spineIndex);
     if (!path) {
+      turnIntentRef.current.reset();
       props.onPageState({ status: "error", message: "章节资源缺失" });
       return;
     }
+    turnIntentRef.current.markLoading();
     void (async () => {
       // 目录/翻章是显式章节跳转：即使点的是当前章，也要回到开头或页内锚点，
       // 而不是沿用旧页号与旧阅读锚点。回翻上一章时把 atEnd 交给 paginator：
@@ -218,22 +245,28 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   turnPageRef.current = (dir) => {
     const p = paginatorRef.current;
     if (!p) return;
-    // 章节未就绪期间忽略翻页：否则按键重复事件会按 pageCount=1 误判，
-    // 连续请求上一章导致快速翻页时跳过多章
-    if (lastStateRef.current !== "ready") return;
-    if (dir === 1) {
+    // 页数未知时不执行，但保留最后一个方向；display-ready 后最多消费一次。
+    const immediate = turnIntentRef.current.request(dir);
+    if (immediate === null) return;
+    if (immediate === 1) {
       if (p.currentPage < p.pageCount - 1) {
         p.setPage(p.currentPage + 1);
       } else {
         const next = nextLinearIndex(book, spineIndexRef.current, 1);
-        if (next >= 0) props.onRequestChapter(next);
+        if (next >= 0) {
+          turnIntentRef.current.markLoading();
+          props.onRequestChapter(next);
+        }
       }
     } else {
       if (p.currentPage > 0) {
         p.setPage(p.currentPage - 1);
       } else {
         const prev = nextLinearIndex(book, spineIndexRef.current, -1);
-        if (prev >= 0) props.onRequestChapter(prev, { atEnd: true });
+        if (prev >= 0) {
+          turnIntentRef.current.markLoading();
+          props.onRequestChapter(prev, { atEnd: true });
+        }
       }
     }
   };
@@ -290,6 +323,15 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   return (
     <div
       className="reader"
+      onWheel={(event) => {
+        // visibility:hidden 时滚轮会命中外层；浏览器还可能把同一连续手势
+        // 锁定在这个目标上，所以 iframe 显示后也必须继续消费外层事件。
+        // 先按与分页器一致的 80px 阈值累积，避免触控板微量事件一事件一页。
+        const direction = outerWheelRef.current.push(event.deltaY);
+        if (direction === null) return;
+        event.preventDefault();
+        turnPageRef.current(direction);
+      }}
       style={
         book.fixedLayout && vp
           ? {

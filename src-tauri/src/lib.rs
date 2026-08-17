@@ -26,7 +26,7 @@ fn read_epub_file(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|e| format!("无法读取文件：{e}"))
 }
 
-// ---- 书架（0.1.4）----
+// ---- 书架 ----
 // 书文件存应用数据目录：<app_data>/books/<bookId>/book.epub，
 // 封面缩略图 <app_data>/books/<bookId>/cover，索引 <app_data>/shelf.json。
 // 路径全部由后端生成，bookId 只允许 [A-Za-z0-9_-]，防止路径穿越。

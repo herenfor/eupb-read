@@ -90,6 +90,9 @@ scripts/      构建/自检工具
 
 维护者开发文档见 [docs/HANDOFF.md](docs/HANDOFF.md)（架构、分层规范、测试与发布检查清单）。
 
+使用隔离副本或不同 AI/对话协作维护时，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与
+[docs/SOURCE_DELTA.md](docs/SOURCE_DELTA.md)。后者集中记录隔离副本相对真实源仓尚未同步的变化。
+
 需要 Node.js ≥ 20 与 pnpm：
 
 ```bash
@@ -132,7 +135,7 @@ pnpm tauri build
 
 ## 测试
 
-`pnpm test`（当前 129 个用例）覆盖：
+`pnpm test`（当前 158 个用例）覆盖：
 
 - 解析内核：路径解析、EPUB 2/3 加载、目录双模与兜底、字体混淆还原、DRM 拒绝、缺资源容错
 - 渲染层：XHTML 消毒、URL/CSS 改写、分层样式注入、宽度百分比兼容、图片与脚注处理

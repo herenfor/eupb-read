@@ -102,7 +102,7 @@ export default function App() {
   const [chapterChars, setChapterChars] = useState<number[]>([]);
   const [clock, setClock] = useState(() => new Date());
   const [dragActive, setDragActive] = useState(false);
-  // ---- 书架（0.1.4） ----
+  // ---- 书架 ----
   const [view, setView] = useState<"shelf" | "reader">("shelf");
   const [shelfEntries, setShelfEntries] = useState<ShelfEntry[]>([]);
   const [shelfError, setShelfError] = useState<string | null>(null);

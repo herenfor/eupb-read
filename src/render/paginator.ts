@@ -3,6 +3,10 @@ import { resolvePath, isExternalUrl, isFragmentOnly, splitHref } from "../core/p
 import { isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes";
 import type { ResourceServer } from "./resources";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
+import { VisibilityGate } from "./displayGate";
+
+/** 常规布局应远早于此完成；极端字体/引擎停滞时只解除隐藏，不伪造 ready。 */
+const INITIAL_RENDER_GATE_TIMEOUT_MS = 20_000;
 
 export type ChapterState =
   | { status: "loading" }
@@ -56,12 +60,162 @@ function leafTextLen(el: HTMLElement): number {
   return n;
 }
 
+/** 页内 fragment 的原始 hash 与用于 getElementById 的解码锚点。 */
+export interface FragmentNavigation {
+  hash: string;
+  anchor: string;
+}
+
+/**
+ * 纯 fragment 链接才由当前章节处理。保留原始编码 hash 给 location，
+ * 同时把可解码值用于 DOM id 查找；畸形百分号编码则沿用原始值，避免点击报错。
+ */
+export function getFragmentNavigation(href: string): FragmentNavigation | null {
+  if (!isFragmentOnly(href)) return null;
+  const encodedAnchor = href.slice(1);
+  if (!encodedAnchor) return null;
+  let anchor = encodedAnchor;
+  try {
+    anchor = decodeURIComponent(encodedAnchor);
+  } catch {
+    // 使用原值：某些不规范 EPUB 可能真的以 `%` 作为 id 的一部分。
+  }
+  return { hash: `#${encodedAnchor}`, anchor };
+}
+
+/**
+ * `history.replaceState` 不会激活 :target；只有 location.hash 导航会。
+ * blob iframe 理应同源，但在章节卸载或权限变化时访问 location 仍可能抛异常，
+ * 因此同步失败不能阻断分页器的显式列定位。
+ */
+export function syncFragmentHash(win: Window | null | undefined, hash: string): void {
+  if (hash.length < 2 || !hash.startsWith("#")) return;
+  try {
+    const iframeLocation = win?.location;
+    if (iframeLocation && iframeLocation.hash !== hash) iframeLocation.hash = hash;
+  } catch {
+    // iframe 已卸载/不可访问时仍继续 jumpToAnchor；不让链接点击抛到 UI。
+  }
+}
+
+type BoxWidthStyle = Pick<
+  CSSStyleDeclaration,
+  | "width"
+  | "boxSizing"
+  | "paddingLeft"
+  | "paddingRight"
+  | "borderLeftWidth"
+  | "borderRightWidth"
+>;
+
+/** computed width 转为与水平 margin 布局一致的 border-box 宽度。 */
+export function getBorderBoxWidth(style: BoxWidthStyle): number {
+  const width = parseFloat(style.width);
+  if (!Number.isFinite(width)) return 0;
+  if (style.boxSizing === "border-box") return width;
+  return (
+    width +
+    (parseFloat(style.paddingLeft) || 0) +
+    (parseFloat(style.paddingRight) || 0) +
+    (parseFloat(style.borderLeftWidth) || 0) +
+    (parseFloat(style.borderRightWidth) || 0)
+  );
+}
+
+type MarginStyle = Pick<CSSStyleDeclaration, "margin" | "marginLeft" | "marginRight">;
+
+/** 作者 inline style 是否明确使用了水平百分比 margin。 */
+export function hasPercentageHorizontalMargin(style: MarginStyle): boolean {
+  if (style.marginLeft.includes("%") || style.marginRight.includes("%")) return true;
+  const values = style.margin.trim().split(/\s+/).filter(Boolean);
+  if (values.length === 0) return false;
+  const horizontal =
+    values.length === 1
+      ? [values[0]]
+      : values.length === 2 || values.length === 3
+        ? [values[1]]
+        : [values[1], values[3]];
+  return horizontal.some((value) => value.includes("%"));
+}
+
+/** 百分比声明只有解析出实际水平偏移时才进入页面相对布局分支。 */
+export function isPercentageMarginLayout(
+  hasPercentage: boolean,
+  computedLeft: string,
+  computedRight: string
+): boolean {
+  if (!hasPercentage) return false;
+  return (parseFloat(computedLeft) || 0) !== 0 || (parseFloat(computedRight) || 0) !== 0;
+}
+
+/**
+ * 正对称水平 margin 表达的是双侧留白，而不是向某一侧缩进。
+ * 仅接受正有限值；负 margin 即使相等也可能是作者有意的双侧出血。
+ */
+export function isSymmetricHorizontalMargin(left: string, right: string): boolean {
+  const ml = parseFloat(left);
+  const mr = parseFloat(right);
+  return (
+    Number.isFinite(ml) &&
+    Number.isFinite(mr) &&
+    ml > 0 &&
+    mr > 0 &&
+    Math.abs(ml - mr) < 0.5
+  );
+}
+
+interface InlineStyleValue {
+  value: string;
+  priority: string;
+}
+
+function snapshotInlineStyleProperty(
+  style: CSSStyleDeclaration,
+  property: string
+): InlineStyleValue {
+  return {
+    value: style.getPropertyValue(property),
+    priority: style.getPropertyPriority(property),
+  };
+}
+
+/** 恢复 inline 属性时同时恢复 !important，空值则彻底移除 longhand。 */
+export function restoreInlineStyleProperty(
+  style: CSSStyleDeclaration,
+  property: string,
+  original: InlineStyleValue
+): void {
+  if (original.value === "") style.removeProperty(property);
+  else style.setProperty(property, original.value, original.priority);
+}
+
+/**
+ * 只有直接 img/svg 与源码格式化空白的 float 是正常的媒体浮动，不属于
+ * C-08 要修复的文字 shrink-to-fit。注释等非渲染节点不影响判断。
+ */
+export function isMediaOnlyFloatContent(nodes: Iterable<Node>): boolean {
+  let hasMedia = false;
+  for (const node of nodes) {
+    if (node.nodeType === 3) {
+      if ((node.textContent ?? "").trim() !== "") return false;
+      continue;
+    }
+    if (node.nodeType !== 1) continue;
+    const tag = (node as Element).tagName.toLowerCase();
+    if (tag !== "img" && tag !== "svg") return false;
+    hasMedia = true;
+  }
+  return hasMedia;
+}
+
 export class ChapterPaginator {
   private blobUrl?: string;
   private viewer: HTMLElement | null = null;
   private contentDoc: Document | null = null;
   private step = 0;
   private pageWidth = 0;
+  /** 最近一次完整 measure 使用的 iframe 视口；过滤 ResizeObserver 空转。 */
+  private measuredViewport = { width: -1, height: -1 };
   private metrics = { pageCount: 1, currentPage: 0 };
   private loadSeq = 0;
   private disposed = false;
@@ -87,13 +241,16 @@ export class ChapterPaginator {
   /** 第二遍 margin 处理写回过的元素与原始 inline 值（下次测量前恢复） */
   private marginFixes: Array<{
     el: HTMLElement;
-    left: string;
-    right: string;
+    left: InlineStyleValue;
+    right: InlineStyleValue;
+    maxWidth?: InlineStyleValue;
   }> = [];
   /** fit-content 补偿写回过的元素与原始 inline max-width（下次测量前恢复） */
   private fitContentFixes: Array<{ el: HTMLElement; maxWidth: string }> = [];
   /** float 收缩补偿写回过的元素（下次测量前清除 width） */
   private floatFixes: HTMLElement[] = [];
+  /** 首次布局显示门；token 与 loadSeq 一致，旧章不能揭示新章。 */
+  private displayGate: VisibilityGate;
 
   /** 阅读位置锚点：页中心元素（子树元素序号 + 元素内横向比例 + 字数位置） */
   private anchor: {
@@ -124,8 +281,14 @@ export class ChapterPaginator {
     /** 桌面端 hover 离开脚注标记时关闭弹层（移动端无 hover，弹层由点击/✕ 关闭） */
     private onFootnoteClose?: () => void,
     /** 外部链接（http/https/mailto/tel）点击回调，由 App 层调系统默认浏览器打开 */
-    private onExternalLink?: (url: string) => void
-  ) {}
+    private onExternalLink?: (url: string) => void,
+    /** 首次测量、分页与最终入口定位全部完成，iframe 已可安全交互。 */
+    private onDisplayReady?: () => void
+  ) {
+    this.displayGate = new VisibilityGate(this.iframe, {
+      timeoutMs: INITIAL_RENDER_GATE_TIMEOUT_MS,
+    });
+  }
 
   /** 加载一章。path 为规范化内部路径。 */
   async load(path: string, opts: LoadOptions = {}): Promise<void> {
@@ -143,6 +306,9 @@ export class ChapterPaginator {
     this._currentPath = path;
     this.pendingAnchor = opts.anchor;
     this.pendingStartAtEnd = opts.startAtEnd === true;
+    // blob 文档可能在下一个绘制帧立刻出现；先隐藏整个 iframe，既保留
+    // 布局测量，又避免普通入口先显示二阶段补偿前的中间位置。
+    this.displayGate.hold(seq);
     this.emit({ status: "loading" });
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
@@ -151,6 +317,7 @@ export class ChapterPaginator {
     const htmlText = this.server.textFor(path);
     if (htmlText === undefined) {
       this.emit({ status: "error", message: `章节资源缺失：${path}` });
+      this.displayGate.release(seq);
       return;
     }
 
@@ -168,6 +335,7 @@ export class ChapterPaginator {
     } catch (e) {
       if (seq === this.loadSeq) {
         this.emit({ status: "error", message: `章节渲染失败：${(e as Error).message}` });
+        this.displayGate.release(seq);
       }
       return;
     }
@@ -177,6 +345,8 @@ export class ChapterPaginator {
     this.blobUrl = URL.createObjectURL(
       new Blob([sanitized.html], { type: "text/html; charset=utf-8" })
     );
+    // sanitize 较慢或快速换章时重新计算兜底时间；原 visibility 快照保持不变。
+    this.displayGate.hold(seq);
     this.iframe.addEventListener("load", this.onIframeLoad);
     this.iframe.src = this.blobUrl;
   }
@@ -187,19 +357,21 @@ export class ChapterPaginator {
     const doc = this.iframe.contentDocument;
     if (!doc) {
       this.emit({ status: "error", message: "无法访问章节内容" });
+      this.displayGate.release(seq);
       return;
     }
     this.contentDoc = doc;
     const viewer = doc.getElementById(VIEWER_ID);
     if (!viewer) {
       this.emit({ status: "error", message: "章节缺少阅读器容器" });
+      this.displayGate.release(seq);
       return;
     }
     this.viewer = viewer;
-    // 回翻上一章（startAtEnd）：新内容在布局完成、翻到最后一页之前保持隐藏，
-    // 否则 fonts.ready + 双 rAF 期间第一页已经可见，随后才跳到最后页形成闪页。
     const atEnd = this.pendingStartAtEnd;
-    viewer.style.visibility = atEnd ? "hidden" : "";
+    // 从真实 iframe load 重新开始兜底计时。显示门挂在 iframe 而非 viewer，
+    // 可保证 blob 文档的第一帧也不会漏出，同时 visibility:hidden 仍可测量。
+    this.displayGate.hold(seq);
     this.emit({ status: "measuring" });
     doc.addEventListener("load", this.imgHandler, true);
     // 拦截书内链接：防止 iframe 自身导航导致内容丢失
@@ -213,31 +385,54 @@ export class ChapterPaginator {
     doc.addEventListener("wheel", this.wheelHandler, { passive: false });
     // 键盘翻页：焦点在书页内时，方向键事件不会冒泡到主窗口，需在此监听
     doc.addEventListener("keydown", this.keyHandler);
-    const showViewer = (): void => {
-      if (this.viewer === viewer) viewer.style.visibility = "";
-    };
-    void this.measure()
-      .then(() => {
-        if (seq !== this.loadSeq || this.disposed) return;
-        this.recompute(true);
-        // 目录跳转：定位到锚点所在页
-        if (this.pendingAnchor) {
-          this.jumpToAnchor(this.pendingAnchor);
-          this.pendingAnchor = undefined;
-        }
-        if (atEnd) {
-          this.pendingStartAtEnd = false;
-          this.setPage(Math.max(0, this.metrics.pageCount - 1));
+    void this.prepareChapterForDisplay(seq, atEnd)
+      .then((prepared) => {
+        if (!prepared || seq !== this.loadSeq || this.disposed) return;
+        // 先解除显示门，再通知 UI 消费加载期输入；这样缓冲翻页不会在
+        // 锚点/章末定位之前执行，也不会依赖中途的 ready 状态事件。
+        this.displayGate.release(seq);
+        this.onDisplayReady?.();
+      })
+      .catch((error: unknown) => {
+        if (seq === this.loadSeq && !this.disposed) {
+          this.emit({
+            status: "error",
+            message: `章节布局失败：${error instanceof Error ? error.message : String(error)}`,
+          });
         }
       })
-      .finally(showViewer);
+      .finally(() => this.displayGate.release(seq));
   };
+
+  /**
+   * 首次章节 ready 边界：后续预渲染可以复用同一顺序，但本轮仍只准备主 iframe。
+   * 返回前已经完成自愈重试与最终入口定位，调用方随后才可揭示内容。
+   */
+  private async prepareChapterForDisplay(seq: number, atEnd: boolean): Promise<boolean> {
+    await this.measure();
+    if (seq !== this.loadSeq || this.disposed) return false;
+    const ready = await this.recompute(true, seq);
+    if (!ready || seq !== this.loadSeq || this.disposed) return false;
+
+    // 目录跳转：最终页数稳定后定位到锚点所在页。
+    if (this.pendingAnchor) {
+      this.jumpToAnchor(this.pendingAnchor);
+      this.pendingAnchor = undefined;
+    }
+    if (atEnd) {
+      this.pendingStartAtEnd = false;
+      this.setPage(Math.max(0, this.metrics.pageCount - 1));
+    }
+    return true;
+  }
 
   /** 设置分栏并等待字体就绪后测量（带超时保护：任何一步挂起都不能阻塞 ready）。 */
   private async measure(): Promise<void> {
     const doc = this.contentDoc;
     const viewer = this.viewer;
     if (!doc || !viewer) return;
+    const measuredWidth = this.iframe.clientWidth;
+    const measuredHeight = this.iframe.clientHeight;
     // 第二遍 margin / fit-content 处理写回的 inline 值要先恢复，
     // 避免字号/窗口变化后按旧值布局
     this.restoreBookMargins();
@@ -293,19 +488,25 @@ export class ChapterPaginator {
       ),
       timeout(2000),
     ]);
-    this.applyBookMargins();
+    // [L5-C18] fit-content 会改变最终 border-box 宽度，必须先稳定宽度再计算
+    // 页面级 margin；反过来会把多栏中的异常旧宽度固化成错误横向位置。
     this.applyFitContentFix();
+    this.applyBookMargins();
     this.applyFloatShrinkFix();
+    // 只在整轮测量与二阶段补偿完成后提交尺寸；若测量期间窗口又变化，
+    // ResizeObserver 仍会发现新尺寸并发起下一轮。
+    this.measuredViewport = { width: measuredWidth, height: measuredHeight };
   }
 
   /** 恢复上一轮 margin 后处理写回的 inline 值。 */
   private restoreBookMargins(): void {
     for (const fix of this.marginFixes) {
       fix.el.removeAttribute("data-reader-margin-fixed");
-      if (fix.left === "") fix.el.style.removeProperty("margin-left");
-      else fix.el.style.setProperty("margin-left", fix.left);
-      if (fix.right === "") fix.el.style.removeProperty("margin-right");
-      else fix.el.style.setProperty("margin-right", fix.right);
+      restoreInlineStyleProperty(fix.el.style, "margin-left", fix.left);
+      restoreInlineStyleProperty(fix.el.style, "margin-right", fix.right);
+      if (fix.maxWidth) {
+        restoreInlineStyleProperty(fix.el.style, "max-width", fix.maxWidth);
+      }
     }
     this.marginFixes = [];
   }
@@ -322,6 +523,9 @@ export class ChapterPaginator {
     const viewer = this.viewer;
     if (!doc || !viewer || !doc.defaultView) return;
     const win = doc.defaultView;
+    // applyFitContentFix 先于本阶段执行；记录原始 fit-content 意图，避免
+    // inline 40rem 写回后丢失“无 margin 时左对齐正文列”的既有语义。
+    const fitContentElements = new Set(this.fitContentFixes.map((fix) => fix.el));
 
     const readerSheet = Array.from(doc.styleSheets).find(
       (s) => (s.ownerNode as Element | null)?.getAttribute?.("data-reader") === "overrides"
@@ -342,15 +546,33 @@ export class ChapterPaginator {
     // 并成一个超宽矩形，必须用 computed width。
     const widths = new Map<HTMLElement, number>();
     const maxWidths = new Map<HTMLElement, string>();
+    const percentageMargins = new Map<
+      HTMLElement,
+      { maxWidth: InlineStyleValue; relaxedReaderMaxWidth: boolean }
+    >();
     for (const el of candidates) {
       void el.offsetWidth;
-      const cs = win.getComputedStyle(el);
-      const usedW = parseFloat(cs.width);
+      let cs = win.getComputedStyle(el);
+      maxWidths.set(el, cs.maxWidth);
+
+      // 水平百分比 margin 是相对包含块的页面布局。若作者没有自己的 inline
+      // max-width，暂时解除 L3 的 40rem 默认值，才能读到作者原本的剩余宽度。
+      if (hasPercentageHorizontalMargin(el.style)) {
+        const maxWidth = snapshotInlineStyleProperty(el.style, "max-width");
+        const relaxedReaderMaxWidth = maxWidth.value === "";
+        percentageMargins.set(el, { maxWidth, relaxedReaderMaxWidth });
+        if (relaxedReaderMaxWidth) {
+          el.style.setProperty("max-width", "none");
+          void el.offsetWidth;
+          cs = win.getComputedStyle(el);
+        }
+      }
+
+      const borderBoxW = getBorderBoxWidth(cs);
       widths.set(
         el,
-        Number.isFinite(usedW) && usedW > 0 ? usedW : el.getBoundingClientRect().width
+        borderBoxW > 0 ? borderBoxW : el.getBoundingClientRect().width
       );
-      maxWidths.set(el, cs.maxWidth);
     }
 
     const restoreReaderMargins = readerSheet
@@ -375,6 +597,33 @@ export class ChapterPaginator {
         const meaningful = (v: string): boolean =>
           v !== "auto" && v !== "" && parseFloat(v) !== 0;
         const originalMaxWidth = maxWidths.get(el) ?? "";
+        const hadFitContent =
+          fitContentElements.has(el) || /(?:fit-content|max-content)/.test(originalMaxWidth);
+        const percentage = percentageMargins.get(el);
+
+        // [L4-C16] 百分比水平 margin 已经以包含块为基准，不能再叠加版心
+        // base。此时 max-width 已按需解除，computed width/margin 就是书的
+        // 原始页面布局；用 inline important 穿过 L3 margin 默认值写回。
+        if (isPercentageMarginLayout(Boolean(percentage), left, right)) {
+          const ml = parseFloat(left) || 0;
+          const mr = parseFloat(right) || 0;
+          this.marginFixes.push({
+            el,
+            left: snapshotInlineStyleProperty(el.style, "margin-left"),
+            right: snapshotInlineStyleProperty(el.style, "margin-right"),
+            maxWidth: percentage?.relaxedReaderMaxWidth ? percentage.maxWidth : undefined,
+          });
+          el.setAttribute("data-reader-margin-fixed", "1");
+          el.style.setProperty("margin-left", `${ml}px`, "important");
+          el.style.setProperty("margin-right", `${mr}px`, "important");
+          continue;
+        }
+
+        // 有百分比声明但实际水平值为 0：不属于流体定位，撤销上面为测量
+        // 临时写入的 max-width，继续走普通版心逻辑。
+        if (percentage?.relaxedReaderMaxWidth) {
+          restoreInlineStyleProperty(el.style, "max-width", percentage.maxWidth);
+        }
 
         // 书明确写了“收缩到内容宽度”（fit-content / max-content）且没有
         // 左右 margin：这是左对齐的内容容器，应放到版心列左缘，而不是
@@ -382,14 +631,14 @@ export class ChapterPaginator {
         if (
           !meaningful(left) &&
           !meaningful(right) &&
-          /(?:fit-content|max-content)/.test(originalMaxWidth)
+          hadFitContent
         ) {
           const columnW = TEXT_MEASURE.maxEm * this.settings.fontSizePx;
           const desiredLeft = Math.max(0, (parentW - columnW) / 2);
           this.marginFixes.push({
             el,
-            left: el.style.marginLeft,
-            right: el.style.marginRight,
+            left: snapshotInlineStyleProperty(el.style, "margin-left"),
+            right: snapshotInlineStyleProperty(el.style, "margin-right"),
           });
           el.setAttribute("data-reader-margin-fixed", "1");
           el.style.setProperty("margin-left", `${desiredLeft}px`, "important");
@@ -402,6 +651,10 @@ export class ChapterPaginator {
         }
 
         if (!meaningful(left) && !meaningful(right)) continue;
+
+        // [L3/L4-C18] margin:1em 一类正对称水平留白没有方向性。
+        // 保持阅读器的 auto 居中即可；不能进入 ml>0 的单向缩进分支。
+        if (isSymmetricHorizontalMargin(left, right)) continue;
 
         const autoCenter = (parentW - width) / 2;
         const autoLike =
@@ -430,8 +683,8 @@ export class ChapterPaginator {
 
         this.marginFixes.push({
           el,
-          left: el.style.marginLeft,
-          right: el.style.marginRight,
+          left: snapshotInlineStyleProperty(el.style, "margin-left"),
+          right: snapshotInlineStyleProperty(el.style, "margin-right"),
         });
         el.setAttribute("data-reader-margin-fixed", "1");
         el.style.setProperty("margin-left", `${desiredLeft}px`, "important");
@@ -576,6 +829,9 @@ export class ChapterPaginator {
       // （如目录标题 width:100% + float:left）不处理。
       const currentWidth = parseFloat(cs.width);
       if (!Number.isFinite(currentWidth) || currentWidth > 48) continue;
+      // [L5-C23] 小头像等媒体本来就可能窄于 48px；源码缩进空白不是内容，
+      // 不能由 Canvas 累加后反向撑宽其 float 容器。
+      if (isMediaOnlyFloatContent(el.childNodes)) continue;
       if (
         Array.from(el.children).some((c) => {
           const d = win.getComputedStyle(c as Element).display;
@@ -621,12 +877,19 @@ export class ChapterPaginator {
     }
   }
 
-  private recompute(useAnchor: boolean): void {
+  /**
+   * 重算分页；首次显示需要 await 到内部自愈重试真正结束。
+   * 返回 false 表示章节已过期/销毁或当前 DOM 不可计算。
+   */
+  private async recompute(
+    useAnchor: boolean,
+    loadSeq: number = this.loadSeq
+  ): Promise<boolean> {
     // 章节代号校验：切章后旧章的延迟重排（图片加载防抖等）一律丢弃，
     // 否则旧 DOM 的锚点/页数会污染新章（表现：卡死在上一章末页）
-    const loadSeq = this.loadSeq;
+    if (this.disposed || loadSeq !== this.loadSeq) return false;
     const viewer = this.viewer;
-    if (!viewer || this.step <= 0) return;
+    if (!viewer || this.step <= 0) return false;
     // 自愈：viewer 为空但 body 里还有内容（内容落在容器外）时，重新包裹
     if (viewer.children.length === 0) {
       const doc = this.contentDoc;
@@ -641,10 +904,9 @@ export class ChapterPaginator {
         }
       }
       if (moved > 0) {
-        void this.measure().then(() => {
-          if (!this.disposed && loadSeq === this.loadSeq) this.recompute(useAnchor);
-        });
-        return;
+        await this.measure();
+        if (this.disposed || loadSeq !== this.loadSeq) return false;
+        return this.recompute(useAnchor, loadSeq);
       }
     }
     const sw = viewer.scrollWidth;
@@ -653,20 +915,20 @@ export class ChapterPaginator {
     if (sw <= 0 || !hasContent) {
       this.metrics = { pageCount: 1, currentPage: 0 };
       this.emit({ status: "ready", pageCount: 1, currentPage: 0, empty: true });
-      return;
+      return true;
     }
     // 纵向裁剪检测：分栏未生效时内容会被 overflow:hidden 裁掉（scrollHeight > 高），
     // 重新应用分栏一次（最多重试 2 次，防死循环）
     if (viewer.scrollHeight > viewer.clientHeight + 1) {
       if (this.recomputeRetries < 2) {
         this.recomputeRetries++;
-        void this.measure().then(() => {
-          if (!this.disposed && loadSeq === this.loadSeq) this.recompute(useAnchor);
-        });
-        return;
+        await this.measure();
+        if (this.disposed || loadSeq !== this.loadSeq) return false;
+        return this.recompute(useAnchor, loadSeq);
       }
     }
     this.recomputeInner(useAnchor, loadSeq);
+    return !this.disposed && loadSeq === this.loadSeq;
   }
 
   private recomputeInner(useAnchor: boolean, loadSeq: number): void {
@@ -873,7 +1135,7 @@ export class ChapterPaginator {
     const seq = this.loadSeq;
     this.reflowTimer = window.setTimeout(() => {
       this.reflowTimer = undefined;
-      if (!this.disposed && seq === this.loadSeq) this.recompute(false);
+      if (!this.disposed && seq === this.loadSeq) void this.recompute(false, seq);
     }, 200);
   }
 
@@ -881,12 +1143,20 @@ export class ChapterPaginator {
    *  不捕获锚点：直接使用上一次稳定状态存下的锚点（缩放前的位置）。 */
   reflow(): void {
     if (this.disposed) return;
+    // ResizeObserver 在组件挂载和章节切换时也可能回调，即使 iframe 尺寸
+    // 完全没变。重复 measure 会先恢复二阶段补偿，造成已稳定盒子短暂跳位。
+    if (
+      this.iframe.clientWidth === this.measuredViewport.width &&
+      this.iframe.clientHeight === this.measuredViewport.height
+    ) {
+      return;
+    }
     const seq = ++this.reflowSeq;
     const loadSeq = this.loadSeq;
     void this.measure().then(() => {
       // 过期测量（更早发起、更晚完成/切章后）直接丢弃，防布局/位置被覆写
       if (!this.disposed && seq === this.reflowSeq && loadSeq === this.loadSeq) {
-        this.recompute(true);
+        void this.recompute(true, loadSeq);
       }
     });
   }
@@ -951,7 +1221,13 @@ export class ChapterPaginator {
       }
     }
     if (isFragmentOnly(href)) {
-      this.jumpToAnchor(href.slice(1));
+      // 脚注已在上方提前返回；这里只处理普通同章锚点。先通过原生 hash
+      // 激活 :target，再由分页器将目标元素定位到对应分页列。
+      const fragment = getFragmentNavigation(href);
+      if (fragment) {
+        syncFragmentHash(this.iframe.contentWindow, fragment.hash);
+        this.jumpToAnchor(fragment.anchor);
+      }
       return;
     }
     const { path, anchor } = splitHref(href);
@@ -1115,6 +1391,7 @@ export class ChapterPaginator {
     this.disposed = true;
     this.loadSeq++;
     window.clearTimeout(this.reflowTimer);
+    this.displayGate.dispose();
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
     this.iframe.src = "about:blank";

@@ -74,11 +74,22 @@ L5 引擎兼容补偿层（只在浏览器多栏 bug 时兜底，尽量少、尽
 | C-05 | L3 | `padding` | `html,body{padding:0!important}` 压掉 LK 书 `body{padding:0 5px}` | 移除 padding 清零；UA 默认已是 0，书声明自然生效 | ✅ |
 | C-06 | L4 | `font-family` | body 覆盖书的内嵌字体 | fallback 移到 html，body 不写 | ✅ |
 | C-07 | L4 | `width:%` | 文本层把 `width:X%` 直接改成固定 em，误伤“% 相对窄包含块”的规则（note/.ctt/.authorbox table，以及命定之人目录 `.toc-link{width:100%}` 相对 53px td） | 改写为 `min(X%, X/100×40rem)`：页面级取版心比例，窄容器由浏览器取书自己的 %；仅 0<X≤100 改写，>100 出血保留；纯标签、组合器、float、img/fullpage 跳过清单继续保留 | ✅ |
-| C-08 | L5 | `float` 收缩 | CSS 多栏里 float shrink-to-fit 塌成逐字宽 | 分页器 Canvas 测 max-content 后按可用宽收缩写回 px；只处理宽度 ≤48px 的塌缩浮动元素；`<br>` 按最长行计；WSL 用 `scripts/setup-pw-fonts.mjs` + XDG_DATA_HOME 解决字体 | ✅ |
+| C-08 | L5 | `float` 收缩 | CSS 多栏里 float shrink-to-fit 塌成逐字宽 | 分页器 Canvas 测 max-content 后按可用宽收缩写回 px；只处理宽度 ≤48px 的塌缩浮动元素；`<br>` 按最长行计；媒体专用小 float 由 C-23 排除；WSL 用 `scripts/setup-pw-fonts.mjs` + XDG_DATA_HOME 解决字体 | ✅ |
 | C-09 | L5 | `fit-content` | CSS 多栏里 fit-content 异常 | 分页器运行时统一把 fit-content 元素 max-width 设为版心 40rem（已移除 .summary 特判） | ✅ |
 | C-10 | L4 | `text-align/float` | 曾全局强制 `.ctt` 居中，覆盖书设计 | 已撤销，尊重书 | ↩ |
 | C-11 | L2 | `color` | `rt` 注音在深色主题不变色 | `#viewer rt` 随主题前景色 | ✅ |
 | C-12 | L1/L3 | 图片尺寸 | 普通图片规则用 `!important` 可能覆盖书设定 | 普通图片规则改为 `:where(#viewer)` 零特异性默认值；全页图块保持 important | ✅ |
+| C-13 | L4/序列化 | CSS `>` 文本 | XMLSerializer 在 `<style>` raw-text 中输出 `&gt;`，HTML 不解码导致子组合器失效 | 仅在序列化后的 `<style>` 内容恢复 `&gt;`；保持 `<` 与其他文档区域转义 | ✅ |
+| C-14 | L3/结构语义 | 祖先元素类型 | 注入 `<div id="epub-viewer">` 使 body 顶层 p 成为 `div p` 后代，误命中书规则 | 改用 `<epub-viewer id="epub-viewer">`，显式 `display:block`；分页器仍只依赖 ID | ✅ |
+| C-15 | L3 | 顶层链接版心 | viewer 直接子 `<a><p>…</p></a>` 中，inline 的 a 不接受版心 max-width/auto margin，内容贴窗口左缘 | 仅给 `a.reader-top` 提供零特异性 `display:block` 默认值；书籍具体 display 可覆盖 | ✅ |
+| C-16 | L3/L4 | `% margin`、auto margin | 二阶段补偿把页面相对 35% margin 再叠加版心 base；fit-content 用 content width 判断含 padding/border 的 auto 居中，均导致整体右移 | 百分比水平 margin 走包含块原位写回并按需解除默认 max-width；auto-like 统一用 border-box；所有临时值/优先级随 reflow 恢复 | ✅ |
+| C-17 | L3/L4 | inline SVG 图片尺寸 | 多看纯图片页用 `div > svg > image`，未命中只统计 HTML `img` 的全页检测；40rem 顶层版心使 SVG 按 viewBox 比例产生超页高度后被裁切 | 仅把“无文字、单个带 viewBox 的 SVG、且直接包含单个 image”纳入 fullpage；HTML 祖先传递页面高度，SVG 视口 100% contain，内部 image 与 preserveAspectRatio 保持书设计 | ✅ |
+| C-18 | L3/L4/L5 | fit-content 与对称 margin | margin 定位先于 fit-content 宽度补偿，导致不同内容盒按异常旧宽度散开；`margin:1em` 又被当成单向缩进 | 先稳定 fit-content 最终宽度再计算 margin；保留原始收缩意图；正对称正值 margin 保持 reader auto 居中，真正不对称与负 margin 继续走书布局 | ✅ |
+| C-19 | L5/渲染时序 | 首次绘制与二阶段布局 | blob iframe 在字体等待、fit-content/margin/float 补偿和分页自愈前已经可见；同尺寸 ResizeObserver 空转又会在 ready 后暂时撤销补偿，形成盒子横向闪动 | `VisibilityGate` 用 load 代次把 iframe 保持为可布局但不可见，等待统一准备流程及最终入口定位后揭示；20 秒/错误/dispose 恢复；完整测量尺寸未变时跳过 ResizeObserver 空转 | ✅ |
+| C-20 | L5/交互时序 | hidden iframe、滚轮目标锁定与持续 wheel | `visibility:hidden` 不参与鼠标命中；浏览器又可能把同一连续滚轮锁定在外层目标，若外层只在 loading 接收，则揭示后固定停在第 2/倒数第 2 页 | `ReaderView` 始终接收外层 wheel：loading 时 `TurnIntentBuffer` 只留最后方向，display-ready 消费一次；ready 后同一锁定流由 `WheelTurnAccumulator` 按 80px 阈值持续翻页；错误/销毁清空 | ✅ |
+| C-21 | L1/L3 | 根高度、盒模型与 overflow | `html/body{height:100%}` 仍是 content-box 时，书的上下 padding 会叠加到视口高度，短目录也产生根滚动条 | 根页面统一 `box-sizing:border-box`，保留书 padding 并让 viewer 使用 body 内容区；`overflow:hidden!important` 固化“只由 viewer 分页”的底线 | ✅ |
+| C-22 | L3/L4 | 块内容链接的多栏 fragmentation | 默认 inline 的 a 包住 `div + p` 时，Chromium 可在两块之间断列，使装饰线孤立在前页、文字落到后页 | 零特异性匹配直接包含常见块元素的 a，默认 `display:block;break-inside:avoid`；普通行内链接不命中，书籍具体规则可覆盖 | ✅ |
+| C-23 | L5 | 小型媒体 float 宽度 | C-08 用“宽度 ≤48px”识别文字塌缩时，把正常的 24px 头像 float 也当成异常；Canvas 又把源码缩进空白计入宽度，产生 82.2px inline width | C-08 测量前排除有效内容只有直接 `img/svg` 的 float；空白与注释不算内容，任何可见文字或其他元素仍进入原判断 | ✅ |
 
 ## 新增规则登记模板
 ```md
@@ -107,7 +118,7 @@ L5 引擎兼容补偿层（只在浏览器多栏 bug 时兜底，尽量少、尽
 7. **更新台账**：状态、编号、移除条件。
 
 ## 自动化防线（防止回归）
-- 单测：CSS 文本改写、消毒输出、脚注识别等逻辑层（现有 118 项）；
+- 单测：CSS 文本改写、消毒输出、脚注识别、分页交互等逻辑层（现有 158 项）；
 - 渲染矩阵（建议固化）：对固定样本书 + 关键页断言 computed style，至少覆盖：
   - 铁人目录条目 margin 交错；
   - 诡屋 `.paper` 480px；

@@ -34,13 +34,35 @@ const STRIP_TAGS = new Set([
   "frameset",
   "base",
   "form",
-  "input",
   "button",
   "select",
   "textarea",
 ]);
 
+/**
+ * 表单整体仍会删除；只有这些不会提交、不会选择本地文件的 input 类型可留在
+ * 无脚本章节中，以支持作者 CSS 的 :enabled/:disabled/:checked 状态。
+ * 空 type 是 HTML 的 text 默认值，因此与显式 text 同等处理。
+ */
+const SAFE_INPUT_TYPES = new Set(["", "text", "checkbox", "radio"]);
+
 export const VIEWER_ID = "epub-viewer";
+const VIEWER_TAG = "epub-viewer";
+
+/**
+ * XMLSerializer escapes `>` in text nodes as `&gt;`.  Chapter output is later
+ * consumed as HTML, where `<style>` is a raw-text element and character
+ * references are not decoded.  Restore only that serializer escape inside
+ * style text; keeping `<` escaped prevents CSS text from introducing a real
+ * `</style>` end tag.
+ */
+function restoreStyleRawTextCombinators(serialized: string): string {
+  return serialized.replace(
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/gi,
+    (_match, opening: string, text: string, closing: string) =>
+      `${opening}${text.replace(/&gt;/g, ">")}${closing}`
+  );
+}
 
 /** 仅接受 #hex 或安全色名，防止书里的 bgcolor 注入任意 CSS */
 function isSafeColor(v: string): boolean {
@@ -96,6 +118,22 @@ function buildOverrideCss(s: ReaderSettings): string {
 :where(#${VIEWER_ID}) .reader-top {
   margin-left: auto !important;
   margin-right: auto !important;
+}
+/* [L3-C15] viewer 顶层链接默认是 inline，包住 p/div 时版心宽度与 auto margin
+   不生效。仅把已标记的页面级链接设为 block；书籍更具体的 display 仍可覆盖。 */
+:where(#${VIEWER_ID} a.reader-top) {
+  display: block;
+}
+/* [L3-C22] HTML 允许链接包住块级内容，但 inline 锚点可在多栏断点把同一
+   目录项的装饰线与文字拆到两列。把这类结构当作原子导航块；选择器保持
+   零特异性，书籍明确的 display / break-inside 仍可覆盖。 */
+:where(#${VIEWER_ID} a:has(> :is(
+  address, article, aside, blockquote, div, dl, fieldset, figure, figcaption,
+  footer, h1, h2, h3, h4, h5, h6, header, hgroup, hr, main, nav, ol, p, pre,
+  section, table, ul
+))) {
+  display: block;
+  break-inside: avoid;
 }`;
 
   // ---- L5 引擎兼容补偿：Chromium 多栏布局 bug 的最小兜底 ----
@@ -162,8 +200,13 @@ ${
 }`;
 
   return [
-    `html, body { position: relative; height: 100%; margin: 0 !important; }`,
-    `#${VIEWER_ID} { height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }`,
+    `/* [L1/L3-C21] 正文只由 viewer 分页，不使用根页面原生滚动。
+   border-box 让书籍 body padding 包含在 100% 高度内，避免短章节也撑出滚动条。 */
+html, body { position: relative; height: 100%; margin: 0 !important; box-sizing: border-box; overflow: hidden !important; }`,
+    // 自定义容器标签不会继承 div 的默认 block display；显式声明也避免改变
+    // 作者的 div p / section p 等类型选择器祖先语义。
+    `/* [L3-C14] 分页容器使用专用标签，不能以 inline 默认值参与多栏测量。 */
+${VIEWER_TAG}#${VIEWER_ID} { display: block; height: 100%; overflow: hidden; margin: 0 auto; box-sizing: border-box; }`,
     securityCss,
     `/* [L2] 用户排版属性（未设置 = 跟随书）。 */
 :where(#${VIEWER_ID}) :not(img) {
@@ -224,12 +267,19 @@ export async function sanitizeChapter(
 
   // 1) 移除危险标签
   for (const el of Array.from(doc.getElementsByTagName("*"))) {
-    if (STRIP_TAGS.has(el.tagName.toLowerCase())) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "input") {
+      const inputType = (el.getAttribute("type") ?? "").trim().toLowerCase();
+      if (!SAFE_INPUT_TYPES.has(inputType)) {
+        el.parentNode?.removeChild(el);
+        continue;
+      }
+    } else if (STRIP_TAGS.has(tag)) {
       el.parentNode?.removeChild(el);
       continue;
     }
     // meta refresh 防自动跳转
-    if (el.tagName.toLowerCase() === "meta") {
+    if (tag === "meta") {
       const he = (el.getAttribute("http-equiv") ?? "").toLowerCase();
       if (he === "refresh") {
         el.parentNode?.removeChild(el);
@@ -315,7 +365,9 @@ export async function sanitizeChapter(
 
   // 5) 把正文包进分页容器（paginator 依赖 #epub-viewer 做多栏分页）
   const bodyEl = doc.getElementsByTagName("body")[0] ?? root;
-  const viewer = doc.createElement("div");
+  // 不使用 div：新增祖先必须不能改变作者 `div p` 一类类型选择器的语义。
+  // 自定义标签在注入 CSS 中显式 display:block，分页器继续只依赖稳定的 id。
+  const viewer = doc.createElement(VIEWER_TAG);
   // 注意用 setAttribute：xmldom 不实现 el.id 属性反射，浏览器两端通用
   viewer.setAttribute("id", VIEWER_ID);
   while (bodyEl.firstChild) {
@@ -401,10 +453,15 @@ export async function sanitizeChapter(
 
   // 5.5) 纯图片页（封面/插图）：标记并注入整屏填充样式
   // （覆盖书里 90vh 等高度限制，object-fit:contain 保证不超出屏幕地尽量填满）
-  // 仅单图且图片没有自带尺寸约束（inline width/height 等）的页面整页填充；
-  // 多图页、限宽 title 图按书自身排版，否则会把一页拆成两页 / 把限宽图放大到全屏。
+  // 支持普通 img，以及多看常见的单个 `svg > image` 页面包装。后者的
+  // width/height=100% 是流体视口而非固定限宽，必须把高度从 viewer 逐层传递，
+  // 否则 SVG 按 viewBox 固有比例算出超页高度却仍被分页器当作单页裁切。
+  // 普通 img 仍只在没有自带尺寸约束时整页填充；多图页、限宽 title 图按书
+  // 自身排版，否则会把一页拆成两页 / 把限宽图放大到全屏。
   const bodyText = (bodyEl.textContent ?? "").trim();
   const images = findElements(viewer, "img");
+  const svgs = findElements(viewer, "svg");
+  const svgImages = findElements(viewer, "image");
   const hasOwnSize = (el: XmlElementLike): boolean => {
     const st = el.getAttribute("style") ?? "";
     if (/\b(?:width|height|max-width|max-height|min-width|min-height)\s*:/.test(st)) {
@@ -413,22 +470,43 @@ export async function sanitizeChapter(
     // xmldom 对不存在的属性返回 ""（不是 null），要按空值判断
     return Boolean(el.getAttribute("width")) || Boolean(el.getAttribute("height"));
   };
-  if (images.length === 1 && bodyText.length === 0 && !hasOwnSize(images[0])) {
+  const svgDirectChildren =
+    svgs.length === 1
+      ? Array.from((svgs[0] as unknown as Element).childNodes).filter(
+          (node): node is Element => node.nodeType === 1
+        )
+      : [];
+  const isPlainImagePage =
+    images.length === 1 &&
+    svgs.length === 0 &&
+    bodyText.length === 0 &&
+    !hasOwnSize(images[0]);
+  const isInlineSvgImagePage =
+    images.length === 0 &&
+    svgs.length === 1 &&
+    svgImages.length === 1 &&
+    svgDirectChildren.length === 1 &&
+    svgDirectChildren[0] === (svgImages[0] as unknown as Element) &&
+    Boolean(svgs[0].getAttribute("viewBox")) &&
+    bodyText.length === 0;
+  if (isPlainImagePage || isInlineSvgImagePage) {
     viewer.setAttribute("class", "fullpage-image");
     const imgStyle = doc.createElement("style");
     imgStyle.setAttribute("data-reader", "fullpage-image");
-    // 注意：不能使用 ">" 子选择器——序列化会转义成 &gt;，而 HTML 解析器
-    // 不解码 <style> 内的字符引用，会导致规则失效。用后代选择器代替。
+    // 这里有意使用后代选择器：全页图可能被书籍自己的多层容器包裹，
+    // 这些非 img 祖先都需要参与整页高度传递。
     imgStyle.textContent = `
-#${VIEWER_ID}.fullpage-image :not(img) { height: 100% !important; margin: 0 !important; padding: 0 !important; max-width: none !important; }
-#${VIEWER_ID}.fullpage-image img {
+#${VIEWER_ID}.fullpage-image :not(img):not(svg):not(image) { height: 100% !important; margin: 0 !important; padding: 0 !important; max-width: none !important; }
+#${VIEWER_ID}.fullpage-image img,
+#${VIEWER_ID}.fullpage-image svg {
   width: 100% !important;
   height: 100% !important;
   max-width: none !important;
   max-height: none !important;
   border: none !important;
   object-fit: contain;
-}`;
+}
+#${VIEWER_ID}.fullpage-image svg { display: block; }`;
     const headForImg = doc.head ?? doc.documentElement;
     headForImg.appendChild(imgStyle);
   }
@@ -459,6 +537,7 @@ export async function sanitizeChapter(
     head.appendChild(bgStyle);
   }
 
-  const html = (await getSerializer()).serializeToString(doc);
+  const serialized = (await getSerializer()).serializeToString(doc);
+  const html = restoreStyleRawTextCombinators(serialized);
   return { html, issues, downgraded };
 }

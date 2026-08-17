@@ -807,7 +807,7 @@ body {
   border-top: 1px solid var(--panel-border);
 }
 
-/* ---- 书架（0.1.4） ---- */
+/* ---- 书架 ---- */
 .shelf-stack {
   flex: 1;
   min-width: 0;

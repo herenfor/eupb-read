@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseHTML } from "linkedom";
 import { sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -10,6 +11,20 @@ function opts(basePath = "OEBPS/Text/ch1.xhtml") {
     urlFor: (p: string) => (p.includes("missing") ? undefined : `blob:test/${p}`),
     settings: DEFAULT_SETTINGS,
   };
+}
+
+function expectCombinatorsAndEscaping(out: string): void {
+  expect(out).toContain(".parent>.direct { color: red; }");
+  expect(out).toContain(".previous + .next { color: green; }");
+  expect(out).toContain(".start ~ .sibling { color: blue; }");
+  expect(out).toContain(".ancestor .descendant { color: purple; }");
+  expect(out).not.toContain(".parent&gt;.direct");
+  // Only style raw text may restore `>`; text outside style must not be globally decoded.
+  expect(out).toContain("literal &amp;gt; token");
+  // Keep `<` escaped inside style text so a CSS value cannot close the style element.
+  expect(out).toContain('.safe::before{content:"&lt;"}');
+  expect(out).toContain('.escape::before{content:"&lt;/style>"}');
+  expect(out).not.toContain('.escape::before{content:"</style>"}');
 }
 
 describe("sanitizeChapter", () => {
@@ -25,6 +40,66 @@ describe("sanitizeChapter", () => {
     expect(out).not.toContain("onclick");
     expect(out).not.toContain("onmouseover");
     expect(out).not.toContain("javascript:");
+  });
+
+  it("严格 XML 中仅保留无提交能力的 text/checkbox/radio input 及其状态属性", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<label for="reader-name">姓名</label><input id="reader-name" type="text" disabled="disabled" oninput="evil()"/>
+<label for="reader-check">选择</label><input id="reader-check" type="checkbox" checked="checked" onclick="evil()"/>
+<input id="reader-radio" type="radio" disabled="disabled"/>
+<input id="reader-default" disabled="disabled"/>
+<input id="upload" type="file"/><input id="submit" type="submit"/><input id="image" type="image"/>
+<input id="button" type="button"/><input id="reset" type="reset"/><input id="hidden" type="hidden"/>
+<form><input id="inside-form" type="text"/></form><button id="native-button">发送</button>
+<select id="native-select"><option>一</option></select><textarea id="native-textarea">二</textarea>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    const { document } = parseHTML(out);
+
+    expect(document.querySelectorAll("input")).toHaveLength(4);
+    expect(document.querySelector("label[for=\"reader-name\"]")).not.toBeNull();
+    expect(document.getElementById("reader-name")?.getAttribute("type")).toBe("text");
+    expect(document.getElementById("reader-name")?.hasAttribute("disabled")).toBe(true);
+    expect(document.getElementById("reader-check")?.hasAttribute("checked")).toBe(true);
+    expect(document.getElementById("reader-radio")?.hasAttribute("disabled")).toBe(true);
+    expect(document.getElementById("reader-default")?.hasAttribute("disabled")).toBe(true);
+    expect(out).not.toContain("oninput");
+    expect(out).not.toContain("onclick");
+    for (const id of [
+      "upload",
+      "submit",
+      "image",
+      "button",
+      "reset",
+      "hidden",
+      "inside-form",
+      "native-button",
+      "native-select",
+      "native-textarea",
+    ]) {
+      expect(document.getElementById(id)).toBeNull();
+    }
+  });
+
+  it("HTML 路径同样保留安全 input 的 checked/disabled/for，删除危险类型", async () => {
+    const html = `<html><body>
+<label for="fallback-check">选择</label><input id="fallback-check" type="checkbox" checked="checked" disabled="disabled"/>
+<input id="fallback-text" type="text"/><input id="fallback-radio" type="radio" checked="checked"/>
+<input id="fallback-file" type="file"/><input id="fallback-submit" type="submit"/>
+</body></html>`;
+    const { html: out, downgraded } = await sanitizeChapter(html, {
+      ...opts(),
+      strictXml: false,
+    });
+    const { document } = parseHTML(out);
+
+    expect(downgraded).toBe(false);
+    expect(document.querySelectorAll("input")).toHaveLength(3);
+    expect(document.querySelector("label[for=\"fallback-check\"]")).not.toBeNull();
+    expect(document.getElementById("fallback-check")?.hasAttribute("checked")).toBe(true);
+    expect(document.getElementById("fallback-check")?.hasAttribute("disabled")).toBe(true);
+    expect(document.getElementById("fallback-file")).toBeNull();
+    expect(document.getElementById("fallback-submit")).toBeNull();
   });
 
   it("图片 src 改写为 blob URL；缺失资源移除并记 issue", async () => {
@@ -52,6 +127,33 @@ describe("sanitizeChapter", () => {
 </body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
     expect(out).toContain("blob:test/OEBPS/img/x.png");
+  });
+
+  it("严格 XML 序列化保留 style 中的全部 CSS 组合器且不全局解码", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>.parent>.direct { color: red; }
+.previous + .next { color: green; }
+.start ~ .sibling { color: blue; }
+.ancestor .descendant { color: purple; }
+.safe::before{content:"&lt;"}
+.escape::before{content:"&lt;/style&gt;"}</style>
+</head><body><p>literal &amp;gt; token</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expectCombinatorsAndEscaping(out);
+  });
+
+  it("HTML 降级路径同样保留 style 组合器", async () => {
+    const broken = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>.parent>.direct { color: red; }
+.previous + .next { color: green; }
+.start ~ .sibling { color: blue; }
+.ancestor .descendant { color: purple; }
+.safe::before{content:"&lt;"}
+.escape::before{content:"&lt;/style&gt;"}</style>
+</head><body><p id="a" id="b">literal &amp;gt; token</p></body></html>`;
+    const res = await sanitizeChapter(broken, opts());
+    expect(res.downgraded).toBe(true);
+    expectCombinatorsAndEscaping(res.html);
   });
 
   it("注入 CSP 与覆盖样式（含字号/主题）", async () => {
@@ -204,10 +306,52 @@ describe("sanitizeChapter", () => {
     // 直接子被标记 reader-top，嵌套元素没有标记
     expect(out).toContain(`class="cut reader-top"`);
     expect(out).toContain(`class="toc"`);
-    // 居中规则针对 reader-top（不能用 > 子选择器，序列化会转义）
+    // 居中规则针对 reader-top；B-007 已保证子组合器也能安全序列化。
     expect(out).toContain(`:where(#${VIEWER_ID}) .reader-top`);
     expect(out).toContain("margin-left: auto !important;");
     expect(out).toContain("margin-right: auto !important;");
+  });
+
+  it("viewer 顶层链接包裹块级正文时使用 block 版心，不再贴页面左缘", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<a href="x.xhtml"><p>第一章</p></a>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    const { document } = parseHTML(out);
+    const link = document.querySelector(`epub-viewer#${VIEWER_ID} > a`);
+    const paragraph = link?.querySelector("p");
+
+    expect(link?.classList.contains("reader-top")).toBe(true);
+    expect(paragraph?.classList.contains("reader-top")).toBe(false);
+    expect(out).toMatch(
+      new RegExp(`:where\\(#${VIEWER_ID} a\\.reader-top\\)\\s*\\{\\s*display:\\s*block`, "s")
+    );
+  });
+
+  it("根页面使用 border-box 并禁止原生滚动，body padding 不再撑出空滚动条", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>body{height:100%;padding:1em 0 2em}</style>
+</head><body><p>短目录</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+
+    expect(out).toMatch(
+      /html, body\s*\{[^}]*height:\s*100%;[^}]*box-sizing:\s*border-box;[^}]*overflow:\s*hidden\s*!important;/s
+    );
+  });
+
+  it("直接包住块级条目的链接默认作为不可拆分页块", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div><a href="chapter.xhtml"><div class="rule"> </div><p class="label">章节</p></a></div>
+<p><a href="note.xhtml"><span>普通行内链接</span></a></p>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+
+    expect(out).toMatch(
+      new RegExp(
+        `:where\\(#${VIEWER_ID} a:has\\(> :is\\([^}]+\\)\\)\\)\\s*\\{[^}]*display:\\s*block;[^}]*break-inside:\\s*avoid;`,
+        "s"
+      )
+    );
   });
 
   it("纯图片页注入 fullpage-image 类与整屏填充样式", async () => {
@@ -216,6 +360,23 @@ describe("sanitizeChapter", () => {
     const { html: out } = await sanitizeChapter(html, opts("OEBPS/Text/cover.xhtml"));
     expect(out).toContain('class="fullpage-image"');
     expect(out).toContain("object-fit: contain");
+    expect(out).toContain("height: 100% !important");
+  });
+
+  it("纯图片页使用 inline SVG image 时同样整屏 contain，且不改写书的 viewBox", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>标题</title></head>
+<body><div style="text-align:center;padding:0;margin:0">
+<svg xmlns="http://www.w3.org/2000/svg" height="100%" preserveAspectRatio="xMidYMid meet"
+  viewBox="0 0 1370 1945" width="100%" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <image width="1370" height="1945" xlink:href="../Images/title.jpg"/>
+</svg></div></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts("OEBPS/Text/title.xhtml"));
+
+    expect(out).toContain('class="fullpage-image"');
+    expect(out).toContain('viewBox="0 0 1370 1945"');
+    expect(out).toContain('xlink:href="blob:test/OEBPS/Images/title.jpg"');
+    expect(out).toMatch(/#epub-viewer\.fullpage-image\s+svg\s*\{/);
+    expect(out).toContain("width: 100% !important");
     expect(out).toContain("height: 100% !important");
   });
 
@@ -249,13 +410,31 @@ describe("sanitizeChapter", () => {
   it("正文被包进 #epub-viewer 分页容器", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><h1>标题</h1><p>正文</p></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
-    const viewerStart = out.indexOf(`id="${VIEWER_ID}"`);
+    const viewerStart = out.indexOf(`<epub-viewer id="${VIEWER_ID}"`);
     expect(viewerStart).toBeGreaterThan(-1);
     // 容器内包含正文内容，容器闭合后直接是 </body>
     const after = out.slice(viewerStart);
-    const closeIdx = after.indexOf("</div>");
+    const closeIdx = after.indexOf("</epub-viewer>");
     expect(after.slice(0, closeIdx)).toContain("正文");
     expect(after.slice(closeIdx)).toContain("</body>");
+  });
+
+  it("分页容器不把 body 顶层 p 变成 div 后代，作者 div 内 p 仍匹配", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>div p { background-color: yellow; }</style>
+</head><body><p id="top-one">测试</p><p id="top-two">测试2</p><div id="author"><p id="inside">作者 div 内</p></div></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    const { document } = parseHTML(out);
+    const topOne = document.getElementById("top-one");
+    const topTwo = document.getElementById("top-two");
+    const inside = document.getElementById("inside");
+
+    expect(document.querySelector(`epub-viewer#${VIEWER_ID}`)).not.toBeNull();
+    expect(topOne?.closest("div")).toBeNull();
+    expect(topTwo?.closest("div")).toBeNull();
+    expect(inside?.closest("div")?.id).toBe("author");
+    expect(document.querySelectorAll("div p")).toHaveLength(1);
+    expect(out).toMatch(new RegExp(`epub-viewer#${VIEWER_ID}\\s*\\{[^}]*display:\\s*block`, "s"));
   });
 
   it("普通图片不覆盖书定义的高度（height:auto 不得强制；用 object-fit 防拉伸）", async () => {
