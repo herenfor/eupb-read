@@ -13,11 +13,14 @@ AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完
 
 ## 当前基线
 
-- 当前发布候选版本：`0.1.5`
-- 源仓比较基线：`a07a79664377185b2f1273f3ba2f90e33a22e66d`
-- 基线提交说明：`feat: update test book paths, footnote fixes, shelf polish`
-- 建立本文档时，隔离副本与源仓的应用代码一致。
-- 源仓单元测试基线：10 个测试文件、129 个用例；当前发布候选为 13 个测试文件、158 个用例。
+- 当前开发阶段：`0.1.6`
+- 已发布版本：`0.1.5`（已在 Windows 编译、打包并分发）
+- 0.1.5 发布提交：`4bb9c7b2e50ef3a13f2cc8cd06d91c25486911b7`
+- 当前源仓比较基线：`e349ab50e1a98f893c8de07dcc84fcf86f95f77d`
+- 基线提交说明：`docs: record v0.1.5 sync in SOURCE_DELTA, align TEMPLATE whitespace`
+- 切换到 0.1.6 开发阶段前，隔离副本与源仓完全一致。
+- 当前单元测试基线：15 个测试文件、170 个用例；Rust 书架兼容测试 2 个。
+- 四处构建版本元数据仍为已发布的 `0.1.5`；准备 0.1.6 发布时再统一升版。
 - 渲染规划：`docs/PRELOAD_PLAN.md` 的 P0 首帧显示门已实现；P1 相邻章预加载与 P2 动画仍只是后续预留，不要视为已实现。
 
 当前未同步变化以 `docs/SOURCE_DELTA.md` 为准，不要仅根据本节判断。
@@ -45,6 +48,8 @@ EPUB bytes
 - `src/ui/ReaderView.tsx`：React 与分页器之间的适配层。
 - `src/App.tsx`：书架、阅读会话、设置、进度和面板状态编排。
 - `src/ui/shelf.ts`：Tauri/IndexedDB 双存储接口。
+- `src/ui/importBooks.ts`：内容指纹、旧条目懒判重、批量结果提示与一次性书架合并。
+- `src/ui/progressWriter.ts`：同书最新值优先的串行进度写入与退出 flush。
 - `src-tauri/src/lib.rs`：本地书籍、封面和 `shelf.json` 的文件命令。
 
 ## 修改前必须理解的事实
@@ -58,6 +63,9 @@ EPUB bytes
 7. 隐藏 iframe 不接收鼠标命中，连续滚轮还可能把目标锁定在外层直到手势结束；外层阅读区在加载期把输入压缩成最后方向，display-ready 后则继续按 80px 阈值翻页。不能改回非 ready 直接丢弃、ready 后忽略外层事件或按加载期事件数排队。
 8. 章节在 iframe 中渲染，但脚本、表单、嵌套 iframe 等危险能力会被移除并由 CSP 再限制。
 9. Tauri 与浏览器开发模式使用不同存储后端，但对 UI 暴露同一 `ShelfStore` 语义。
+10. 新导入以 EPUB 字节 SHA-256 识别精确重复；0.1.5 旧条目保持原 ID，仅在相同大小候选参与判重时懒补 `contentHash`。重复项不得覆盖文件或进度。
+11. 进度写入是单通道最新值优先；返回书架和桌面窗口关闭前会 flush。首次打开的 `markOpened` 只能清除新书标记。
+12. Windows 大型正文/封面必须走 Tauri raw body 或可信来源路径复制，禁止恢复 `Array.from(bytes)` 数字数组传输；原生批量拖放必须逐本读取。
 
 ## 高风险修改区域
 
@@ -77,3 +85,4 @@ EPUB bytes
 - 渲染冲突台账：`rendering-layers.md`
 - 开发与发布说明：`HANDOFF.md`
 - 任务模板：`tasks/TEMPLATE.md`
+- 当前版本总任务：`tasks/active/version-0.1.6-development.md`

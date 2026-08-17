@@ -18,11 +18,19 @@ import { LogPanel, type LogItem } from "./ui/LogPanel";
 import { ReaderView, type ReaderHandle } from "./ui/ReaderView";
 import { ShelfView } from "./ui/ShelfView";
 import {
+  applyShelfProgressPatch,
   getShelfStore,
-  shelfIdFor,
+  markShelfEntryOpened,
   type ShelfEntry,
   type ShelfProgressPatch,
 } from "./ui/shelf";
+import {
+  formatImportNotice,
+  findDuplicateEntry,
+  mergeShelfEntries,
+  sha256Hex,
+} from "./ui/importBooks";
+import { ShelfProgressWriter } from "./ui/progressWriter";
 import {
   readProgress,
   writeProgress,
@@ -31,6 +39,7 @@ import {
   type SavedProgress,
 } from "./ui/storage";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -43,6 +52,10 @@ type AppPhase =
   | { phase: "loading"; fileName: string }
   | { phase: "error"; message: string }
   | { phase: "ready" };
+
+type ImportSource =
+  | { kind: "file"; file: File }
+  | { kind: "path"; path: string; name: string };
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -116,6 +129,26 @@ export default function App() {
   const shelfBusyRef = useRef(false);
   const shelfEntriesRef = useRef<ShelfEntry[]>([]);
   shelfEntriesRef.current = shelfEntries;
+  const contentHashByIdRef = useRef(new Map<string, string>());
+  const entryByContentHashRef = useRef(new Map<string, ShelfEntry>());
+  const currentShelfIds = new Set(shelfEntries.map((entry) => entry.id));
+  for (const [id, hash] of contentHashByIdRef.current) {
+    if (!currentShelfIds.has(id)) {
+      contentHashByIdRef.current.delete(id);
+      entryByContentHashRef.current.delete(hash);
+    }
+  }
+  for (const entry of shelfEntries) {
+    if (!entry.contentHash) continue;
+    contentHashByIdRef.current.set(entry.id, entry.contentHash);
+    entryByContentHashRef.current.set(entry.contentHash, entry);
+  }
+  const progressWriterRef = useRef<ShelfProgressWriter | null>(null);
+  if (!progressWriterRef.current) {
+    progressWriterRef.current = new ShelfProgressWriter(async (id, patch) => {
+      await getShelfStore().updateProgress(id, patch);
+    });
+  }
   /** 指针是否悬停在交互式浮层（脚注弹窗等）上：此时不响应翻页键/后续可扩展书签等 */
   const overlayHoverRef = useRef(false);
 
@@ -156,54 +189,98 @@ export default function App() {
     []
   );
 
-  // ---- 批量导入 EPUB 并入库（可读取才算导入成功；导入后停留在书架） ----
-  const handleImportFiles = useCallback(async (files: File[]) => {
-    const list = files.filter((f) => f.name.toLowerCase().endsWith(".epub"));
+  // ---- 批量导入 EPUB 并入库（逐本有界处理；结束后只刷新一次书架） ----
+  const handleImportSources = useCallback(async (sources: ImportSource[]) => {
+    const list = sources.filter((source) => {
+      const name = source.kind === "file" ? source.file.name : source.name;
+      return name.toLowerCase().endsWith(".epub");
+    });
     if (list.length === 0 || shelfBusyRef.current) return;
     shelfBusyRef.current = true;
     setShelfBusy(true);
     setShelfNotice(null);
-    const ok: string[] = [];
+    const imported: ShelfEntry[] = [];
+    const duplicateTitles: string[] = [];
     const failed: string[] = [];
-    for (const file of list) {
-      try {
-        const buf = new Uint8Array(await file.arrayBuffer());
-        const b = await loadBook(buf);
-        if (b.spine.length === 0) {
-          throw new Error("书中没有可阅读的内容（spine 为空）");
+    const store = getShelfStore();
+
+    try {
+      for (const source of list) {
+        const fileName = source.kind === "file" ? source.file.name : source.name;
+        try {
+          const arrayBuffer =
+            source.kind === "file"
+              ? await source.file.arrayBuffer()
+              : await invoke<ArrayBuffer>("read_epub_file", { path: source.path });
+          const buf = new Uint8Array(arrayBuffer);
+          const contentHash = await sha256Hex(buf);
+
+          const duplicate = await findDuplicateEntry({
+            incomingHash: contentHash,
+            incomingSize: buf.byteLength,
+            entries: shelfEntriesRef.current,
+            contentHashById: contentHashByIdRef.current,
+            entryByContentHash: entryByContentHashRef.current,
+            readBook: (id) => store.readBook(id),
+            setContentHash: (id, hash) => store.setContentHash(id, hash),
+          });
+
+          if (duplicate) {
+            duplicateTitles.push(duplicate.title || fileName.replace(/\.epub$/i, ""));
+            continue;
+          }
+
+          const b = await loadBook(buf);
+          if (b.spine.length === 0) {
+            throw new Error("书中没有可阅读的内容（spine 为空）");
+          }
+          const cover = b.coverHref ? b.resources.get(b.coverHref) : undefined;
+          const result = await store.save({
+            entry: {
+              id: contentHash,
+              title: b.metadata.title || fileName.replace(/\.epub$/i, ""),
+              creator: b.metadata.creator ?? "",
+              fileName,
+              fileSize: buf.byteLength,
+              coverMime: cover?.mediaType ?? "",
+              contentHash,
+              addedAtMs: Date.now(),
+            },
+            bytes: buf,
+            coverBytes: cover?.data,
+            coverMime: cover?.mediaType,
+            sourcePath: source.kind === "path" ? source.path : undefined,
+          });
+          contentHashByIdRef.current.set(result.entry.id, contentHash);
+          entryByContentHashRef.current.set(contentHash, result.entry);
+          if (result.status === "duplicate") {
+            duplicateTitles.push(result.entry.title || fileName.replace(/\.epub$/i, ""));
+          } else {
+            imported.push(result.entry);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failed.push(
+            `${fileName}：${error instanceof DrmError ? error.message : message}`
+          );
         }
-        const id = shelfIdFor(b.metadata.identifier || "", file.name, file.size);
-        const cover = b.coverHref ? b.resources.get(b.coverHref) : undefined;
-        const savedEntry = await getShelfStore().save({
-          entry: {
-            id,
-            title: b.metadata.title || file.name.replace(/\.epub$/i, ""),
-            creator: b.metadata.creator ?? "",
-            fileName: file.name,
-            fileSize: file.size,
-            coverMime: cover?.mediaType ?? "",
-            addedAtMs: Date.now(),
-          },
-          bytes: buf,
-          coverBytes: cover?.data,
-          coverMime: cover?.mediaType,
-        });
-        setShelfEntries((prev) => [savedEntry, ...prev.filter((e) => e.id !== id)]);
-        ok.push(savedEntry.title);
-      } catch (e) {
-        failed.push(
-          `${file.name}：${e instanceof DrmError ? e.message : (e as Error).message}`
-        );
       }
+
+      if (imported.length > 0) {
+        setShelfEntries((previous) => mergeShelfEntries(previous, imported));
+      }
+      setShelfNotice(
+        formatImportNotice({
+          sourceCount: list.length,
+          importedCount: imported.length,
+          duplicateTitles,
+          failed,
+        })
+      );
+    } finally {
+      shelfBusyRef.current = false;
+      setShelfBusy(false);
     }
-    const okText = ok.length > 0 ? `已导入 ${ok.length} 本` : "";
-    const failText = failed.length > 0 ? `；失败 ${failed.length} 本（${failed.join("；")}）` : "";
-    setShelfNotice({
-      kind: failed.length > 0 ? (ok.length > 0 ? "warn" : "error") : "ok",
-      text: `${okText}${failText}` || "没有可导入的文件",
-    });
-    shelfBusyRef.current = false;
-    setShelfBusy(false);
   }, []);
 
   // ---- 书架启动加载 ----
@@ -277,14 +354,10 @@ export default function App() {
         };
         // 第一次打开：立即清除“新”标记（后端落盘异步完成，不阻塞阅读）
         if (entry.isNew) {
-          setShelfEntries((prev) =>
-            prev.map((e) => (e.id === id ? { ...e, isNew: false } : e))
-          );
+          setShelfEntries((prev) => markShelfEntryOpened(prev, id));
           void getShelfStore()
             .markOpened(id)
-            .then((savedEntry) =>
-              setShelfEntries((prev) => prev.map((e) => (e.id === id ? savedEntry : e)))
-            )
+            .then(() => setShelfEntries((prev) => markShelfEntryOpened(prev, id)))
             .catch(() => {
               /* 下次打开时再尝试清除 */
             });
@@ -546,7 +619,9 @@ export default function App() {
         const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
           f.name.toLowerCase().endsWith(".epub")
         );
-        if (files.length > 0) void handleImportFiles(files);
+        if (files.length > 0) {
+          void handleImportSources(files.map((file) => ({ kind: "file" as const, file })));
+        }
       };
       window.addEventListener("dragover", prevent);
       window.addEventListener("drop", drop);
@@ -568,17 +643,13 @@ export default function App() {
           setDragActive(false);
           const paths = p.paths.filter((x) => x.toLowerCase().endsWith(".epub"));
           if (paths.length === 0) return;
-          Promise.all(
-            paths.map(async (path) => {
-              const buf = await invoke<ArrayBuffer>("read_epub_file", { path });
-              const name = path.split(/[\\/]/).pop() || "book.epub";
-              return new File([buf], name);
-            })
-          )
-            .then((files) => handleImportFiles(files))
-            .catch((err) => {
-              setShelfError(`无法读取文件：${String(err)}`);
-            });
+          void handleImportSources(
+            paths.map((path) => ({
+              kind: "path" as const,
+              path,
+              name: path.split(/[\\/]/).pop() || "book.epub",
+            }))
+          );
         }
       })
       .then((u) => {
@@ -591,7 +662,7 @@ export default function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [handleImportFiles]);
+  }, [handleImportSources]);
 
   // ---- 派生 ----
   const ready = phase.phase === "ready" && book !== null && server !== null;
@@ -642,29 +713,81 @@ export default function App() {
       anchorIndex: a?.index ?? null,
       anchorRatio: a?.ratio ?? null,
     };
-    void getShelfStore()
-      .updateProgress(currentShelfId, patch)
-      .then((entry) =>
-        setShelfEntries((prev) => prev.map((e) => (e.id === entry.id ? entry : e)))
-      )
-      .catch(() => {
-        /* 进度回写失败不打断阅读 */
-      });
+    // 先更新内存态：即使用户立刻返回并重新打开，也不会读到旧位置。
+    setShelfEntries((prev) =>
+      applyShelfProgressPatch(prev, currentShelfId, patch)
+    );
+    progressWriterRef.current?.enqueue(currentShelfId, patch);
   }, [view, currentShelfId, chapterState, spineIndex, progressPct]);
+
+  const persistShelfProgressRef = useRef<() => void>(() => {});
+  persistShelfProgressRef.current = persistShelfProgress;
 
   useEffect(() => {
     persistShelfProgress();
   }, [persistShelfProgress]);
 
-  const handleBackToShelf = useCallback(() => {
+  const handleBackToShelf = useCallback(async () => {
     persistShelfProgress();
+    shelfBusyRef.current = true;
+    setShelfBusy(true);
+    try {
+      await progressWriterRef.current?.flush();
+    } catch (error) {
+      setShelfError(`阅读进度保存失败：${String(error)}`);
+    }
     setFootnote(null);
     setTocOpen(false);
     setMenuOpen(false);
     setLogOpen(false);
     setDiagText(null);
     setView("shelf");
+    shelfBusyRef.current = false;
+    setShelfBusy(false);
   }, [persistShelfProgress]);
+
+  // 切到后台时尽快冲刷；Tauri 关闭窗口时等待最后位置落盘后再销毁窗口。
+  useEffect(() => {
+    const flushWhenHidden = (): void => {
+      if (document.visibilityState !== "hidden") return;
+      persistShelfProgressRef.current();
+      void progressWriterRef.current?.flush().catch(() => {
+        /* 后台切换不打断阅读；返回书架或关闭时会再次报告。 */
+      });
+    };
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    if (!isTauriEnv()) {
+      return () => document.removeEventListener("visibilitychange", flushWhenHidden);
+    }
+
+    let unlisten: (() => void) | undefined;
+    let closing = false;
+    const appWindow = getCurrentWindow();
+    void appWindow
+      .onCloseRequested(async (event) => {
+        if (closing) return;
+        event.preventDefault();
+        closing = true;
+        persistShelfProgressRef.current();
+        try {
+          await progressWriterRef.current?.flush();
+          await appWindow.destroy();
+        } catch (error) {
+          closing = false;
+          setShelfNotice({ kind: "error", text: `阅读进度保存失败：${String(error)}` });
+        }
+      })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch(() => {
+        /* 非桌面窗口或关闭监听不可用时，仍保留逐页写入与 visibility flush。 */
+      });
+    return () => {
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      unlisten?.();
+    };
+  }, []);
 
   const currentChapterLabel = (() => {
     if (!ready || !currentPath) return "";
@@ -872,7 +995,9 @@ export default function App() {
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          if (files.length > 0) void handleImportFiles(files);
+          if (files.length > 0) {
+            void handleImportSources(files.map((file) => ({ kind: "file" as const, file })));
+          }
           e.target.value = "";
         }}
       />

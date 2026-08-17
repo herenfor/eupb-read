@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyShelfProgressPatch,
   filterShelfEntries,
   formatShelfTime,
+  markShelfEntryOpened,
   shelfIdFor,
   sortShelfEntries,
   type ShelfEntry,
@@ -79,5 +81,29 @@ describe("filterShelfEntries", () => {
 describe("formatShelfTime", () => {
   it("无效值返回空串", () => {
     expect(formatShelfTime(0)).toBe("");
+  });
+});
+
+describe("progress entry merge", () => {
+  it("清除新书标记不会覆盖刚写入的页码与锚点", () => {
+    const original = entry({ id: "book", page: 2, progressPct: 10, isNew: true });
+    const progressed = applyShelfProgressPatch([original], "book", {
+      lastReadAtMs: 99,
+      spineIndex: 3,
+      page: 7,
+      progressPct: 42,
+      anchorIndex: 10,
+      anchorRatio: 0.5,
+    });
+    const opened = markShelfEntryOpened(progressed, "book")[0];
+    expect(opened).toMatchObject({
+      isNew: false,
+      lastReadAtMs: 99,
+      spineIndex: 3,
+      page: 7,
+      progressPct: 42,
+      anchorIndex: 10,
+      anchorRatio: 0.5,
+    });
   });
 });

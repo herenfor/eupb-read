@@ -15,6 +15,8 @@ export interface ShelfEntry {
   progressPct: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  /** EPUB 原始字节的 SHA-256；0.1.5 旧条目允许缺失并在判重时懒补。 */
+  contentHash?: string;
   /** 新导入且尚未打开过：书架显示“新”标记，第一次打开后清除 */
   isNew: boolean;
 }
@@ -44,13 +46,22 @@ export interface ShelfSaveInput {
   bytes: Uint8Array;
   coverBytes?: Uint8Array;
   coverMime?: string;
+  /** Tauri 原生拖放来源；后端可直接复制，浏览器后端忽略。 */
+  sourcePath?: string;
+}
+
+export interface ShelfSaveResult {
+  status: "saved" | "duplicate";
+  entry: ShelfEntry;
 }
 
 export interface ShelfStore {
   list(): Promise<ShelfEntry[]>;
-  save(input: ShelfSaveInput): Promise<ShelfEntry>;
+  save(input: ShelfSaveInput): Promise<ShelfSaveResult>;
   readBook(id: string): Promise<Uint8Array>;
   readCover(id: string): Promise<Uint8Array | null>;
+  /** 只为旧条目补录内容指纹，不得改动阅读进度或其他元数据。 */
+  setContentHash(id: string, contentHash: string): Promise<ShelfEntry>;
   updateProgress(id: string, patch: ShelfProgressPatch): Promise<ShelfEntry>;
   /** 第一次从书架打开：清除“新”标记 */
   markOpened(id: string): Promise<ShelfEntry>;
@@ -61,7 +72,7 @@ export function isTauriEnv(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/** 稳定书本 ID：同标识/同文件名/同大小视为同一本书（重复导入去重）。 */
+/** 0.1.5 旧版 ID 算法；保留用于兼容与历史测试，新导入使用内容 SHA-256。 */
 export function shelfIdFor(identifier: string, fileName: string, fileSize: number): string {
   const text = `${identifier}|${fileName}|${fileSize}`;
   let h = 0x811c9dc5;
@@ -94,6 +105,19 @@ export function filterShelfEntries(entries: ShelfEntry[], query: string): ShelfE
   return entries.filter(
     (e) => e.title.toLowerCase().includes(q) || e.creator.toLowerCase().includes(q)
   );
+}
+
+export function applyShelfProgressPatch(
+  entries: ShelfEntry[],
+  id: string,
+  patch: ShelfProgressPatch
+): ShelfEntry[] {
+  return entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+}
+
+/** 只清除新书标记；异步 markOpened 的旧返回值不能覆盖更新后的进度。 */
+export function markShelfEntryOpened(entries: ShelfEntry[], id: string): ShelfEntry[] {
+  return entries.map((entry) => (entry.id === id ? { ...entry, isNew: false } : entry));
 }
 
 export function formatShelfTime(ms: number): string {
@@ -164,13 +188,21 @@ class IndexedDbShelfStore implements ShelfStore {
     }
   }
 
-  async save(input: ShelfSaveInput): Promise<ShelfEntry> {
+  async save(input: ShelfSaveInput): Promise<ShelfSaveResult> {
     const db = await openDb();
     try {
-      const existing = (await reqAsPromise(
-        db.transaction("meta", "readonly").objectStore("meta").get(input.entry.id)
-      )) as ShelfEntry | undefined;
-      // 重复导入同一本书：只更新文件与元数据，保留阅读进度与“新”标记
+      const all = (await reqAsPromise(
+        db.transaction("meta", "readonly").objectStore("meta").getAll()
+      )) as ShelfEntry[];
+      const contentHash = input.entry.contentHash;
+      const duplicate = contentHash
+        ? all.find((entry) => entry.contentHash === contentHash)
+        : undefined;
+      if (duplicate) return { status: "duplicate", entry: duplicate };
+      const existing = all.find((entry) => entry.id === input.entry.id);
+      if (existing && existing.contentHash !== contentHash) {
+        throw new Error("书本 ID 冲突，已拒绝覆盖现有书籍");
+      }
       const entry: ShelfEntry = {
         id: input.entry.id,
         title: input.entry.title,
@@ -189,6 +221,7 @@ class IndexedDbShelfStore implements ShelfStore {
         progressPct: existing?.progressPct ?? input.entry.progressPct ?? 0,
         anchorIndex: existing?.anchorIndex ?? input.entry.anchorIndex ?? null,
         anchorRatio: existing?.anchorRatio ?? input.entry.anchorRatio ?? null,
+        contentHash,
         isNew: existing?.isNew ?? input.entry.isNew ?? true,
       };
       const tx = db.transaction(["meta", "books", "covers"], "readwrite");
@@ -207,7 +240,7 @@ class IndexedDbShelfStore implements ShelfStore {
         tx.objectStore("covers").delete(entry.id);
       }
       await txDone(tx);
-      return entry;
+      return { status: "saved", entry };
     } finally {
       db.close();
     }
@@ -233,6 +266,22 @@ class IndexedDbShelfStore implements ShelfStore {
         db.transaction("covers", "readonly").objectStore("covers").get(id)
       )) as { bytes?: Blob } | undefined;
       return row?.bytes ? await blobToBytes(row.bytes) : null;
+    } finally {
+      db.close();
+    }
+  }
+
+  async setContentHash(id: string, contentHash: string): Promise<ShelfEntry> {
+    const db = await openDb();
+    try {
+      const tx = db.transaction("meta", "readwrite");
+      const store = tx.objectStore("meta");
+      const current = (await reqAsPromise(store.get(id))) as ShelfEntry | undefined;
+      if (!current) throw new Error("书架中没有这本书");
+      const next: ShelfEntry = { ...current, contentHash };
+      store.put(next);
+      await txDone(tx);
+      return next;
     } finally {
       db.close();
     }
@@ -291,28 +340,40 @@ class TauriShelfStore implements ShelfStore {
     return invoke<ShelfEntry[]>("shelf_list");
   }
 
-  async save(input: ShelfSaveInput): Promise<ShelfEntry> {
-    const entry = await invoke<ShelfEntry>("shelf_save_book", {
-      bookId: input.entry.id,
-      title: input.entry.title,
-      creator: input.entry.creator,
-      fileName: input.entry.fileName,
-      fileSize: input.entry.fileSize,
-      bytes: Array.from(input.bytes),
-    });
+  async save(input: ShelfSaveInput): Promise<ShelfSaveResult> {
+    const bookId = input.entry.id;
+    if (input.sourcePath) {
+      await invoke("shelf_stage_book_path", {
+        bookId,
+        sourcePath: input.sourcePath,
+        expectedSize: input.bytes.byteLength,
+      });
+    } else {
+      await invoke("shelf_stage_book_raw", input.bytes, {
+        headers: { "x-book-id": bookId },
+      });
+    }
+    let hasCover = false;
     if (input.coverBytes && input.coverBytes.byteLength > 0) {
       try {
-        await invoke("shelf_save_cover", {
-          bookId: entry.id,
-          mime: input.coverMime ?? "image/jpeg",
-          bytes: Array.from(input.coverBytes),
+        await invoke("shelf_stage_cover_raw", input.coverBytes, {
+          headers: { "x-book-id": bookId },
         });
-        entry.coverMime = input.coverMime ?? "image/jpeg";
+        hasCover = true;
       } catch {
         // 封面保存失败不视为导入失败，书架用占位封面
       }
     }
-    return entry;
+    return invoke<ShelfSaveResult>("shelf_commit_book", {
+      bookId,
+      title: input.entry.title,
+      creator: input.entry.creator,
+      fileName: input.entry.fileName,
+      fileSize: input.entry.fileSize,
+      contentHash: input.entry.contentHash ?? "",
+      coverMime: hasCover ? input.coverMime ?? "image/jpeg" : "",
+      hasCover,
+    });
   }
 
   async readBook(id: string): Promise<Uint8Array> {
@@ -323,6 +384,10 @@ class TauriShelfStore implements ShelfStore {
   async readCover(id: string): Promise<Uint8Array | null> {
     const buf = await invoke<ArrayBuffer>("shelf_read_cover", { bookId: id });
     return buf.byteLength > 0 ? new Uint8Array(buf) : null;
+  }
+
+  async setContentHash(id: string, contentHash: string): Promise<ShelfEntry> {
+    return invoke<ShelfEntry>("shelf_set_content_hash", { bookId: id, contentHash });
   }
 
   async updateProgress(id: string, patch: ShelfProgressPatch): Promise<ShelfEntry> {

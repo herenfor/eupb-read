@@ -1,13 +1,15 @@
-# 0.1.5 发布交接
+# 0.1.5 发布记录
 
-- 状态：隔离副本发布候选，等待同步到真实源仓
+- 状态：已发布、已在 Windows 编译打包并分发
 - 版本：`0.1.5`
 - 整理日期：2026-08-17
-- 真实源仓基线：`a07a79664377185b2f1273f3ba2f90e33a22e66d`
+- 发布提交：`4bb9c7b2e50ef3a13f2cc8cd06d91c25486911b7`
+- 标签：`v0.1.5`
+- 发布后文档收尾提交：`e349ab50e1a98f893c8de07dcc84fcf86f95f77d`
 - 隔离副本：`/home/herenfor/test/epub-reader`
 - 真实源仓：`/home/herenfor/test/eupb-read`
 
-本文件供负责同步、提交和 GitHub 发布的下一对话使用。隔离副本不是 Git 仓库；不要在这里创建提交或标签，也不要反向覆盖本文件列出的修改。
+本文件现作为 0.1.5 的已发布记录保留。发布同步、GitHub Release、Windows 编译、打包和分发均已完成。
 
 ## 发布定位
 
@@ -35,9 +37,9 @@
 
 `pnpm-lock.yaml` 当前格式不记录根项目版本，不需要为本次发布改动。源码中旧的“书架（0.1.4）”阶段标题已改为无版本的“书架”，避免以后与应用版本混淆。
 
-## 建议同步范围
+## 实际同步范围（历史记录）
 
-以下均为相对 `/home/herenfor/test/epub-reader` 的路径。同步前仍应以 `docs/SOURCE_DELTA.md` 和真实 `diff` 为准。
+以下均为 0.1.5 实际同步范围，路径相对 `/home/herenfor/test/epub-reader`。
 
 ### 发布元数据与入口文档
 
@@ -96,27 +98,27 @@
 | 版本一致性脚本 | `package/tauri/cargo/lock` 均为 `0.1.5` |
 | `cargo metadata --locked --no-deps` | 通过，识别 `epub-reader@0.1.5` |
 | Markdown 本地链接检查 | 22 个文档全部通过 |
-| Windows `pnpm tauri build` | 未在 WSL 执行，发布前应在 Windows 原生工具链验证 |
+| Windows 编译、Tauri 打包与分发 | 用户确认完成 |
 
-各 Bug 的失败回归、真实 EPUB/Chromium 数据和剩余风险见 `docs/BUGFIX_LOG.md` 与对应 `docs/tasks/active/*.md`。
+各 Bug 的失败回归、真实 EPUB/Chromium 数据和剩余风险见 `docs/BUGFIX_LOG.md` 与对应 `docs/tasks/archive/*.md`。
 
-本隔离环境使用直接路径调用 pnpm 脚本。根版本变更后，pnpm 11 的依赖状态预检会先尝试执行一个 PATH 中不存在的 `pnpm install`；离线冻结安装又因本机缺少供应链策略元数据而停止。为避免下载或改动依赖，本次最终验证直接调用本地 Vitest、TypeScript 和 Vite，执行内容与 `test`/`build` 脚本一致。真实源仓同步后仍应在正常 pnpm 环境复跑标准命令。
+本隔离环境最终验证直接调用本地 Vitest、TypeScript 和 Vite，执行内容与 `test`/`build` 脚本一致；随后用户已在 Windows 原生环境完成正式构建和分发。
 
-## 同步后的检查顺序
+## 已完成的发布流程
 
-下一对话在真实源仓中完成同步后，应按以下顺序检查：
+0.1.5 发布时按以下顺序完成检查：
 
-1. `git status --short`：确认只有上方建议同步范围内的变化。
+1. `git status --short`：确认只有计划同步范围内的变化。
 2. `git diff --check`：确认没有空白错误或冲突标记。
 3. 核对四处版本号均为 `0.1.5`，并确认 `Cargo.lock` 没有误改第三方包版本。
 4. `pnpm test` 与 `pnpm build`。
 5. Windows 原生执行 `pnpm tauri build`；至少冒烟验证导入书籍、打开章节、翻页、返回书架和重启恢复。
-6. 用户审核后再提交、打 `v0.1.5` 标签并创建 GitHub Release。
-7. 同步成功后更新 `docs/SOURCE_DELTA.md`：记录新提交哈希和同步历史，清空已经进入源仓的当前未同步项。
+6. 用户审核后完成提交、打 `v0.1.5` 标签并创建 GitHub Release。
+7. 同步成功后更新 `docs/SOURCE_DELTA.md`，记录新提交哈希和同步历史。
 
 不要把“同步到真实源仓”“提交”“推送”“打标签”合并成未经用户审核的一步。
 
-## GitHub Release 文案草案
+## GitHub Release 文案（已发布）
 
 ### EPUB Reader 0.1.5
 
