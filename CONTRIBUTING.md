@@ -6,8 +6,8 @@
 
 本项目使用“隔离开发副本 → 人工审核 → 真实源仓”的工作方式：
 
-- `/home/herenfor/test/epub-reader`：允许 AI 修改、运行和验证的隔离副本。
-- `/home/herenfor/test/eupb-read`：真实 Git 仓库，仅由用户负责同步、提交与推送。
+- `<PROJECT_ROOT>/epub-reader`：允许 AI 修改、运行和验证的隔离副本。
+- `<PROJECT_ROOT>/eupb-read`：真实 Git 仓库，仅由用户负责同步、提交与推送。
 
 所有 AI 都必须在开始工作前读取 `docs/SOURCE_DELTA.md`。除非用户明确改变流程，否则不得直接写入真实源仓。
 
@@ -69,7 +69,7 @@ pnpm check <book.epub>
 
 ## 7. 禁止事项
 
-- 未授权修改 `/home/herenfor/test/eupb-read`。
+- 未授权修改 `<PROJECT_ROOT>/eupb-read`。
 - 把 `node_modules`、`dist`、Rust target、Playwright 浏览器、截图或私有测试书列入同步内容。
 - 为单本书新增没有触发条件、测试证据和记录的散装 CSS 特判。
 - 用页码代替内容锚点作为重排后的唯一恢复依据。

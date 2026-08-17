@@ -14,7 +14,7 @@ const { sanitizeChapter } = await import("../src/render/sanitize");
 const { DEFAULT_SETTINGS } = await import("../src/render/settings");
 
 const book = unzipSync(new Uint8Array(readFileSync(
-  "/home/herenfor/test/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub"
+  "<PROJECT_ROOT>/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub"
 )));
 
 const urlFor = (p: string) => `blob:test/${p}`;

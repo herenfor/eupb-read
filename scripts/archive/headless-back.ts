@@ -3,7 +3,7 @@ import http from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 
-const dist = "/home/herenfor/test/epub-reader/dist";
+const dist = "<PROJECT_ROOT>/epub-reader/dist";
 const server = http.createServer((req, res) => {
   let p = join(dist, req.url === "/" ? "index.html" : (req.url ?? "/").split("?")[0]);
   if (!existsSync(p) || !statSync(p).isFile()) p = join(dist, "index.html");
@@ -17,7 +17,7 @@ await new Promise<void>((r) => server.listen(8114, "127.0.0.1", r));
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 await page.goto("http://127.0.0.1:8114/");
-await page.setInputFiles('input[type="file"]', "/home/herenfor/test/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub");
+await page.setInputFiles('input[type="file"]', "<PROJECT_ROOT>/测试用epub/[简][鐵人じゅす].原本只是跟全校第一美少女商量彼此挚友的恋爱烦恼，不知不觉间她竟成为我最亲近的存在.01.epub");
 await page.waitForSelector(".reader iframe", { timeout: 30000 });
 await page.waitForTimeout(2500);
 

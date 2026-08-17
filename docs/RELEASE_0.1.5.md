@@ -6,8 +6,8 @@
 - 发布提交：`4bb9c7b2e50ef3a13f2cc8cd06d91c25486911b7`
 - 标签：`v0.1.5`
 - 发布后文档收尾提交：`e349ab50e1a98f893c8de07dcc84fcf86f95f77d`
-- 隔离副本：`/home/herenfor/test/epub-reader`
-- 真实源仓：`/home/herenfor/test/eupb-read`
+- 隔离副本：`<PROJECT_ROOT>/epub-reader`
+- 真实源仓：`<PROJECT_ROOT>/eupb-read`
 
 本文件现作为 0.1.5 的已发布记录保留。发布同步、GitHub Release、Windows 编译、打包和分发均已完成。
 
@@ -39,7 +39,7 @@
 
 ## 实际同步范围（历史记录）
 
-以下均为 0.1.5 实际同步范围，路径相对 `/home/herenfor/test/epub-reader`。
+以下均为 0.1.5 实际同步范围，路径相对 `<PROJECT_ROOT>/epub-reader`。
 
 ### 发布元数据与入口文档
 
@@ -86,7 +86,7 @@
 - `.pw-browsers/`、`.pw-libs/`
 - `src-tauri/target/`、`src-tauri/target2/`、`src-tauri/gen/`
 - `targettmp/`、`.img-repro.png`
-- `/home/herenfor/test/测试用epub/` 中的私有测试书
+- `<PROJECT_ROOT>/测试用epub/` 中的私有测试书
 - `/tmp` 中的脚本、截图与日志
 
 ## 验证状态

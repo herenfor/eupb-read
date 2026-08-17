@@ -4,8 +4,8 @@
 
 ## 工作目录边界
 
-- 隔离开发目录：`/home/herenfor/test/epub-reader`。AI 只能在这里修改项目。
-- 真实源仓目录：`/home/herenfor/test/eupb-read`。AI 只可读取和比较，不得修改、提交、同步或推送。
+- 隔离开发目录：`<PROJECT_ROOT>/epub-reader`。AI 只能在这里修改项目。
+- 真实源仓目录：`<PROJECT_ROOT>/eupb-read`。AI 只可读取和比较，不得修改、提交、同步或推送。
 - 用户会在阶段完成后自行把确认过的改动同步到真实源仓并上传 GitHub。
 - 用户口头提到的 `epub-read` 当前实际目录名是 `eupb-read`，不要自行创建第三份目录。
 

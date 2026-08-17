@@ -7,7 +7,7 @@
 
 ## 目标
 
-使用 `/home/herenfor/test/测试用epub/【测试专用】选择器.epub` 验证并修复以下行为：
+使用 `<PROJECT_ROOT>/测试用epub/【测试专用】选择器.epub` 验证并修复以下行为：
 
 1. `title.xhtml` 中 body 顶层的“测试”“测试2”不被作者规则 `div p` 误匹配；
 2. `:target` 卡片点击 `#target1/#target2` 后，对应元素进入目标状态并高亮；
@@ -15,7 +15,7 @@
 
 ## 非目标
 
-- 不修改真实源仓 `/home/herenfor/test/eupb-read`；
+- 不修改真实源仓 `<PROJECT_ROOT>/eupb-read`；
 - 不恢复 EPUB 脚本、form 提交或危险文件选择控件；
 - 不重构整个分页架构；
 - 不修改测试 EPUB。
@@ -79,7 +79,7 @@
 
 ## 不应同步的本地文件
 
-- `/home/herenfor/test/测试用epub/【测试专用】选择器.epub`
+- `<PROJECT_ROOT>/测试用epub/【测试专用】选择器.epub`
 - `/tmp/target-history-check.mjs` 及后续临时验证脚本/输出
 
 ## 待完成与风险

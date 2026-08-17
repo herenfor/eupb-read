@@ -162,4 +162,4 @@ pnpm tauri build
 
 ## 许可
 
-许可证暂未指定（当前保留所有权利）。开源发布前建议选择并添加 `LICENSE`（例如 MIT），并同步更新此处。
+[MIT License](LICENSE)。

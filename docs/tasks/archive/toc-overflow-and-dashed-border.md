@@ -19,8 +19,8 @@
 
 ## 当前现象与证据
 
-- 样本：`/home/herenfor/test/测试用epub/【测试专用】[いのり。].我的推是坏人大小姐.02.epub`，目录页在内容未占满高度时出现滚动条。
-- 样本：`/home/herenfor/test/测试用epub/【测试专用】[kiki].「凭妳也想讨伐魔王？」被勇者小队逐出队伍，只好在王都自在过活.04.epub`，目录页的 `border-bottom:1px #000 dashed` 未正确显示。
+- 样本：`<PROJECT_ROOT>/测试用epub/【测试专用】[いのり。].我的推是坏人大小姐.02.epub`，目录页在内容未占满高度时出现滚动条。
+- 样本：`<PROJECT_ROOT>/测试用epub/【测试专用】[kiki].「凭妳也想讨伐魔王？」被勇者小队逐出队伍，只好在王都自在过活.04.epub`，目录页的 `border-bottom:1px #000 dashed` 未正确显示。
 - 修复前第一本 Chromium 数据：iframe/html 高 739px，body 的 computed height 仍为 739px，但 content-box 外再加 16px/32px padding，body/html `scrollHeight=787px`。
 - 修复前第二本 Chromium 数据：目标 div 的计算样式已经是 `1px dashed rgb(0,0,0)`；第 20 条目录项的虚线位于第一列 `(320,703)`，文字位于第二列 `(1624,35)`，同一个 inline a 横跨 1912px。
 
@@ -69,7 +69,7 @@
 
 ## 不应同步的本地文件
 
-- `/home/herenfor/test/测试用epub/` 下的测试书。
+- `<PROJECT_ROOT>/测试用epub/` 下的测试书。
 - `/tmp` 下的一次性诊断脚本、截图与日志。
 - 浏览器、依赖和构建产物。
 

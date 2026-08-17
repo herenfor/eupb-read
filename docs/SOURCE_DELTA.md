@@ -4,8 +4,8 @@
 
 ## 路径映射
 
-- 隔离副本：`/home/herenfor/test/epub-reader`
-- 真实源仓：`/home/herenfor/test/eupb-read`
+- 隔离副本：`<PROJECT_ROOT>/epub-reader`
+- 真实源仓：`<PROJECT_ROOT>/eupb-read`
 - 用户口头所称 `epub-read` 在当前磁盘上的实际名称为 `eupb-read`。
 - AI 不得修改、提交或推送真实源仓。
 
@@ -37,6 +37,11 @@
 | `docs/tasks/active/import-performance-duplicates-and-progress.md` | 新增 | 记录 B-020/B-021 范围、根因、实现、验收、验证和 Windows 待确认项 | 对照实现与本地结果 | 是 |
 | `docs/tasks/TEMPLATE.md` | 更新 | 状态枚举增加“已发布归档” | 人工检查 | 是 |
 | `docs/SOURCE_DELTA.md` | 更新 | 基线推进至 `e349ab5`，记录本轮纯文档差异 | 与真实源仓只读比较 | 是 |
+| `LICENSE` | 新增 | 添加 MIT License（Copyright 2026 HeRenFor），仓库准备公开 | 人工检查 | 是 |
+| `README.md` | 更新 | 许可章节改为指向 `LICENSE`（MIT） | 链接检查 | 是 |
+| `CONTRIBUTING.md`、`docs/*.md`、`docs/tasks/**` | 泛化 | 本地绝对路径 `/home/herenfor/test/...` 全部替换为 `<PROJECT_ROOT>` 占位符，公开仓库不暴露本机路径 | 全项目残留扫描 0 处 | 是 |
+| `scripts/setup-pw-fonts.mjs` | 泛化 | 硬编码测试书目录改为 `import.meta.dirname` 推导 + `TEST_BOOKS_DIR` 环境变量覆盖 | `node --check` 通过 | 是 |
+| `scripts/archive/*.ts`、`scripts/img-repro.ts` | 泛化 | 调试脚本中的本机绝对路径替换为 `<PROJECT_ROOT>` 占位符（归档脚本按需自行配置） | 全项目残留扫描 0 处 | 是 |
 
 当前 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 Cargo 锁文件中的本项目版本仍为 `0.1.5`。准备 0.1.6 发布候选时再统一升版。
 
@@ -54,7 +59,7 @@
 - `src-tauri/target/`、`src-tauri/target2/`、`src-tauri/gen/`
 - `targettmp/`
 - `.img-repro.png`
-- `/home/herenfor/test/测试用epub/` 中的本地测试书
+- `<PROJECT_ROOT>/测试用epub/` 中的本地测试书
 - 一次性截图、日志和临时复现输出
 
 ## 后续更新规则
@@ -94,6 +99,6 @@ diff -qr \
   --exclude=.pw-browsers \
   --exclude=.pw-libs \
   --exclude=.git \
-  /home/herenfor/test/eupb-read \
-  /home/herenfor/test/epub-reader
+  <PROJECT_ROOT>/eupb-read \
+  <PROJECT_ROOT>/epub-reader
 ```

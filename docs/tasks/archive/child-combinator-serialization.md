@@ -11,7 +11,7 @@ EPUB 章节内联 `<style>` 中的子组合器（例如 `div > p`）在消毒、
 
 ## 非目标
 
-- 不修改真实源仓 `/home/herenfor/test/eupb-read`；
+- 不修改真实源仓 `<PROJECT_ROOT>/eupb-read`；
 - 不重写选择器解析器，不改变书籍 CSS 的级联优先级；
 - 不处理本次样本尚未证明存在的其他选择器问题；
 - 不把本地测试 EPUB、截图或临时浏览器脚本提交到仓库。
@@ -19,7 +19,7 @@ EPUB 章节内联 `<style>` 中的子组合器（例如 `div > p`）在消毒、
 ## 当前现象与证据
 
 - 复现步骤：打开测试书的“子选择器”测试页，预期直接子元素获得紫色边框和背景，实际规则不生效；
-- 样本：`/home/herenfor/test/测试用epub/【测试专用】选择器.epub`；
+- 样本：`<PROJECT_ROOT>/测试用epub/【测试专用】选择器.epub`；
 - 样本规则：`.card-child .test-sandbox .parent>.direct-child { ... }`；相邻兄弟 `.prev+.next`、通用兄弟 `.start~.sibling` 及后代选择器正常；
 - `XMLSerializer` 会把 `<style>` 文本中的 `>` 输出为 `&gt;`。HTML 的 style raw-text 语义不会把该字符引用还原为组合器，因此浏览器收到的是无效/错误的选择器文本；
 - `sanitize.ts` 现有注释也因同一序列化问题刻意避开了 `>`，证明问题位于章节序列化出口，不是 CSS 改写器主动删除组合器。
@@ -71,7 +71,7 @@ EPUB 章节内联 `<style>` 中的子组合器（例如 `div > p`）在消毒、
 
 ## 不应同步的本地文件
 
-- `/home/herenfor/test/测试用epub/【测试专用】选择器.epub`
+- `<PROJECT_ROOT>/测试用epub/【测试专用】选择器.epub`
 - `/tmp/epub-child-selector-repro.cjs`
 - 浏览器缓存、截图与临时输出
 

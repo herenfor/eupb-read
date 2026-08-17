@@ -18,7 +18,7 @@
 ## 当前现象与证据
 
 - 复现步骤：打开样本第一话，检查任一 `.twitter-tweet` 的首个浮动子元素及头像到 `tomochan` 的距离。
-- 样本：`/home/herenfor/test/测试用epub/【测试专用】[あさのハジメ].要是和只对我冷淡的友利同学说『我知道你有隐藏账号』的话会怎么样？.01.[美化版].epub`。
+- 样本：`<PROJECT_ROOT>/测试用epub/【测试专用】[あさのハジメ].要是和只对我冷淡的友利同学说『我知道你有隐藏账号』的话会怎么样？.01.[美化版].epub`。
 - 修复前诊断：阅读器写入 `width:82.2px`；头像容器原生 width 为 27.1875px；头像到用户名的横向空隙由 3.1875px 增至 58.1875px。
 
 ## 已确认根因
@@ -63,7 +63,7 @@ C-08 只用 computed width ≤48px 筛选文字 shrink-to-fit 异常，因而误
 
 ## 不应同步的本地文件
 
-- `/home/herenfor/test/测试用epub/` 下的测试书。
+- `<PROJECT_ROOT>/测试用epub/` 下的测试书。
 - `/tmp/twitter-layout-check.mjs`、`/tmp/twitter-baseline-issue.png`。
 - `.pw-browsers/`、`.pw-libs/` 和测试、构建产物。
 

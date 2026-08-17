@@ -1,13 +1,15 @@
 // 把测试书里自带的 EPUB 字体提取到项目字体目录，
 // 供无头 Chromium 在 WSL 无系统字体环境下做文本测量/渲染回归。
 // 用法: node scripts/setup-pw-fonts.mjs [输出目录]
+// 注意: 测试书目录需自行配置（默认取项目根目录旁的同级 `测试用epub` 目录，
+//       不存在时可用环境变量 TEST_BOOKS_DIR 指定）。
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 
-const rootDir = "/home/herenfor/test";
-const bookDir = join(rootDir, "测试用epub");
-const outDir = resolve(process.argv[2] ?? join(rootDir, ".pw-xdg", "fonts"));
+const projectRoot = resolve(import.meta.dirname, "..");
+const bookDir = process.env.TEST_BOOKS_DIR ?? resolve(projectRoot, "..", "测试用epub");
+const outDir = resolve(process.argv[2] ?? join(projectRoot, ".pw-xdg", "fonts"));
 mkdirSync(outDir, { recursive: true });
 
 const epubs = readdirSync(bookDir).filter((f) => f.toLowerCase().endsWith(".epub"));

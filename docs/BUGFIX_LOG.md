@@ -127,7 +127,7 @@ CSS 规则的逐项冲突编号仍以 `rendering-layers.md` 为准；本文记�
 - 状态：已修复
 - 发现日期：2026-08-17
 - 现象：`div > p` 一类子选择器不生效；相邻兄弟 `+`、通用兄弟 `~` 和后代选择器正常。
-- 触发条件或样本：`/home/herenfor/test/测试用epub/【测试专用】选择器.epub` 的 `message.xhtml` 内联样式 `.parent>.direct-child`。
+- 触发条件或样本：`<PROJECT_ROOT>/测试用epub/【测试专用】选择器.epub` 的 `message.xhtml` 内联样式 `.parent>.direct-child`。
 - 根因：章节消毒完成后经 `XMLSerializer` 输出，`<style>` 文本中的 `>` 被转义为 `&gt;`；输出又作为 HTML 装载，而 style 属于 raw-text 元素，不会把它还原成 CSS 子组合器。
 - 约束：不能整份 HTML 反转义；尤其必须保持 `<` 的转义，避免重新引入 `</style>` 逃逸；外部 CSS 和其他组合器不得变化。
 - 选择的修复：在 `XMLSerializer.serializeToString(doc)` 之后，仅匹配序列化输出中的 `<style>...</style>` 块，把其中的 `&gt;` 恢复为 `>`；不恢复 `&lt;`，也不触碰 style 之外的文本、属性或外部 CSS blob。
@@ -333,7 +333,7 @@ CSS 规则的逐项冲突编号仍以 `rendering-layers.md` 为准；本文记�
 - 状态：已修复，待 Windows 发布包性能确认
 - 发现日期：2026-08-17
 - 现象：Windows 发布版导入 EPUB，尤其批量导入时，速度远慢于 WSL 浏览器预览且 CPU 占用很高；导入期间书架逐本刷新。重复上传仍完整执行解析、保存和封面覆盖，只是旧进度碰巧被合并保留。
-- 触发条件或样本：`/home/herenfor/test/测试用epub/` 中任意多本 EPUB；15.21 MiB 样本的 `Array.from` 本地同类基准增加约 140 MiB JS 堆，JSON 参数约 54.25 MiB。
+- 触发条件或样本：`<PROJECT_ROOT>/测试用epub/` 中任意多本 EPUB；15.21 MiB 样本的 `Array.from` 本地同类基准增加约 140 MiB JS 堆，JSON 参数约 54.25 MiB。
 - 根因：Tauri 存储把正文和封面从 `Uint8Array` 转为普通 `number[]`，再经 JSON IPC 反序列化成 `Vec<u8>`；原生拖放还用 `Promise.all` 一次读入全部文件，导入循环每成功一本就更新 React 书架并立即读回封面。旧重复 ID 仅由 identifier/文件名/大小的 32 位哈希构成，且判重发生在覆盖文件之后。
 - 约束：浏览器与 Tauri 保持同一 `ShelfStore` 语义；Rust 继续独占目标路径生成；旧 ID 和书籍目录不能迁移；重复书不能修改文件、进度、首次添加时间或新书状态；内容不同的 EPUB 不应因同名同大小而覆盖。
 - 选择的修复：以 EPUB 原始字节 SHA-256 作为新书 ID 和独立 `contentHash`；0.1.5 旧条目只对同大小候选懒读并补录指纹。导入改成逐本读取、指纹判重后才解析保存，批次结束后一次性合并书架。Tauri 文件输入使用 raw body，原生拖放直接复制来源路径，正文/封面先暂存再单次提交索引；存储层提交前再次按指纹拒绝重复。单本重复显示指定红色文案，批量最多展示两个截断书名并在更多时追加“等书”。

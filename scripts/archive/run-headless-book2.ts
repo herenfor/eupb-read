@@ -2,10 +2,10 @@ import { chromium } from "playwright";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 const server = http.createServer((req, res) => {
-  const p = req.url === "/book.b64" ? "/home/herenfor/test/hltest/book2.b64"
-    : req.url === "/entry.js" ? "/home/herenfor/test/hltest/entry.js"
-    : req.url === "/dejavu.ttf" ? "/home/herenfor/test/hltest/dejavu.ttf"
-    : "/home/herenfor/test/hltest/test.html";
+  const p = req.url === "/book.b64" ? "<PROJECT_ROOT>/hltest/book2.b64"
+    : req.url === "/entry.js" ? "<PROJECT_ROOT>/hltest/entry.js"
+    : req.url === "/dejavu.ttf" ? "<PROJECT_ROOT>/hltest/dejavu.ttf"
+    : "<PROJECT_ROOT>/hltest/test.html";
   try {
     const data = readFileSync(p);
     res.writeHead(200, { "content-type": p.endsWith(".js") ? "text/javascript" : p.endsWith(".b64") ? "text/plain" : "text/html" });

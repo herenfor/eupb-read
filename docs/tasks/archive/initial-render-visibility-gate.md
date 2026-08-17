@@ -73,7 +73,7 @@ iframe 的 blob 文档一加载就可见，而 `measure()` 在字体与双动画
 
 ## 不应同步的本地文件
 
-- `/home/herenfor/test/测试用epub/` 中的测试书。
+- `<PROJECT_ROOT>/测试用epub/` 中的测试书。
 - 一次性浏览器脚本、截图和日志。
 
 ## 待完成与风险

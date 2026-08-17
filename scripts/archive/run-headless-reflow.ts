@@ -3,10 +3,10 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 
 const server = http.createServer((req, res) => {
-  const p = req.url === "/book.b64" ? "/home/herenfor/test/hltest/book.b64"
-    : req.url === "/reflow.js" ? "/home/herenfor/test/hltest/reflow.js"
-    : req.url === "/dejavu.ttf" ? "/home/herenfor/test/hltest/dejavu.ttf"
-    : "/home/herenfor/test/hltest/reflow.html";
+  const p = req.url === "/book.b64" ? "<PROJECT_ROOT>/hltest/book.b64"
+    : req.url === "/reflow.js" ? "<PROJECT_ROOT>/hltest/reflow.js"
+    : req.url === "/dejavu.ttf" ? "<PROJECT_ROOT>/hltest/dejavu.ttf"
+    : "<PROJECT_ROOT>/hltest/reflow.html";
   try {
     const data = readFileSync(p);
     res.writeHead(200, { "content-type": p.endsWith(".js") ? "text/javascript" : p.endsWith(".b64") ? "text/plain" : "text/html" });

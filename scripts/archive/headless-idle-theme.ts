@@ -3,7 +3,7 @@ import http from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 
-const dist = "/home/herenfor/test/epub-reader/dist";
+const dist = "<PROJECT_ROOT>/epub-reader/dist";
 const server = http.createServer((req, res) => {
   let p = join(dist, req.url === "/" ? "index.html" : (req.url ?? "/").split("?")[0]);
   if (!existsSync(p) || !statSync(p).isFile()) p = join(dist, "index.html");

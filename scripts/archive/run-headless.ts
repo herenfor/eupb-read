@@ -3,9 +3,9 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 
 const server = http.createServer((req, res) => {
-  const p = req.url === "/book.b64" ? "/home/herenfor/test/hltest/book.b64"
-    : req.url === "/entry.js" ? "/home/herenfor/test/hltest/entry.js"
-    : "/home/herenfor/test/hltest/test.html";
+  const p = req.url === "/book.b64" ? "<PROJECT_ROOT>/hltest/book.b64"
+    : req.url === "/entry.js" ? "<PROJECT_ROOT>/hltest/entry.js"
+    : "<PROJECT_ROOT>/hltest/test.html";
   try {
     const data = readFileSync(p);
     res.writeHead(200, { "content-type": p.endsWith(".js") ? "text/javascript" : p.endsWith(".b64") ? "text/plain" : "text/html" });

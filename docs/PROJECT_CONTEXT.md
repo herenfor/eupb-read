@@ -4,9 +4,9 @@
 
 ## 环境角色
 
-- 隔离开发副本：`/home/herenfor/test/epub-reader`
-- 真实 Git 源仓：`/home/herenfor/test/eupb-read`
-- 本地测试书目录：`/home/herenfor/test/测试用epub`
+- 隔离开发副本：`<PROJECT_ROOT>/epub-reader`
+- 真实 Git 源仓：`<PROJECT_ROOT>/eupb-read`
+- 本地测试书目录：`<PROJECT_ROOT>/测试用epub`
 - 当前主要平台：Windows；浏览器模式用于快速开发，Tauri 负责桌面交付。
 
 AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完成。
