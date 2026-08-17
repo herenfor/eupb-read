@@ -35,6 +35,24 @@
 | `docs/tasks/active/README.md` | 更新 | 清除 0.1.5 待同步提示，指向 0.1.6 总任务和当前待审核 B-020/B-021 | 人工检查 | 是 |
 | `docs/tasks/active/version-0.1.6-development.md` | 新增/更新 | 建立 0.1.6 开发阶段基线并登记本轮子任务和 170 项测试现状 | 对照项目现状 | 是 |
 | `docs/tasks/active/import-performance-duplicates-and-progress.md` | 新增 | 记录 B-020/B-021 范围、根因、实现、验收、验证和 Windows 待确认项 | 对照实现与本地结果 | 是 |
+| `src/ui/fontStore.ts`、`src/ui/fontStore.test.ts` | 新增 | 用户字体 Tauri/IndexedDB 双存储，字体文件按 SHA-256 id 存应用数据目录/IndexedDB | fontStore 2/2；Chromium 上传后列表 1 项 | 是 |
+| `src/ui/ShelfView.tsx` | 更新 | 批量选择模式新增“全选/取消全选”（范围为当前筛选结果） | Chromium 3 本全选/取消全选 | 是 |
+| `src/ui/MenuPanel.tsx` | 更新 | 详细设置增加“自定义字体”（上传/选择/删除）与“自定义 CSS”textarea | TypeScript + Chromium 交互 | 是 |
+| `src/render/settings.ts`、`src/render/sanitize.ts`、`src/render/sanitize.test.ts` | 更新 | ReaderSettings 增加 customFontName/customFonts/customCss；sanitize 注入 @font-face、选择字体强制 body 字体、末尾注入用户 CSS | sanitize 49/49；全量 174/174 | 是 |
+| `src/ui/ReaderView.tsx` | 更新 | 用户字体 URL 合入渲染设置，设置/字体变化触发重载 | `pnpm build` | 是 |
+| `src/App.tsx` | 更新 | 字体列表加载/上传/删除、blob URL 构造、设置持久化 | Chromium 上传；build | 是 |
+| `src-tauri/src/lib.rs` | 更新 | 新增 fonts_import_raw/fonts_list/fonts_read/fonts_delete 与 FontWriteState | `cargo fmt`；`cargo check` 需 Windows/有权限 shell | 是 |
+| `src/ui/storage.ts` | 更新 | 设置持久化增加 customFontName/customCss | 全量测试 | 是 |
+| `src/core/book.ts` | 更新 | OPF 未声明封面时回退到资源中名称为 `cover` 的图片（cover.jpg/png/webp 等） | 全量测试/build | 是 |
+| `src/App.tsx`、`src/ui/Toolbar.tsx`、`src/ui/ReaderView.tsx` | 更新 | 阅读跳转历史返回：目录/书内链接跳转前记录位置（≤10 步），工具栏菜单旁新增 ↩ 返回按钮，恢复章节/页码/内容锚点 | Chromium 27%→跳转→↩恢复 27%；全量 174/174 | 是 |
+| `docs/tasks/active/reader-history-back.md` | 新增 | 记录阅读跳转历史返回功能范围与验证 | 人工检查 | 是 |
+| `src/ui/Toolbar.tsx`、`src/ui/MenuPanel.tsx`、`src/App.tsx` | 更新 | 目录从菜单“导航”移出，作为一级工具栏 📖 图标放在 ☰ 菜单右侧；菜单不再含导航分类 | build；全量 174/174 | 是 |
+| `src/ui/shelf.ts`、`src-tauri/src/lib.rs`、`src/App.tsx`、`src/ui/Toolbar.tsx`、`src/render/paginator.ts`、`src/ui/ReaderView.tsx` | 更新 | 书签功能：随书存储/删除，工具栏 🔖+▾ 二级菜单，书签跳转进历史支持 ↩，按钮当前页高亮；书签按书中顺序排列、右下角小字章节名、弹层滚动条主题化、按钮样式参照书架胶囊风格 | Chromium 添加/列表/跳回/移除；全量 174/174 | 是 |
+| `docs/tasks/active/bookmark-feature.md` | 新增 | 记录书签功能范围、实现、验证与待确认项 | 人工检查 | 是 |
+| `src/render/paginator.ts` | 更新 | B-022：样式表类规则中的水平百分比 margin 也按 C-16 页面相对布局处理，避免目录页 70% margin 被叠加版心 base 产生残页 | Chromium 赤月目录页 1/1、sw=1390；全量 174/174 | 是 |
+| `docs/BUGFIX_LOG.md` | 更新 | 新增 B-022 记录 | 人工检查 | 是 |
+| `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 版本元数据升至 **0.1.6**（0.1.6 构建准备） | npx vitest 174/174、tsc/vite build | 是 |
+| `docs/tasks/active/custom-fonts-css-and-select-all.md` | 新增 | 记录本轮功能范围、实现、验证与待确认项 | 人工检查 | 是 |
 | `docs/tasks/TEMPLATE.md` | 更新 | 状态枚举增加“已发布归档” | 人工检查 | 是 |
 | `docs/SOURCE_DELTA.md` | 更新 | 基线推进至 `e349ab5`，记录本轮纯文档差异 | 与真实源仓只读比较 | 是 |
 | `LICENSE` | 新增 | 添加 MIT License（Copyright 2026 HeRenFor），仓库准备公开 | 人工检查 | 是 |
@@ -45,7 +63,7 @@
 
 当前 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 Cargo 锁文件中的本项目版本仍为 `0.1.5`。准备 0.1.6 发布候选时再统一升版。
 
-本轮验证：Vitest 15 个文件 170/170、`pnpm build`、Rust 2/2、`cargo fmt --check` 通过。真实 Chromium 已验证单本/批量重复提示、改名后的 0.1.5 旧书判重不掉进度，以及多页书第 5/11 页、第三章、55% 在返回和刷新后完整恢复。一次性 Playwright 脚本和浏览器数据位于 `/tmp`/本地运行环境，不属于同步内容。Windows WebView2/NSIS 尚未重新编译验证。
+本轮验证：Vitest 16 个文件 174/174、`pnpm build`、`cargo fmt` 通过（Rust `cargo check` 仍需有权限 shell/Windows 编译确认；旧 B-020/B-021 的 Rust 2/2 由上一轮外部 shell 验证）。真实 Chromium 已验证：单本/批量重复提示、改名后的 0.1.5 旧书判重不掉进度、多页书第 5/11 页恢复；批量选择全选/取消全选；自定义 CSS 生效（正文 p 变红）；字体上传后列表出现。一次性 Playwright 脚本和浏览器数据位于 `/tmp`/本地运行环境，不属于同步内容。Windows WebView2/NSIS 尚未重新编译验证。
 
 ## 不属于同步变化
 

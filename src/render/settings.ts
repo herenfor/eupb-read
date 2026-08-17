@@ -7,6 +7,12 @@ export interface ReaderSettings {
   theme: Theme;
   /** 用户指定字体族；为空表示不覆盖书的字体 */
   fontFamily?: string;
+  /** 用户选择的已上传自定义字体 family（优先于 fontFamily 与书字体） */
+  customFontName?: string;
+  /** 已上传字体在本次会话中的 @font-face 资源（App 构造并传入渲染层） */
+  customFonts?: Array<{ family: string; url: string }>;
+  /** 用户自定义 CSS（高级设置内输入，注入在阅读器覆盖样式之后，允许覆盖） */
+  customCss?: string;
   /** 分栏间距 px */
   gapPx: number;
   /** 行高倍率；undefined = 跟随书 */

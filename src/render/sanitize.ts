@@ -181,11 +181,22 @@ function buildOverrideCss(s: ReaderSettings): string {
 }`;
 
   // ---- L2 用户设置：字号/主题/字体 fallback（书 body 字体声明优先） ----
+  const escapeFamily = (family: string): string => family.replace(/"/g, '\\"');
+  const fontFaceCss = (s.customFonts ?? [])
+    .map(
+      (f) =>
+        `/* [L2] 用户上传字体 */\n@font-face { font-family: "${escapeFamily(f.family)}"; src: url("${f.url}") format("truetype"); font-display: swap; }`
+    )
+    .join("\n");
+  const bodyFontCss = s.customFontName
+    ? `font-family: "${escapeFamily(s.customFontName)}" !important;`
+    : "";
   const themeCss = `
 /* [L2] 字体 fallback 只放 html；书在 body 上的内嵌字体声明优先。 */
 html { font-size: ${s.fontSizePx}px !important; font-family: ${family}; }
+${fontFaceCss}
 /* [L2] 主题只覆盖背景色，不用 background 简写（会重置书的 body 背景图）。 */
-body { color: ${fg}; background-color: ${bg}; }
+body { color: ${fg}; background-color: ${bg}; ${bodyFontCss} }
 /* [L2] ruby 注音 rt 随主题换色（书常固定 ruby>rt{color:#333}）。 */
 #${VIEWER_ID} rt { color: ${fg}; }
 ${
@@ -198,6 +209,8 @@ ${
 #${VIEWER_ID} .toc a { color: #6cb2ff; }`
     : ""
 }`;
+
+  const userCss = s.customCss ? `/* [L2] 用户自定义 CSS（允许覆盖） */\n${s.customCss}` : "";
 
   return [
     `/* [L1/L3-C21] 正文只由 viewer 分页，不使用根页面原生滚动。
@@ -216,6 +229,7 @@ ${VIEWER_TAG}#${VIEWER_ID} { display: block; height: 100%; overflow: hidden; mar
     compatCss,
     imageCss,
     themeCss,
+    userCss,
   ].join("\n");
 }
 

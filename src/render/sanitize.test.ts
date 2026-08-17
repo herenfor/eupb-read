@@ -601,4 +601,32 @@ background-position:center center;background-size:cover;background-color:#f9ebdf
     // 不再给 viewer 铺不透明背景，否则会遮住 body 的背景图
     expect(out).not.toMatch(/epub-viewer\s*\{\s*background:/);
   });
+
+  it("用户自定义 CSS 注入在覆盖样式之后", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, {
+      ...opts(),
+      settings: {
+        ...DEFAULT_SETTINGS,
+        customCss: `#epub-viewer p { color: red !important; }`,
+      },
+    });
+    expect(out).toContain("用户自定义 CSS");
+    expect(out).toContain("#epub-viewer p { color: red !important; }");
+  });
+
+  it("用户上传字体注入 @font-face 并可在选择后强制 body 字体", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p></body></html>`;
+    const { html: out } = await sanitizeChapter(html, {
+      ...opts(),
+      settings: {
+        ...DEFAULT_SETTINGS,
+        customFonts: [{ family: "MyFont", url: "blob:myfont" }],
+        customFontName: "MyFont",
+      },
+    });
+    expect(out).toContain('@font-face { font-family: "MyFont";');
+    expect(out).toContain('src: url("blob:myfont")');
+    expect(out).toContain('font-family: "MyFont" !important;');
+  });
 });

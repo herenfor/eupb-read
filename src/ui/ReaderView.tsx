@@ -20,6 +20,8 @@ export interface ReaderHandle {
     charsRead: number;
     totalChars: number;
   } | null;
+  /** 当前锚点元素的一行文本（书签列表展示用） */
+  getAnchorText(): string | null;
   /** 跳到页内锚点（注释返回链接等） */
   jumpToAnchor(anchor: string): void;
   /** 脚注标记当前矩形（阅读区坐标系），弹层随重排重定位用。 */
@@ -42,6 +44,8 @@ interface ReaderViewProps {
   /** 锚点变更序号：同章节重复跳转时强制重载 */
   anchorNonce: number;
   settings: ReaderSettings;
+  /** 用户上传字体的会话内资源（family + blob URL） */
+  userFonts: Array<{ family: string; url: string }>;
   onPageState(s: ChapterState): void;
   /** 请求切换到相邻章节（next/prev 或空章自动前进） */
   onRequestChapter(index: number, opts?: { atEnd?: boolean }): void;
@@ -96,6 +100,8 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     book.fixedLayout || settings.gapPx === 0
       ? { ...settings, gapPx: 0 }
       : settings;
+  // 渲染层设置：把用户上传字体的 blob URL 注入分页器/sanitize
+  const renderSettings: ReaderSettings = { ...effSettings, customFonts: props.userFonts };
 
   // 创建分页器（book/server 就绪后；App 端用 key 保证 book 变化时整体重建）
   useEffect(() => {
@@ -104,7 +110,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     const p = new ChapterPaginator(
       iframe,
       server,
-      effSettings,
+      renderSettings,
       book.version === 2,
       (s) => {
         lastStateRef.current = s.status;
@@ -177,6 +183,10 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
 
   // 章节切换 → 加载
   const initialAnchorRef = useRef(props.initialAnchor ?? null);
+  // 目录返回/历史回退可能在同一 ReaderView 生命周期内更新 initialAnchor
+  useEffect(() => {
+    initialAnchorRef.current = props.initialAnchor ?? null;
+  }, [props.initialAnchor]);
   useEffect(() => {
     const p = paginatorRef.current;
     if (!p) return;
@@ -209,15 +219,15 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   }, [book, spineIndex, props.anchorNonce]);
 
   // 设置变更 → 重载（阅读位置由分页器内容锚点保留；仅在实际变化时触发）
-  const prevSettingsRef = useRef(effSettings);
+  const prevSettingsRef = useRef(renderSettings);
   useEffect(() => {
     const p = paginatorRef.current;
     if (!p) return;
-    if (prevSettingsRef.current === effSettings) return;
-    prevSettingsRef.current = effSettings;
-    void p.reloadWithSettings(effSettings);
+    if (prevSettingsRef.current === renderSettings) return;
+    prevSettingsRef.current = renderSettings;
+    void p.reloadWithSettings(renderSettings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings]);
+  }, [settings, props.userFonts]);
 
   // 尺寸变化 → 重排（左右拉伸窗口等场景）。
   // 用 debounce：拉伸过程中 ResizeObserver 持续触发，只重置定时器、不做重排；
@@ -288,6 +298,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       },
       getReadingAnchor() {
         return paginatorRef.current?.getReadingAnchor() ?? null;
+      },
+      getAnchorText() {
+        return paginatorRef.current?.getAnchorText() ?? null;
       },
       jumpToAnchor(anchor) {
         paginatorRef.current?.jumpToAnchor(anchor);

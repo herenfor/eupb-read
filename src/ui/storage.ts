@@ -42,6 +42,10 @@ export interface SavedSettings {
   fontWeight?: number;
   letterSpacingPx?: number;
   wordSpacingPx?: number;
+  /** 用户自定义字体（已上传字体 family） */
+  customFontName?: string;
+  /** 用户自定义 CSS 文本 */
+  customCss?: string;
 }
 
 export function readSavedSettings(): SavedSettings {

@@ -27,6 +27,8 @@
 ## 当前范围
 
 - [导入性能、重复识别与阅读进度可靠性](./import-performance-duplicates-and-progress.md)：待用户审核；B-020/B-021 已实现并通过本地验证，Windows 安装包性能与关闭事件待最终确认。
+- [书架全选、用户自定义字体与自定义 CSS](./custom-fonts-css-and-select-all.md)：已实现并通过本地验证，待用户审核；Rust 字体命令与 Windows 打包待最终确认。
+- [书签功能](./bookmark-feature.md)：已实现并通过本地验证，待用户审核；Rust 命令与 Windows 打包待最终确认。
 
 ## 工作规则
 

@@ -138,6 +138,47 @@ export function hasPercentageHorizontalMargin(style: MarginStyle): boolean {
   return horizontal.some((value) => value.includes("%"));
 }
 
+function styleHasPercentageHorizontalMargin(style: CSSStyleDeclaration): boolean {
+  if (style.marginLeft.includes("%") || style.marginRight.includes("%")) return true;
+  const values = style.margin.trim().split(/\s+/).filter(Boolean);
+  if (values.length === 0) return false;
+  const horizontal =
+    values.length === 1
+      ? [values[0]]
+      : values.length === 2 || values.length === 3
+        ? [values[1]]
+        : [values[1], values[3]];
+  return horizontal.some((value) => value.includes("%"));
+}
+
+/** 样式表中的类/标签规则也可能声明水平百分比 margin（如 margin-left:70%）。 */
+export function hasPercentageHorizontalMarginInRules(doc: Document, el: Element): boolean {
+  const walk = (rules: CSSRuleList): boolean => {
+    for (const rule of Array.from(rules)) {
+      if (rule.type === CSSRule.STYLE_RULE) {
+        const styleRule = rule as CSSStyleRule;
+        const selector = styleRule.selectorText ?? "";
+        if (!selector) continue;
+        try {
+          if (el.matches(selector) && styleHasPercentageHorizontalMargin(styleRule.style)) {
+            return true;
+          }
+        } catch {
+          /* 复杂/伪类选择器匹配失败时忽略 */
+        }
+      } else if (rule.type === CSSRule.MEDIA_RULE) {
+        const media = rule as CSSMediaRule;
+        if (media.cssRules && walk(media.cssRules)) return true;
+      }
+    }
+    return false;
+  };
+  for (const sheet of Array.from(doc.styleSheets)) {
+    if (sheet.cssRules && walk(sheet.cssRules)) return true;
+  }
+  return false;
+}
+
 /** 百分比声明只有解析出实际水平偏移时才进入页面相对布局分支。 */
 export function isPercentageMarginLayout(
   hasPercentage: boolean,
@@ -557,7 +598,10 @@ export class ChapterPaginator {
 
       // 水平百分比 margin 是相对包含块的页面布局。若作者没有自己的 inline
       // max-width，暂时解除 L3 的 40rem 默认值，才能读到作者原本的剩余宽度。
-      if (hasPercentageHorizontalMargin(el.style)) {
+      if (
+        hasPercentageHorizontalMargin(el.style) ||
+        hasPercentageHorizontalMarginInRules(doc, el)
+      ) {
         const maxWidth = snapshotInlineStyleProperty(el.style, "max-width");
         const relaxedReaderMaxWidth = maxWidth.value === "";
         percentageMargins.set(el, { maxWidth, relaxedReaderMaxWidth });
@@ -1084,6 +1128,16 @@ export class ChapterPaginator {
       charsRead: this.anchor.charsRead,
       totalChars: this.anchor.totalChars,
     };
+  }
+
+  /** 当前锚点元素的行文本（书签列表展示用）。 */
+  getAnchorText(): string | null {
+    if (!this.contentDoc || !this.viewer || !this.anchor) return null;
+    const all = Array.from(this.viewer.querySelectorAll("*"));
+    const el = all[Math.min(this.anchor.index, all.length - 1)] as HTMLElement | undefined;
+    if (!el) return null;
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    return text ? text.slice(0, 80) : null;
   }
 
   /** 恢复阅读锚点（打开书时定位到上次阅读处）。 */

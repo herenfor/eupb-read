@@ -279,6 +279,18 @@ export async function loadBook(bytes: Uint8Array, options: BookOptions = {}): Pr
       if (item) coverHref = resolvePath(opfPath, item.href);
     }
   }
+  // 未声明封面时回退：使用名称为 cover 的图片（cover.jpg/png/webp 等）
+  if (!coverHref) {
+    for (const [path, res] of resources) {
+      if (!res.mediaType.startsWith("image/")) continue;
+      const base = path.split("/").pop() ?? "";
+      const stem = base.replace(/\.[^.]+$/, "").toLowerCase();
+      if (stem === "cover") {
+        coverHref = path;
+        break;
+      }
+    }
+  }
 
   // ---- 加密 / 字体混淆 / DRM ----
   const { obfuscated, drm } = await parseEncryption(files, issues);

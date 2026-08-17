@@ -175,6 +175,16 @@ export function ShelfView(props: ShelfViewProps) {
               <span className="shelf-title">已选 {selectedIds.size} 本</span>
             </div>
             <div className="shelf-controls selection-actions">
+              <button
+                className="shelf-select-all tb-btn"
+                disabled={props.busy || visible.length === 0}
+                onClick={() => {
+                  if (selectedIds.size === visible.length) setSelectedIds(new Set());
+                  else setSelectedIds(new Set(visible.map((e) => e.id)));
+                }}
+              >
+                {selectedIds.size === visible.length ? "取消全选" : "全选"}
+              </button>
               <button className="shelf-select-cancel tb-btn" onClick={exitSelection}>
                 取消
               </button>

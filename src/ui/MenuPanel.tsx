@@ -9,8 +9,17 @@ export interface MenuPanelProps {
   fontWeight?: number;
   letterSpacingPx?: number;
   wordSpacingPx?: number;
+  /** 当前选择的用户自定义字体 family */
+  customFontName?: string;
+  /** 用户自定义 CSS 文本 */
+  customCss?: string;
+  userFonts: Array<{ id: string; fileName: string; family: string }>;
+  fontBusy: boolean;
+  onImportFont(file: File): void;
+  onDeleteFont(id: string): void;
+  onCustomFontNameChange(name: string): void;
+  onCustomCssChange(css: string): void;
   onOpenFile(): void;
-  onOpenToc(): void;
   onFontDec(): void;
   onFontInc(): void;
   onFontSizeChange(v: number): void;
@@ -141,6 +150,7 @@ function SliderRow(props: SliderRowProps) {
 /** 左侧滑出的二级菜单：收纳文件/导航/正文排版/界面/外观等操作。 */
 export function MenuPanel(props: MenuPanelProps) {
   const [detailOpen, setDetailOpen] = useState(false);
+  const fontInputRef = useRef<HTMLInputElement>(null);
   return (
     <div className="menu-panel">
       <div className="menu-head">
@@ -153,11 +163,6 @@ export function MenuPanel(props: MenuPanelProps) {
       <div className="menu-section">文件</div>
       <button className="menu-item" onClick={props.onOpenFile}>
         导入新书
-      </button>
-
-      <div className="menu-section">导航</div>
-      <button className="menu-item" onClick={props.onOpenToc}>
-        打开目录
       </button>
 
       <div className="menu-section">正文</div>
@@ -224,6 +229,61 @@ export function MenuPanel(props: MenuPanelProps) {
         onChange={props.onWordSpacingChange}
         onDec={props.onWordSpacingDec}
         onInc={props.onWordSpacingInc}
+      />
+
+      <div className="menu-subsection">自定义字体</div>
+      <div className="font-list">
+        {props.userFonts.length === 0 && (
+          <div className="font-empty">尚未添加字体；可上传 TTF/OTF/WOFF/WOFF2。</div>
+        )}
+        {props.userFonts.map((font) => (
+          <div key={font.id} className="font-item">
+            <button
+              className={`font-select${props.customFontName === font.family ? " active" : ""}`}
+              onClick={() => props.onCustomFontNameChange(font.family)}
+              title={font.fileName}
+            >
+              {font.family}
+              {props.customFontName === font.family ? " ✓" : ""}
+            </button>
+            <button
+              className="font-delete"
+              onClick={() => props.onDeleteFont(font.id)}
+              title="删除字体"
+              disabled={props.fontBusy}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+      <button
+        className="menu-item"
+        onClick={() => fontInputRef.current?.click()}
+        disabled={props.fontBusy}
+      >
+        ＋ 添加字体
+      </button>
+      <input
+        ref={fontInputRef}
+        type="file"
+        accept=".ttf,.otf,.woff,.woff2"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) props.onImportFont(f);
+          e.target.value = "";
+        }}
+      />
+
+      <div className="menu-subsection">自定义 CSS</div>
+      <textarea
+        className="custom-css-input"
+        rows={5}
+        placeholder="/* 这里写任意 CSS，会注入到正文顶部样式之后，可覆盖阅读器规则 */\nbody { color: red !important; }"
+        value={props.customCss ?? ""}
+        onChange={(e) => props.onCustomCssChange(e.target.value)}
+        spellCheck={false}
       />
       </div>
       )}

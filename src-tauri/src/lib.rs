@@ -2,6 +2,7 @@
 pub fn run() {
     tauri::Builder::default()
         .manage(ShelfWriteState::default())
+        .manage(FontWriteState::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_epub_file,
@@ -15,7 +16,12 @@ pub fn run() {
             shelf_set_content_hash,
             shelf_update_entry,
             shelf_mark_opened,
-            shelf_delete_book
+            shelf_set_bookmarks,
+            shelf_delete_book,
+            fonts_import_raw,
+            fonts_list,
+            fonts_read,
+            fonts_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -63,6 +69,20 @@ struct ShelfEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_hash: Option<String>,
     is_new: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bookmarks: Option<Vec<BookmarkEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BookmarkEntry {
+    id: String,
+    spine_index: usize,
+    page: usize,
+    anchor_index: Option<usize>,
+    anchor_ratio: Option<f64>,
+    text: String,
+    created_at_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,6 +316,7 @@ fn shelf_commit_book(
         anchor_ratio: None,
         content_hash: Some(content_hash),
         is_new: true,
+        bookmarks: Some(Vec::new()),
     };
     entries.push(entry.clone());
     if let Err(error) = save_index(&app, &entries) {
@@ -402,6 +423,26 @@ fn shelf_mark_opened(
     Ok(entry)
 }
 
+/// 写入整本书的书签列表（随书删除）。
+#[tauri::command]
+fn shelf_set_bookmarks(
+    app: AppHandle,
+    state: State<'_, ShelfWriteState>,
+    book_id: String,
+    bookmarks: Vec<BookmarkEntry>,
+) -> Result<ShelfEntry, String> {
+    let _guard = state.0.lock().map_err(|_| "书架写入锁已损坏".to_string())?;
+    let mut entries = load_index(&app)?;
+    let e = entries
+        .iter_mut()
+        .find(|e| e.id == book_id)
+        .ok_or_else(|| "书架中没有这本书".to_string())?;
+    e.bookmarks = Some(bookmarks);
+    let entry = e.clone();
+    save_index(&app, &entries)?;
+    Ok(entry)
+}
+
 #[tauri::command]
 fn shelf_delete_book(
     app: AppHandle,
@@ -420,6 +461,168 @@ fn shelf_delete_book(
         return Err("书架中没有这本书".into());
     }
     save_index(&app, &entries)
+}
+
+// ---- 用户自定义字体 ----
+// 字体文件存应用数据目录：<app_data>/fonts/<id>，索引 <app_data>/fonts.json。
+
+#[derive(Default)]
+struct FontWriteState(Mutex<()>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FontEntry {
+    id: String,
+    file_name: String,
+    family: String,
+    size: u64,
+    added_at_ms: u128,
+}
+
+fn fonts_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(shelf_root(app)?.join("fonts"))
+}
+
+fn fonts_index_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(shelf_root(app)?.join("fonts.json"))
+}
+
+fn load_fonts(app: &AppHandle) -> Result<Vec<FontEntry>, String> {
+    let p = fonts_index_path(app)?;
+    match fs::read_to_string(&p) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("字体索引损坏：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("无法读取字体索引：{e}")),
+    }
+}
+
+fn save_fonts(app: &AppHandle, entries: &[FontEntry]) -> Result<(), String> {
+    let p = fonts_index_path(app)?;
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("无法创建字体目录：{e}"))?;
+    }
+    let text =
+        serde_json::to_string_pretty(entries).map_err(|e| format!("序列化字体索引失败：{e}"))?;
+    let tmp = p.with_extension("json.tmp");
+    fs::write(&tmp, text).map_err(|e| format!("无法写入字体索引：{e}"))?;
+    fs::rename(&tmp, &p).map_err(|e| format!("无法更新字体索引：{e}"))
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// HTML 文件选择器上传字体：raw body + 头部元数据。
+#[tauri::command]
+fn fonts_import_raw(
+    app: AppHandle,
+    state: State<'_, FontWriteState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<FontEntry, String> {
+    let id = request
+        .headers()
+        .get("x-font-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !valid_content_hash(&id) {
+        return Err("无效的字体指纹".into());
+    }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("字体保存请求必须使用原始二进制".into());
+    };
+    if bytes.is_empty() {
+        return Err("字体内容为空".into());
+    }
+    let file_name = request
+        .headers()
+        .get("x-font-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_else(|| "font.ttf".into());
+    let family = request
+        .headers()
+        .get("x-font-family")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_else(|| file_name.clone());
+    let dir = fonts_root(&app)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("无法创建字体目录：{e}"))?;
+    let file_path = dir.join(&id);
+    fs::write(&file_path, &bytes).map_err(|e| format!("无法保存字体文件：{e}"))?;
+
+    let _guard = state.0.lock().map_err(|_| "字体写入锁已损坏".to_string())?;
+    let mut entries = load_fonts(&app)?;
+    entries.retain(|e| e.id != id);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let entry = FontEntry {
+        id,
+        file_name,
+        family,
+        size: bytes.len() as u64,
+        added_at_ms: now,
+    };
+    entries.push(entry.clone());
+    save_fonts(&app, &entries)?;
+    Ok(entry)
+}
+
+#[tauri::command]
+fn fonts_list(app: AppHandle) -> Result<Vec<FontEntry>, String> {
+    load_fonts(&app)
+}
+
+#[tauri::command]
+fn fonts_read(app: AppHandle, font_id: String) -> Result<tauri::ipc::Response, String> {
+    if !valid_content_hash(&font_id) {
+        return Err("无效的字体指纹".into());
+    }
+    let p = fonts_root(&app)?.join(&font_id);
+    fs::read(&p)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| format!("无法读取字体：{e}"))
+}
+
+#[tauri::command]
+fn fonts_delete(
+    app: AppHandle,
+    state: State<'_, FontWriteState>,
+    font_id: String,
+) -> Result<(), String> {
+    if !valid_content_hash(&font_id) {
+        return Err("无效的字体指纹".into());
+    }
+    let _guard = state.0.lock().map_err(|_| "字体写入锁已损坏".to_string())?;
+    let p = fonts_root(&app)?.join(&font_id);
+    if p.exists() {
+        fs::remove_file(&p).map_err(|e| format!("无法删除字体文件：{e}"))?;
+    }
+    let mut entries = load_fonts(&app)?;
+    let before = entries.len();
+    entries.retain(|e| e.id != font_id);
+    if entries.len() == before {
+        return Err("字体不存在".into());
+    }
+    save_fonts(&app, &entries)
 }
 
 #[cfg(test)]

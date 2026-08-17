@@ -359,3 +359,19 @@ CSS 规则的逐项冲突编号仍以 `rendering-layers.md` 为准；本文记�
 - 验证：进度写入器 3 项覆盖快速翻页合并、跨书顺序和失败重试；书架合并测试证明清除新书标记不覆盖页码/锚点。真实 Chromium 把多页样本读到第 5/11 页、第三章、55%，返回并刷新后仍恢复第 5/11 页；旧条目懒补指纹前后第 4 页、第三章、46% 完全不变。全量 Vitest 170/170、生产构建和 Rust 单测通过。
 - 剩余风险：浏览器标签被操作系统强杀时无法等待异步 IndexedDB；正常返回、隐藏、刷新和 Tauri 窗口关闭已覆盖。Windows 安装包关闭事件仍需最终人工确认。
 - 关联：`docs/tasks/active/import-performance-duplicates-and-progress.md`、B-020。
+
+## B-022：目录页百分比 margin 被误叠加版心偏移导致翻页异常
+
+- 状态：已修复
+- 发现日期：2026-08-18
+- 现象：《试着向准备跳下去的同班同学提议「和我XX吧！」02》目录页被拆成两页，第二页只有 326px 的右边缘残片。
+- 触发条件或样本：目录页末尾 `.ri.ti20er{margin-left:70%;margin-right:1.5em}` 的图片容器。
+- 根因：C-16 已能识别 inline style 的水平百分比 margin，但该书百分比写在 `<link>` 样式表的类规则里，`hasPercentageHorizontalMargin(el.style)` 只查 inline style，未命中。于是 margin 修正把 70% 的 `margin-left` 当作“相对居中版心的缩进”，叠加 `base=(parentW-width)/2`，元素被推到 `x=1625`，溢出页宽并产生第二页残片。
+- 约束：不改变书籍百分比 margin 的包含块语义；继续保留 C-04 对 em/px 缩进的解释；不能为书名/类名特判。
+- 选择的修复：新增 `hasPercentageHorizontalMarginInRules(doc, el)`，扫描文档样式表（含 @media）中匹配元素的规则，若 `margin-left/right` 或 `margin` 简写含 `%`，也走 C-16 页面相对布局分支，直接以书本身 margin 写回，不再叠加版心 base。
+- 为什么这样修：百分比 margin 本就相对包含块，无论写在 inline 还是样式表都应同样对待；把检测从“只看 inline”扩展到“样式表声明”，是 C-16 的完整化，不新增书级特判。
+- 未采用方案：仅按 computed px 阈值判断大 margin 会误伤未来以 em 表达的右侧定位；扫描书名类名不可维护；继续只查 inline 会复发。
+- 修改文件：`src/render/paginator.ts`、`docs/BUGFIX_LOG.md`、`docs/SOURCE_DELTA.md`。
+- 验证：全量 Vitest 16 文件 174/174、`pnpm build` 通过。真实 Chromium 该书目录页由 `第 1/2 页`、`sw=1716` 修复为 `第 1/1 页`、`sw=1390`，翻页不再出现 326px 残页。
+- 剩余风险：样式表百分比 margin 检测扫描所有规则，复杂/伪类选择器匹配失败会静默忽略；若未来出现伪类驱动的百分比 margin，需要扩展匹配逻辑。
+- 关联：C-16、`docs/rendering-layers.md`。

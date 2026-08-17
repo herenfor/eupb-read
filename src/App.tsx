@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { loadBook, spineIndexForPath, spineItemPath, DrmError } from "./core/book";
 import type { Book } from "./core/types";
 import { resolvePath, splitHref } from "./core/paths";
@@ -21,6 +21,7 @@ import {
   applyShelfProgressPatch,
   getShelfStore,
   markShelfEntryOpened,
+  type Bookmark,
   type ShelfEntry,
   type ShelfProgressPatch,
 } from "./ui/shelf";
@@ -31,6 +32,12 @@ import {
   sha256Hex,
 } from "./ui/importBooks";
 import { ShelfProgressWriter } from "./ui/progressWriter";
+import {
+  fontFamilyFromFileName,
+  fontIdFromHash,
+  getFontStore,
+  type UserFont,
+} from "./ui/fontStore";
 import {
   readProgress,
   writeProgress,
@@ -71,6 +78,22 @@ function bookKeyOf(b: Book, name: string, size: number): string {
   return `${id}::${b.metadata.modified ?? ""}`;
 }
 
+/** 根据 spine 下标查目录章节标题（用于书签右下角展示）。 */
+function chapterLabelForIndex(b: Book, index: number): string {
+  const path = spineItemPath(b, index);
+  if (!path) return "";
+  const { path: normalized } = splitHref(path);
+  const walk = (nodes: import("./core/types").TocNode[]): string => {
+    for (const n of nodes) {
+      if (splitHref(n.href).path === normalized && n.label) return n.label;
+      const c = walk(n.children);
+      if (c) return c;
+    }
+    return "";
+  };
+  return walk(b.toc);
+}
+
 export default function App() {
   const [phase, setPhase] = useState<AppPhase>({ phase: "idle" });
   const [book, setBook] = useState<Book | null>(null);
@@ -92,6 +115,8 @@ export default function App() {
       fontWeight: saved.fontWeight,
       letterSpacingPx: saved.letterSpacingPx,
       wordSpacingPx: saved.wordSpacingPx,
+      customFontName: saved.customFontName,
+      customCss: saved.customCss,
     };
   });
   // UI 界面缩放（独立于正文字号）
@@ -129,6 +154,15 @@ export default function App() {
   const shelfBusyRef = useRef(false);
   const shelfEntriesRef = useRef<ShelfEntry[]>([]);
   shelfEntriesRef.current = shelfEntries;
+  // ---- 阅读跳转历史（返回跳转前的进度，最多 10 步） ----
+  const [readerHistory, setReaderHistory] = useState<
+    Array<{ spineIndex: number; page: number; anchor: { index: number; ratio: number } | null }>
+  >([]);
+  const [bookmarkMenuOpen, setBookmarkMenuOpen] = useState(false);
+  // ---- 用户自定义字体 ----
+  const [userFonts, setUserFonts] = useState<UserFont[]>([]);
+  const [fontUrls, setFontUrls] = useState<Record<string, string>>({});
+  const [fontBusy, setFontBusy] = useState(false);
   const contentHashByIdRef = useRef(new Map<string, string>());
   const entryByContentHashRef = useRef(new Map<string, ShelfEntry>());
   const currentShelfIds = new Set(shelfEntries.map((entry) => entry.id));
@@ -183,6 +217,8 @@ export default function App() {
       initialPageRef.current = saved?.page ?? 0;
       setInitialAnchor(saved?.anchor ?? null);
       setCurrentShelfId(shelfId);
+      setReaderHistory([]);
+      setBookmarkMenuOpen(false);
       setView("reader");
       setPhase({ phase: "ready" });
     },
@@ -298,6 +334,90 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  // ---- 用户自定义字体启动加载 ----
+  useEffect(() => {
+    let cancelled = false;
+    const created: string[] = [];
+    void (async () => {
+      try {
+        const fonts = await getFontStore().list();
+        if (cancelled) return;
+        setUserFonts(fonts);
+        const urls: Record<string, string> = {};
+        for (const font of fonts) {
+          try {
+            const bytes = await getFontStore().readFont(font.id);
+            const url = URL.createObjectURL(
+              new Blob([bytes.slice().buffer as ArrayBuffer])
+            );
+            created.push(url);
+            urls[font.id] = url;
+          } catch {
+            /* 单个字体读取失败不影响其余 */
+          }
+        }
+        if (!cancelled) setFontUrls(urls);
+      } catch {
+        /* 字体库不可用不阻塞阅读 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      for (const url of created) URL.revokeObjectURL(url);
+    };
+  }, []);
+
+  const handleImportFont = useCallback(async (file: File) => {
+    if (fontBusy) return;
+    if (!/\.(ttf|otf|woff|woff2)$/i.test(file.name)) {
+      setShelfNotice({ kind: "error", text: "仅支持 TTF/OTF/WOFF/WOFF2 字体文件" });
+      return;
+    }
+    setFontBusy(true);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const hash = await sha256Hex(bytes);
+      const id = fontIdFromHash(hash);
+      const family = fontFamilyFromFileName(file.name);
+      const entry = await getFontStore().importFont({ id, fileName: file.name, family, bytes });
+      const url = URL.createObjectURL(
+        new Blob([bytes.slice().buffer as ArrayBuffer])
+      );
+      setUserFonts((prev) => [entry, ...prev.filter((f) => f.id !== id)]);
+      setFontUrls((prev) => ({ ...prev, [id]: url }));
+      setShelfNotice({ kind: "ok", text: `已导入字体：${family}` });
+    } catch (e) {
+      setShelfNotice({ kind: "error", text: `字体导入失败：${String(e)}` });
+    } finally {
+      setFontBusy(false);
+    }
+  }, [fontBusy]);
+
+  const handleDeleteFont = useCallback(
+    async (id: string) => {
+      const font = userFonts.find((f) => f.id === id);
+      setFontBusy(true);
+      try {
+        await getFontStore().deleteFont(id);
+        if (fontUrls[id]) URL.revokeObjectURL(fontUrls[id]);
+        setUserFonts((prev) => prev.filter((f) => f.id !== id));
+        setFontUrls((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        if (font && settings.customFontName === font.family) {
+          setSettings((s) => ({ ...s, customFontName: undefined }));
+        }
+      } catch (e) {
+        setShelfNotice({ kind: "error", text: `字体删除失败：${String(e)}` });
+      } finally {
+        setFontBusy(false);
+      }
+    },
+    [fontUrls, userFonts, settings.customFontName]
+  );
 
   // 导入结果 toast：展示 3 秒后用 1 秒淡出，期间不拦截鼠标
   useEffect(() => {
@@ -458,18 +578,149 @@ export default function App() {
     handleFootnoteClose();
   }, [handleFootnoteClose]);
 
-  // ---- 目录跳转 ----
+  // ---- 目录/书内链接跳转 ----
   const handleTocNavigate = (href: string): void => {
     if (!book) return;
     const idx = spineIndexForPath(book, href);
     const { anchor: a } = splitHref(href);
     if (idx >= 0) {
+      setBookmarkMenuOpen(false);
+      // 记录跳转前阅读进度，供“返回”按钮回退（最多 10 步）
+      if (view === "reader" && chapterState.status === "ready" && !chapterState.empty) {
+        const readingAnchor = readerRef.current?.getReadingAnchor();
+        setReaderHistory((prev) => [
+          ...prev.slice(-9),
+          {
+            spineIndex,
+            page: chapterState.currentPage,
+            anchor:
+              readingAnchor && readingAnchor.index >= 0
+                ? { index: readingAnchor.index, ratio: readingAnchor.ratio }
+                : null,
+          },
+        ]);
+      }
       setSpineIndex(idx);
       setAnchor(a || undefined);
       setAnchorNonce((n) => n + 1);
       // 保持目录展开：方便连续选择章节；用 ✕/遮罩/Esc 关闭
     }
   };
+
+  const handleHistoryBack = useCallback(() => {
+    const pos = readerHistory[readerHistory.length - 1];
+    if (!pos) return;
+    setReaderHistory((prev) => prev.slice(0, -1));
+    // 恢复跳转前位置：章节 + 页码 + 内容锚点
+    setSpineIndex(pos.spineIndex);
+    setAnchor(undefined);
+    setAnchorNonce((n) => n + 1);
+    initialPagePendingRef.current = true;
+    initialPageRef.current = pos.page ?? 0;
+    setInitialAnchor(pos.anchor ?? null);
+    setFootnote(null);
+    setTocOpen(false);
+    setMenuOpen(false);
+  }, [readerHistory]);
+
+  // ---- 书签 ----
+  const currentBookmarks = currentShelfId
+    ? (shelfEntries.find((entry) => entry.id === currentShelfId)?.bookmarks ?? [])
+    : [];
+  const isCurrentPageBookmarked =
+    chapterState.status === "ready" &&
+    currentBookmarks.some(
+      (bookmark) =>
+        bookmark.spineIndex === spineIndex && bookmark.page === chapterState.currentPage
+    );
+  // 书签按书中实际顺序排列，并补上章节标题供右下角展示
+  const sortedBookmarks = book
+    ? [...currentBookmarks]
+        .sort(
+          (a, b) =>
+            a.spineIndex - b.spineIndex ||
+            a.page - b.page ||
+            (a.anchorIndex ?? 0) - (b.anchorIndex ?? 0)
+        )
+        .map((bookmark) => ({
+          ...bookmark,
+          chapterLabel: chapterLabelForIndex(book, bookmark.spineIndex),
+        }))
+    : [];
+
+  const handleToggleBookmark = useCallback(() => {
+    if (!currentShelfId || chapterState.status !== "ready") return;
+    const existing = currentBookmarks.find(
+      (bookmark) =>
+        bookmark.spineIndex === spineIndex && bookmark.page === chapterState.currentPage
+    );
+    let next: Bookmark[];
+    if (existing) {
+      next = currentBookmarks.filter((bookmark) => bookmark.id !== existing.id);
+    } else {
+      const anchor = readerRef.current?.getReadingAnchor();
+      const text = readerRef.current?.getAnchorText() ?? "";
+      next = [
+        ...currentBookmarks,
+        {
+          id: `bm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          spineIndex,
+          page: chapterState.currentPage,
+          anchorIndex: anchor?.index ?? null,
+          anchorRatio: anchor?.ratio ?? null,
+          text: text.slice(0, 80),
+          createdAtMs: Date.now(),
+        },
+      ];
+    }
+    // 乐观更新 UI，再落盘
+    setShelfEntries((prev) =>
+      prev.map((entry) => (entry.id === currentShelfId ? { ...entry, bookmarks: next } : entry))
+    );
+    void getShelfStore()
+      .setBookmarks(currentShelfId, next)
+      .then((saved) =>
+        setShelfEntries((prev) =>
+          prev.map((entry) => (entry.id === currentShelfId ? saved : entry))
+        )
+      )
+      .catch((error) => setShelfError(`书签保存失败：${String(error)}`));
+  }, [currentShelfId, currentBookmarks, spineIndex, chapterState]);
+
+  const handleSelectBookmark = useCallback(
+    (bookmarkId: string) => {
+      const bookmark = currentBookmarks.find((item) => item.id === bookmarkId);
+      if (!bookmark || chapterState.status !== "ready") return;
+      // 书签跳转也进入跳转历史，支持 ↩ 撤回
+      const anchor = readerRef.current?.getReadingAnchor();
+      setReaderHistory((prev) => [
+        ...prev.slice(-9),
+        {
+          spineIndex,
+          page: chapterState.currentPage,
+          anchor:
+            anchor && anchor.index >= 0
+              ? { index: anchor.index, ratio: anchor.ratio }
+              : null,
+        },
+      ]);
+      setSpineIndex(bookmark.spineIndex);
+      setAnchor(undefined);
+      setAnchorNonce((n) => n + 1);
+      initialPagePendingRef.current = true;
+      initialPageRef.current = bookmark.page ?? 0;
+      setInitialAnchor(
+        bookmark.anchorIndex !== null && bookmark.anchorIndex !== undefined
+          ? { index: bookmark.anchorIndex, ratio: bookmark.anchorRatio ?? 0 }
+          : null
+      );
+      setBookmarkMenuOpen(false);
+      setFootnote(null);
+      setTocOpen(false);
+      setMenuOpen(false);
+    },
+    [currentBookmarks, spineIndex, chapterState]
+  );
 
   // ---- 外部链接：Tauri 用系统默认浏览器，浏览器开发模式开新标签页 ----
   const handleExternalLink = useCallback((rawUrl: string): void => {
@@ -506,6 +757,8 @@ export default function App() {
       fontWeight: settings.fontWeight,
       letterSpacingPx: settings.letterSpacingPx,
       wordSpacingPx: settings.wordSpacingPx,
+      customFontName: settings.customFontName,
+      customCss: settings.customCss,
     });
   }, [
     settings.fontSizePx,
@@ -514,6 +767,8 @@ export default function App() {
     settings.fontWeight,
     settings.letterSpacingPx,
     settings.wordSpacingPx,
+    settings.customFontName,
+    settings.customCss,
     uiScale,
   ]);
 
@@ -739,6 +994,7 @@ export default function App() {
     setFootnote(null);
     setTocOpen(false);
     setMenuOpen(false);
+    setBookmarkMenuOpen(false);
     setLogOpen(false);
     setDiagText(null);
     setView("shelf");
@@ -803,6 +1059,14 @@ export default function App() {
     return walk(book!.toc);
   })();
 
+  const renderUserFonts = useMemo(
+    () =>
+      userFonts
+        .filter((f) => fontUrls[f.id])
+        .map((f) => ({ family: f.family, url: fontUrls[f.id] })),
+    [userFonts, fontUrls]
+  );
+
   const logItems: LogItem[] = [
     ...(book?.issues ?? []).map((i) => ({ kind: i.kind, source: i.source, message: i.message })),
     ...runtimeIssues.map((m) => ({ kind: "reader_error", source: "render", message: m })),
@@ -818,6 +1082,23 @@ export default function App() {
         title={view === "reader" && ready ? book!.metadata.title : "EPUB 阅读器"}
         issueCount={logItems.length}
         onBackToShelf={view === "reader" ? handleBackToShelf : undefined}
+        onHistoryBack={view === "reader" ? handleHistoryBack : undefined}
+        canHistoryBack={readerHistory.length > 0}
+        onToggleBookmark={view === "reader" ? handleToggleBookmark : undefined}
+        isBookmarked={view === "reader" && isCurrentPageBookmarked}
+        onOpenBookmarks={view === "reader" ? () => setBookmarkMenuOpen(true) : undefined}
+        onCloseBookmarks={() => setBookmarkMenuOpen(false)}
+        bookmarkMenuOpen={view === "reader" && bookmarkMenuOpen}
+        bookmarks={view === "reader" ? sortedBookmarks : []}
+        onSelectBookmark={handleSelectBookmark}
+        onOpenToc={
+          view === "reader"
+            ? () => {
+                setTocOpen(true);
+                setMenuOpen(false);
+              }
+            : undefined
+        }
         onToggleMenu={view === "reader" ? () => setMenuOpen((v) => !v) : undefined}
         onToggleLog={view === "reader" ? handleToggleLog : undefined}
       />
@@ -853,12 +1134,20 @@ export default function App() {
                   fontWeight={settings.fontWeight}
                   letterSpacingPx={settings.letterSpacingPx}
                   wordSpacingPx={settings.wordSpacingPx}
+                  customFontName={settings.customFontName}
+                  customCss={settings.customCss}
+                  userFonts={userFonts}
+                  fontBusy={fontBusy}
+                  onImportFont={(file) => void handleImportFont(file)}
+                  onDeleteFont={(id) => void handleDeleteFont(id)}
+                  onCustomFontNameChange={(name) =>
+                    setSettings((s2) => ({ ...s2, customFontName: name }))
+                  }
+                  onCustomCssChange={(css) =>
+                    setSettings((s2) => ({ ...s2, customCss: css }))
+                  }
                   onOpenFile={() => {
                     fileInputRef.current?.click();
-                    setMenuOpen(false);
-                  }}
-                  onOpenToc={() => {
-                    setTocOpen(true);
                     setMenuOpen(false);
                   }}
                   onFontDec={() => adjustFont(-2)}
@@ -909,6 +1198,7 @@ export default function App() {
                   anchor={anchor}
                   anchorNonce={anchorNonce}
                   settings={settings}
+                  userFonts={renderUserFonts}
                   onPageState={onPageState}
                   onRequestChapter={handleRequestChapter}
                   onIssues={handleIssues}

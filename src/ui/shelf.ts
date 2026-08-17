@@ -1,5 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** 书签：记录跳转回阅读进度用。 */
+export interface Bookmark {
+  id: string;
+  spineIndex: number;
+  page: number;
+  anchorIndex: number | null;
+  anchorRatio: number | null;
+  /** 创建时锚点所在行文字，用于列表展示 */
+  text: string;
+  createdAtMs: number;
+}
+
 /** 书架条目（与 Rust ShelfEntry 字段一致，camelCase 序列化）。 */
 export interface ShelfEntry {
   id: string;
@@ -19,6 +31,8 @@ export interface ShelfEntry {
   contentHash?: string;
   /** 新导入且尚未打开过：书架显示“新”标记，第一次打开后清除 */
   isNew: boolean;
+  /** 该书签（随书删除；旧条目缺省为空数组） */
+  bookmarks?: Bookmark[];
 }
 
 export interface ShelfProgressPatch {
@@ -65,6 +79,8 @@ export interface ShelfStore {
   updateProgress(id: string, patch: ShelfProgressPatch): Promise<ShelfEntry>;
   /** 第一次从书架打开：清除“新”标记 */
   markOpened(id: string): Promise<ShelfEntry>;
+  /** 写入整本书的书签列表（随书删除） */
+  setBookmarks(id: string, bookmarks: Bookmark[]): Promise<ShelfEntry>;
   deleteBook(id: string): Promise<void>;
 }
 
@@ -223,6 +239,7 @@ class IndexedDbShelfStore implements ShelfStore {
         anchorRatio: existing?.anchorRatio ?? input.entry.anchorRatio ?? null,
         contentHash,
         isNew: existing?.isNew ?? input.entry.isNew ?? true,
+        bookmarks: existing?.bookmarks ?? input.entry.bookmarks ?? [],
       };
       const tx = db.transaction(["meta", "books", "covers"], "readwrite");
       tx.objectStore("meta").put(entry);
@@ -319,6 +336,22 @@ class IndexedDbShelfStore implements ShelfStore {
     }
   }
 
+  async setBookmarks(id: string, bookmarks: Bookmark[]): Promise<ShelfEntry> {
+    const db = await openDb();
+    try {
+      const tx = db.transaction("meta", "readwrite");
+      const store = tx.objectStore("meta");
+      const current = (await reqAsPromise(store.get(id))) as ShelfEntry | undefined;
+      if (!current) throw new Error("书架中没有这本书");
+      const next: ShelfEntry = { ...current, bookmarks };
+      store.put(next);
+      await txDone(tx);
+      return next;
+    } finally {
+      db.close();
+    }
+  }
+
   async deleteBook(id: string): Promise<void> {
     const db = await openDb();
     try {
@@ -404,6 +437,10 @@ class TauriShelfStore implements ShelfStore {
 
   async markOpened(id: string): Promise<ShelfEntry> {
     return invoke<ShelfEntry>("shelf_mark_opened", { bookId: id });
+  }
+
+  async setBookmarks(id: string, bookmarks: Bookmark[]): Promise<ShelfEntry> {
+    return invoke<ShelfEntry>("shelf_set_bookmarks", { bookId: id, bookmarks });
   }
 
   async deleteBook(id: string): Promise<void> {
