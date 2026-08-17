@@ -59,8 +59,8 @@ struct ShelfEntry {
     file_name: String,
     file_size: u64,
     cover_mime: String,
-    added_at_ms: u128,
-    last_read_at_ms: u128,
+    added_at_ms: u64,
+    last_read_at_ms: u64,
     spine_index: usize,
     page: usize,
     progress_pct: u32,
@@ -82,7 +82,7 @@ struct BookmarkEntry {
     anchor_index: Option<usize>,
     anchor_ratio: Option<f64>,
     text: String,
-    created_at_ms: u128,
+    created_at_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -298,7 +298,7 @@ fn shelf_commit_book(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0);
     let entry = ShelfEntry {
         id: book_id,
@@ -380,7 +380,7 @@ fn shelf_update_entry(
     app: AppHandle,
     state: State<'_, ShelfWriteState>,
     book_id: String,
-    last_read_at_ms: u128,
+    last_read_at_ms: u64,
     spine_index: usize,
     page: usize,
     progress_pct: u32,
@@ -476,7 +476,7 @@ struct FontEntry {
     file_name: String,
     family: String,
     size: u64,
-    added_at_ms: u128,
+    added_at_ms: u64,
 }
 
 fn fonts_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -572,7 +572,7 @@ fn fonts_import_raw(
     entries.retain(|e| e.id != id);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let entry = FontEntry {
         id,

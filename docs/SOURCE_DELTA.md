@@ -52,6 +52,7 @@
 | `src/render/paginator.ts` | 更新 | B-022：样式表类规则中的水平百分比 margin 也按 C-16 页面相对布局处理，避免目录页 70% margin 被叠加版心 base 产生残页 | Chromium 赤月目录页 1/1、sw=1390；全量 174/174 | 是 |
 | `docs/BUGFIX_LOG.md` | 更新 | 新增 B-022 记录 | 人工检查 | 是 |
 | `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 版本元数据升至 **0.1.6**（0.1.6 构建准备） | npx vitest 174/174、tsc/vite build | 是 |
+| `src-tauri/src/lib.rs` | 更新（隔离副本已含） | `shelf_update_entry` 等 IPC 入参使用 `u64` 而非 `u128`，避免 Tauri “u128 is not supported” 保存进度失败；同时 `as_millis()` 返回 `u128` 改为 `as u64` 以匹配字段；**真实源仓 `eupb-read` 仍是 u128，必须由用户同步当前隔离副本后再编译** | 当前 WSL 无 u128；`cargo fmt` 通过 | 是 |
 | `docs/tasks/active/custom-fonts-css-and-select-all.md` | 新增 | 记录本轮功能范围、实现、验证与待确认项 | 人工检查 | 是 |
 | `docs/tasks/TEMPLATE.md` | 更新 | 状态枚举增加“已发布归档” | 人工检查 | 是 |
 | `docs/SOURCE_DELTA.md` | 更新 | 基线推进至 `e349ab5`，记录本轮纯文档差异 | 与真实源仓只读比较 | 是 |
