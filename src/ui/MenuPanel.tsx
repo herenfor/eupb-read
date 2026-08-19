@@ -41,6 +41,11 @@ export interface MenuPanelProps {
   onClose(): void;
 }
 
+/** 只有草稿与已保存值不同才允许触发一次整章重载。 */
+export function isCustomCssDraftDirty(draft: string, saved: string): boolean {
+  return draft !== saved;
+}
+
 const UI_SCALES: Array<{ value: number; label: string }> = [
   { value: 0.85, label: "小" },
   { value: 1, label: "标准" },
@@ -150,7 +155,16 @@ function SliderRow(props: SliderRowProps) {
 /** 左侧滑出的二级菜单：收纳文件/导航/正文排版/界面/外观等操作。 */
 export function MenuPanel(props: MenuPanelProps) {
   const [detailOpen, setDetailOpen] = useState(false);
+  const [customCssDraft, setCustomCssDraft] = useState(props.customCss ?? "");
   const fontInputRef = useRef<HTMLInputElement>(null);
+
+  // 新挂载从已保存值开始；恢复默认或其他外部设置变化也应覆盖草稿。
+  useEffect(() => {
+    setCustomCssDraft(props.customCss ?? "");
+  }, [props.customCss]);
+
+  const savedCustomCss = props.customCss ?? "";
+  const customCssDirty = isCustomCssDraftDirty(customCssDraft, savedCustomCss);
   return (
     <div className="menu-panel">
       <div className="menu-head">
@@ -281,10 +295,18 @@ export function MenuPanel(props: MenuPanelProps) {
         className="custom-css-input"
         rows={5}
         placeholder="/* 这里写任意 CSS，会注入到正文顶部样式之后，可覆盖阅读器规则 */\nbody { color: red !important; }"
-        value={props.customCss ?? ""}
-        onChange={(e) => props.onCustomCssChange(e.target.value)}
+        value={customCssDraft}
+        onChange={(e) => setCustomCssDraft(e.target.value)}
         spellCheck={false}
       />
+      <button
+        className="menu-item"
+        onClick={() => props.onCustomCssChange(customCssDraft)}
+        disabled={!customCssDirty}
+        title={customCssDirty ? "保存草稿并重新应用自定义 CSS" : "没有未保存的 CSS 修改"}
+      >
+        保存并应用
+      </button>
       </div>
       )}
 

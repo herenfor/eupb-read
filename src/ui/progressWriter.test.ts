@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ShelfProgressWriter } from "./progressWriter";
 import type { ShelfProgressPatch } from "./shelf";
 
@@ -50,6 +50,29 @@ describe("ShelfProgressWriter", () => {
     expect(writes).toEqual(["a:2", "b:4"]);
   });
 
+  it("每本书的首次稳定进度都立即写入", async () => {
+    vi.useFakeTimers();
+    try {
+      const writes: string[] = [];
+      const writer = new ShelfProgressWriter(async (id, value) => {
+        writes.push(`${id}:${value.page}`);
+      }, { debounceMs: 100 });
+
+      writer.enqueue("a", patch(1));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writes).toEqual(["a:1"]);
+
+      writer.enqueue("b", patch(2));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writes).toEqual(["a:1", "b:2"]);
+      writer.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("flush 报告写入错误，但后续写入仍可继续", async () => {
     let fail = true;
     const writes: number[] = [];
@@ -64,5 +87,34 @@ describe("ShelfProgressWriter", () => {
     await writer.flush();
     expect(writes).toEqual([2]);
   });
-});
 
+  it("活跃写入期间的新位置等待 debounce，且只写最新值", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = deferred();
+      const writes: number[] = [];
+      const writer = new ShelfProgressWriter(async (_id, value) => {
+        writes.push(value.page);
+        if (writes.length === 1) await first.promise;
+      }, { debounceMs: 100 });
+
+      writer.enqueue("book", patch(1));
+      await Promise.resolve();
+      writer.enqueue("book", patch(2));
+      writer.enqueue("book", patch(3));
+      first.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writes).toEqual([1]);
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(writes).toEqual([1]);
+      await vi.advanceTimersByTimeAsync(1);
+      await writer.flush();
+      expect(writes).toEqual([1, 3]);
+      writer.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

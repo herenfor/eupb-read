@@ -1,13 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../render/settings";
 import {
   filterShelfEntries,
   formatShelfTime,
-  getShelfStore,
   sortShelfEntries,
   type ShelfEntry,
   type ShelfSort,
 } from "./shelf";
+import {
+  descriptorForEntry,
+  isAbortError,
+  legacyThumbnailProvider,
+  loadThumbnailAsset,
+  thumbnailTaskQueue,
+  type ThumbnailProvider,
+} from "./thumbnail";
 
 export type ShelfDensity = "comfortable" | "standard" | "compact";
 
@@ -19,48 +26,181 @@ export interface ShelfViewProps {
   onThemeChange(theme: Theme): void;
   onOpen(id: string): void;
   onImport(): void;
+  onImportArchive(): void;
+  onExportArchive(): void;
   onDelete(id: string): void;
   /** 批量删除（选中多本时由确认弹窗调用） */
   onDeleteMany(ids: string[]): void;
+  /** Optional native cache/source-cover bridge; browser compatibility uses ShelfStore. */
+  thumbnailProvider?: ThumbnailProvider;
 }
 
-function Cover({ entry }: { entry: ShelfEntry }) {
+const Cover = memo(function Cover({
+  entry,
+  provider,
+}: {
+  entry: ShelfEntry;
+  provider: ThumbnailProvider;
+}) {
   const [url, setUrl] = useState<string | null>(null);
   const loadedFor = useRef<string>("");
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const [nearViewport, setNearViewport] = useState(false);
 
   useEffect(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([item]) => {
+        if (!item?.isIntersecting) return;
+        setNearViewport(true);
+        observer.disconnect();
+      },
+      // The shelf itself scrolls; one viewport of look-ahead keeps scrolling
+      // smooth without starting work for the whole bookcase.
+      { root: null, rootMargin: "100% 0px", threshold: 0 }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!nearViewport || entry.available === false) return;
     let objectUrl: string | null = null;
-    let cancelled = false;
+    const controller = new AbortController();
     loadedFor.current = entry.id;
-    void getShelfStore()
-      .readCover(entry.id)
-      .then((bytes) => {
-        if (cancelled || !bytes || bytes.byteLength === 0) return;
-        const mime = entry.coverMime || "image/jpeg";
-        objectUrl = URL.createObjectURL(
-          new Blob([bytes.slice().buffer as ArrayBuffer], { type: mime })
+    setUrl(null);
+    void thumbnailTaskQueue
+      .enqueue(
+        (signal) => loadThumbnailAsset(provider, descriptorForEntry(entry), signal),
+        controller.signal
+      )
+      .then((asset) => {
+        if (controller.signal.aborted || !asset || asset.bytes.byteLength === 0) return;
+        const nextUrl = URL.createObjectURL(
+          new Blob([asset.bytes.slice().buffer as ArrayBuffer], {
+            type: asset.mime || entry.coverMime || "image/jpeg",
+          })
         );
-        setUrl(objectUrl);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+        objectUrl = nextUrl;
+        setUrl(nextUrl);
       })
-      .catch(() => {
-        /* 封面读取失败按无封面处理 */
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) {
+          /* 封面读取失败按无封面处理 */
+        }
       });
     return () => {
-      cancelled = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [entry.id, entry.coverMime]);
+  }, [entry.id, entry.contentHash, entry.coverMime, entry.thumbnailMime, entry.available, nearViewport, provider]);
 
-  if (!url) {
+  if (!url || loadedFor.current !== entry.id) {
     return (
-      <div className="shelf-cover fallback" aria-hidden="true">
+      <div ref={nodeRef} className="shelf-cover fallback" aria-hidden="true">
         <span className="fallback-mark">{entry.title.trim().charAt(0) || "书"}</span>
         <span className="fallback-title">{entry.title}</span>
       </div>
     );
   }
   return <img className="shelf-cover" src={url} alt={entry.title} loading="lazy" />;
+});
+
+interface ShelfCardProps {
+  entry: ShelfEntry;
+  selected: boolean;
+  selectionMode: boolean;
+  provider: ThumbnailProvider;
+  onOpen(id: string): void;
+  onToggleSelected(id: string): void;
+  onDeleteRequest(entry: ShelfEntry): void;
 }
+
+const ShelfCard = memo(function ShelfCard(props: ShelfCardProps) {
+  const { entry } = props;
+  const last = entry.lastReadAtMs > 0 ? entry.lastReadAtMs : entry.addedAtMs;
+  const recent = Date.now() - entry.lastReadAtMs < 1000 * 60 * 60 * 24 * 7;
+  return (
+    <div
+      className={`shelf-card${props.selected ? " selected" : ""}${entry.available === false ? " unavailable" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        if (props.selectionMode) props.onToggleSelected(entry.id);
+        else props.onOpen(entry.id);
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        if (props.selectionMode) props.onToggleSelected(entry.id);
+        else props.onOpen(entry.id);
+      }}
+      title={`${entry.title}${entry.creator ? ` · ${entry.creator}` : ""}`}
+    >
+      <div className="shelf-cover-box">
+        <Cover entry={entry} provider={props.provider} />
+        {props.selectionMode && (
+          <span className="shelf-select-mark">{props.selected ? "✓" : ""}</span>
+        )}
+        {entry.progressPct > 0 && (
+          <div className="shelf-progress-wrap">
+            <div className="shelf-progress">
+              <div
+                className="shelf-progress-fill"
+                style={{ width: `${Math.min(100, entry.progressPct)}%` }}
+              />
+            </div>
+            <span className="shelf-progress-pct">{entry.progressPct}%</span>
+          </div>
+        )}
+        {entry.available === false ? (
+          <span className="shelf-missing">源文件缺失 · 点击重新定位</span>
+        ) : (
+          <>
+            {recent && entry.progressPct > 0 && <span className="shelf-continue">继续阅读</span>}
+            {entry.isNew && !props.selectionMode && <span className="shelf-new">新</span>}
+          </>
+        )}
+        {!props.selectionMode && (
+          <span
+            className="shelf-delete"
+            title="从书架删除"
+            role="button"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onDeleteRequest(entry);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.stopPropagation();
+                props.onDeleteRequest(entry);
+              }
+            }}
+          >
+            ✕
+          </span>
+        )}
+      </div>
+      <div className="shelf-card-title">{entry.title}</div>
+      <div className="shelf-card-meta">
+        {entry.creator ? <span className="shelf-card-creator">{entry.creator}</span> : null}
+        <span className="shelf-card-time">
+          {formatShelfTime(last) || "刚刚"}
+          {entry.progressPct > 0 ? " · 读过" : " · 未读"}
+        </span>
+      </div>
+    </div>
+  );
+});
 
 interface ShelfSelectOption {
   value: string;
@@ -141,15 +281,16 @@ export function ShelfView(props: ShelfViewProps) {
     const q = filterShelfEntries(props.entries, query);
     return sortShelfEntries(q, sort);
   }, [props.entries, query, sort]);
+  const thumbnailProvider = props.thumbnailProvider ?? legacyThumbnailProvider;
 
-  const toggleSelected = (id: string): void => {
+  const toggleSelected = useCallback((id: string): void => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }, []);
 
   const enterSelection = (): void => {
     setSelectedIds(new Set());
@@ -161,7 +302,11 @@ export function ShelfView(props: ShelfViewProps) {
     setSelectedIds(new Set());
   };
 
-  const now = Date.now();
+  const onDeleteRequest = useCallback((entry: ShelfEntry): void => {
+    setDeleteTargets([entry]);
+  }, []);
+
+  const onToggleSelected = toggleSelected;
 
   return (
     <div
@@ -249,6 +394,22 @@ export function ShelfView(props: ShelfViewProps) {
                 onChange={(v) => props.onThemeChange(v as Theme)}
               />
               <button
+                className="shelf-archive-btn tb-btn"
+                onClick={props.onImportArchive}
+                disabled={props.busy}
+                title="导入可跨平台同步的阅读进度、书签和设置"
+              >
+                导入存档
+              </button>
+              <button
+                className="shelf-archive-btn tb-btn"
+                onClick={props.onExportArchive}
+                disabled={props.busy || props.entries.length === 0}
+                title="导出不含本机路径和 EPUB 正文的可移植存档"
+              >
+                导出存档
+              </button>
+              <button
                 className="shelf-batch-btn tb-btn"
                 onClick={enterSelection}
                 disabled={props.busy || props.entries.length === 0}
@@ -287,78 +448,18 @@ export function ShelfView(props: ShelfViewProps) {
         </div>
       ) : (
         <div className="shelf-grid">
-          {visible.map((entry) => {
-            const last = entry.lastReadAtMs > 0 ? entry.lastReadAtMs : entry.addedAtMs;
-            const recent = now - entry.lastReadAtMs < 1000 * 60 * 60 * 24 * 7;
-            return (
-              <div
-                key={entry.id}
-                className={`shelf-card${selectedIds.has(entry.id) ? " selected" : ""}`}
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  if (selectionMode) toggleSelected(entry.id);
-                  else props.onOpen(entry.id);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  if (selectionMode) toggleSelected(entry.id);
-                  else props.onOpen(entry.id);
-                }}
-                title={`${entry.title}${entry.creator ? ` · ${entry.creator}` : ""}`}
-              >
-                <div className="shelf-cover-box">
-                  <Cover entry={entry} />
-                  {selectionMode && (
-                    <span className="shelf-select-mark">{selectedIds.has(entry.id) ? "✓" : ""}</span>
-                  )}
-                  {entry.progressPct > 0 && (
-                    <div className="shelf-progress-wrap">
-                      <div className="shelf-progress">
-                        <div
-                          className="shelf-progress-fill"
-                          style={{ width: `${Math.min(100, entry.progressPct)}%` }}
-                        />
-                      </div>
-                      <span className="shelf-progress-pct">{entry.progressPct}%</span>
-                    </div>
-                  )}
-                  {recent && entry.progressPct > 0 && (
-                    <span className="shelf-continue">继续阅读</span>
-                  )}
-                  {entry.isNew && !selectionMode && <span className="shelf-new">新</span>}
-                  {!selectionMode && (
-                    <span
-                      className="shelf-delete"
-                      title="从书架删除"
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!props.busy) setDeleteTargets([entry]);
-                      }}
-                      onKeyDown={(e) => {
-                        if ((e.key === "Enter" || e.key === " ") && !props.busy) {
-                          e.stopPropagation();
-                          if (!props.busy) setDeleteTargets([entry]);
-                        }
-                      }}
-                    >
-                      ✕
-                    </span>
-                  )}
-                </div>
-                <div className="shelf-card-title">{entry.title}</div>
-                <div className="shelf-card-meta">
-                  {entry.creator ? <span className="shelf-card-creator">{entry.creator}</span> : null}
-                  <span className="shelf-card-time">
-                    {formatShelfTime(last) || "刚刚"}
-                    {entry.progressPct > 0 ? " · 读过" : " · 未读"}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+          {visible.map((entry) => (
+            <ShelfCard
+              key={entry.id}
+              entry={entry}
+              selected={selectedIds.has(entry.id)}
+              selectionMode={selectionMode}
+              provider={thumbnailProvider}
+              onOpen={props.onOpen}
+              onToggleSelected={onToggleSelected}
+              onDeleteRequest={onDeleteRequest}
+            />
+          ))}
         </div>
       )}
 

@@ -104,7 +104,10 @@ body {
 /* ---- 工具栏 ---- */
 .toolbar {
   display: grid;
-  grid-template-columns: 1fr minmax(0, 42%) 1fr;
+  /* Keep side tracks symmetric so a title that fits is centered in the
+     toolbar, while the measured side width prevents buttons overflowing into
+     it at narrow windows. */
+  grid-template-columns: var(--toolbar-side-width, max-content) minmax(0, 1fr) var(--toolbar-side-width, max-content);
   align-items: center;
   gap: 8px;
   padding: 6px 14px;
@@ -145,6 +148,25 @@ body {
   overflow: hidden;
   white-space: normal;
   word-break: break-all;
+}
+
+/* At narrow reader widths keep the toolbar title on one line so its
+   truncation is visible. The full title remains available through title=. */
+@media (max-width: 720px) {
+  /* When the title must ellipsize, retain asymmetric max-content tracks so
+     the larger control group does not force an equal side track outside the
+     viewport. Centering is only a requirement while the title fits. */
+  .toolbar {
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+  }
+
+  .tb-title {
+    display: block;
+    -webkit-line-clamp: unset;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    word-break: normal;
+  }
 }
 
 .tb-btn {
@@ -673,6 +695,17 @@ body {
   padding-left: 20px;
 }
 
+/* 多看脚注的 ol 在书籍 iframe 中由书 CSS 隐藏编号；富内容复制到 UI 弹层后，
+   需要在宿主页面保留同一语义，避免 li[value] 把注释序号重新绘制出来。 */
+.footnote-html ol.duokan-footnote-content,
+.footnote-html ol.duokan-footnote-content > li {
+  list-style: none;
+}
+
+.footnote-html ol.duokan-footnote-content {
+  padding-left: 0;
+}
+
 .footnote-html img {
   display: block;
   max-width: 100%;
@@ -681,11 +714,16 @@ body {
   border-radius: 6px;
 }
 
-/* 图片注释：让图片填满列表标号（如 19）左侧的空白，左边对齐卡片内容边缘 */
+/* 普通有序/无序列表仍为图片保留列表标记的缩进；多看脚注已清除标记，
+   覆盖为 0，避免图片继续向左偏移。 */
 .footnote-html li div:has(> img) {
   margin-left: -20px;
   margin-right: 0;
   max-width: none !important;
+}
+
+.footnote-html ol.duokan-footnote-content > li > div:has(> img) {
+  margin-left: 0;
 }
 
 .footnote-html a {
@@ -1126,6 +1164,9 @@ body {
   text-align: left;
   cursor: pointer;
   outline: none;
+  /* 保留响应式网格尺寸，同时让 WebView 跳过远离视口卡片的子树布局/绘制。 */
+  content-visibility: auto;
+  contain-intrinsic-block-size: 300px;
 }
 
 .shelf-card:focus-visible {
@@ -1252,6 +1293,27 @@ body {
 
 .shelf-continue + .shelf-new {
   top: 34px;
+}
+
+.shelf-missing {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 38px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--error) 88%, #000);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28);
+}
+
+.shelf-card.unavailable .shelf-cover {
+  filter: grayscale(0.7);
+  opacity: 0.62;
 }
 
 .shelf-delete {
@@ -1459,6 +1521,28 @@ body {
 
 .tb-back {
   font-weight: 600;
+}
+
+.toolbar-history {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--btn-tint);
+}
+
+.toolbar-history .tb-btn {
+  min-width: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.toolbar-history .tb-btn + .tb-btn {
+  border-left: 1px solid var(--panel-border);
 }
 
 /* ---- 全局忙遮罩（导入/打开/删除，防重复操作） ---- */

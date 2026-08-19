@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { LibraryRecord } from "./libraryArchive";
+import type { ThumbnailAsset, ThumbnailProvider } from "./thumbnail";
 
 /** 书签：记录跳转回阅读进度用。 */
 export interface Bookmark {
@@ -33,6 +35,22 @@ export interface ShelfEntry {
   isNew: boolean;
   /** 该书签（随书删除；旧条目缺省为空数组） */
   bookmarks?: Bookmark[];
+  /** 链接式书库的源文件当前是否可用；浏览器旧后端缺省视为可用。 */
+  available?: boolean;
+  /** 设备缩略图缓存的实际媒体类型；不进入可移植存档。 */
+  thumbnailMime?: string;
+}
+
+export interface LinkedImportItemResult {
+  inputIndex: number;
+  status: "saved" | "duplicate" | "failed";
+  contentHash?: string;
+  record?: ShelfEntry;
+  error?: string;
+}
+
+export interface LinkedImportBatchResult {
+  results: LinkedImportItemResult[];
 }
 
 export interface ShelfProgressPatch {
@@ -60,8 +78,6 @@ export interface ShelfSaveInput {
   bytes: Uint8Array;
   coverBytes?: Uint8Array;
   coverMime?: string;
-  /** Tauri 原生拖放来源；后端可直接复制，浏览器后端忽略。 */
-  sourcePath?: string;
 }
 
 export interface ShelfSaveResult {
@@ -72,6 +88,8 @@ export interface ShelfSaveResult {
 export interface ShelfStore {
   list(): Promise<ShelfEntry[]>;
   save(input: ShelfSaveInput): Promise<ShelfSaveResult>;
+  /** Tauri 链接式批量导入；浏览器后端不支持本地持久路径。 */
+  importPaths(paths: string[]): Promise<LinkedImportBatchResult>;
   readBook(id: string): Promise<Uint8Array>;
   readCover(id: string): Promise<Uint8Array | null>;
   /** 只为旧条目补录内容指纹，不得改动阅读进度或其他元数据。 */
@@ -81,6 +99,13 @@ export interface ShelfStore {
   markOpened(id: string): Promise<ShelfEntry>;
   /** 写入整本书的书签列表（随书删除） */
   setBookmarks(id: string, bookmarks: Bookmark[]): Promise<ShelfEntry>;
+  /** 重新绑定同一内容指纹的源 EPUB；哈希不一致必须拒绝。 */
+  relink(id: string, sourcePath: string): Promise<ShelfEntry>;
+  /** 用已经校验并合并的可移植记录替换状态；设备绑定不变。 */
+  replacePortableRecords(records: LibraryRecord[]): Promise<ShelfEntry[]>;
+  readThumbnail(contentHash: string, mime?: string): Promise<ThumbnailAsset | null>;
+  writeThumbnail(contentHash: string, asset: ThumbnailAsset): Promise<void>;
+  deleteThumbnail(contentHash: string): Promise<void>;
   deleteBook(id: string): Promise<void>;
 }
 
@@ -214,7 +239,9 @@ class IndexedDbShelfStore implements ShelfStore {
       const duplicate = contentHash
         ? all.find((entry) => entry.contentHash === contentHash)
         : undefined;
-      if (duplicate) return { status: "duplicate", entry: duplicate };
+      if (duplicate && duplicate.available !== false) {
+        return { status: "duplicate", entry: duplicate };
+      }
       const existing = all.find((entry) => entry.id === input.entry.id);
       if (existing && existing.contentHash !== contentHash) {
         throw new Error("书本 ID 冲突，已拒绝覆盖现有书籍");
@@ -240,6 +267,7 @@ class IndexedDbShelfStore implements ShelfStore {
         contentHash,
         isNew: existing?.isNew ?? input.entry.isNew ?? true,
         bookmarks: existing?.bookmarks ?? input.entry.bookmarks ?? [],
+        available: true,
       };
       const tx = db.transaction(["meta", "books", "covers"], "readwrite");
       tx.objectStore("meta").put(entry);
@@ -261,6 +289,10 @@ class IndexedDbShelfStore implements ShelfStore {
     } finally {
       db.close();
     }
+  }
+
+  async importPaths(): Promise<LinkedImportBatchResult> {
+    throw new Error("浏览器预览无法持久引用本地路径，请使用文件选择器导入测试副本");
   }
 
   async readBook(id: string): Promise<Uint8Array> {
@@ -352,6 +384,52 @@ class IndexedDbShelfStore implements ShelfStore {
     }
   }
 
+  async relink(): Promise<ShelfEntry> {
+    throw new Error("浏览器预览不支持重新定位本地源文件");
+  }
+
+  async replacePortableRecords(records: LibraryRecord[]): Promise<ShelfEntry[]> {
+    const db = await openDb();
+    try {
+      const tx = db.transaction("meta", "readwrite");
+      const store = tx.objectStore("meta");
+      const current = (await reqAsPromise(store.getAll())) as ShelfEntry[];
+      const byHash = new Map(
+        current
+          .filter((entry) => typeof entry.contentHash === "string")
+          .map((entry) => [entry.contentHash as string, entry])
+      );
+      const next = records.map((record): ShelfEntry => {
+        const local = byHash.get(record.contentHash);
+        return {
+          ...record,
+          // 浏览器字节对象仍以旧 id 为 key；不能因导入存档改掉本地存储身份。
+          id: local?.id ?? record.contentHash,
+          fileSize: local?.fileSize ?? 0,
+          coverMime: local?.coverMime ?? "",
+          available: local ? local.available !== false : false,
+        };
+      });
+      for (const entry of next) store.put(entry);
+      await txDone(tx);
+      return next;
+    } finally {
+      db.close();
+    }
+  }
+
+  async readThumbnail(): Promise<ThumbnailAsset | null> {
+    return null;
+  }
+
+  async writeThumbnail(): Promise<void> {
+    // 浏览器测试后端不建立第二份派生缓存；封面仍受视口门控。
+  }
+
+  async deleteThumbnail(): Promise<void> {
+    // IndexedDB 删除书籍时会一并删除原有封面对象。
+  }
+
   async deleteBook(id: string): Promise<void> {
     const db = await openDb();
     try {
@@ -366,66 +444,45 @@ class IndexedDbShelfStore implements ShelfStore {
   }
 }
 
-// ---- Tauri 实现（书文件存应用数据目录，跨平台一致） ----
+// ---- Tauri 链接式实现（仅保存源路径绑定，不复制 EPUB 正文） ----
 
 class TauriShelfStore implements ShelfStore {
   async list(): Promise<ShelfEntry[]> {
-    return invoke<ShelfEntry[]>("shelf_list");
+    return invoke<ShelfEntry[]>("linked_library_list_records");
   }
 
-  async save(input: ShelfSaveInput): Promise<ShelfSaveResult> {
-    const bookId = input.entry.id;
-    if (input.sourcePath) {
-      await invoke("shelf_stage_book_path", {
-        bookId,
-        sourcePath: input.sourcePath,
-        expectedSize: input.bytes.byteLength,
-      });
-    } else {
-      await invoke("shelf_stage_book_raw", input.bytes, {
-        headers: { "x-book-id": bookId },
-      });
-    }
-    let hasCover = false;
-    if (input.coverBytes && input.coverBytes.byteLength > 0) {
-      try {
-        await invoke("shelf_stage_cover_raw", input.coverBytes, {
-          headers: { "x-book-id": bookId },
-        });
-        hasCover = true;
-      } catch {
-        // 封面保存失败不视为导入失败，书架用占位封面
-      }
-    }
-    return invoke<ShelfSaveResult>("shelf_commit_book", {
-      bookId,
-      title: input.entry.title,
-      creator: input.entry.creator,
-      fileName: input.entry.fileName,
-      fileSize: input.entry.fileSize,
-      contentHash: input.entry.contentHash ?? "",
-      coverMime: hasCover ? input.coverMime ?? "image/jpeg" : "",
-      hasCover,
-    });
+  async save(): Promise<ShelfSaveResult> {
+    throw new Error("桌面版必须通过源文件路径导入，不能复制 EPUB 到应用目录");
+  }
+
+  async importPaths(paths: string[]): Promise<LinkedImportBatchResult> {
+    return invoke<LinkedImportBatchResult>("linked_library_import_paths", { paths });
   }
 
   async readBook(id: string): Promise<Uint8Array> {
-    const buf = await invoke<ArrayBuffer>("shelf_read_book", { bookId: id });
+    const buf = await invoke<ArrayBuffer>("linked_library_read_source_raw", {
+      contentHash: id,
+    });
     return new Uint8Array(buf);
   }
 
   async readCover(id: string): Promise<Uint8Array | null> {
-    const buf = await invoke<ArrayBuffer>("shelf_read_cover", { bookId: id });
+    const buf = await invoke<ArrayBuffer>("linked_library_read_cover_raw", {
+      contentHash: id,
+    });
     return buf.byteLength > 0 ? new Uint8Array(buf) : null;
   }
 
   async setContentHash(id: string, contentHash: string): Promise<ShelfEntry> {
-    return invoke<ShelfEntry>("shelf_set_content_hash", { bookId: id, contentHash });
+    if (id !== contentHash) throw new Error("链接式书库的 ID 必须等于内容指纹");
+    const entry = (await this.list()).find((item) => item.id === id);
+    if (!entry) throw new Error("书架中没有这本书");
+    return entry;
   }
 
   async updateProgress(id: string, patch: ShelfProgressPatch): Promise<ShelfEntry> {
-    return invoke<ShelfEntry>("shelf_update_entry", {
-      bookId: id,
+    return invoke<ShelfEntry>("linked_library_update_progress", {
+      contentHash: id,
       lastReadAtMs: patch.lastReadAtMs,
       spineIndex: patch.spineIndex,
       page: patch.page,
@@ -436,15 +493,48 @@ class TauriShelfStore implements ShelfStore {
   }
 
   async markOpened(id: string): Promise<ShelfEntry> {
-    return invoke<ShelfEntry>("shelf_mark_opened", { bookId: id });
+    return invoke<ShelfEntry>("linked_library_mark_opened", { contentHash: id });
   }
 
   async setBookmarks(id: string, bookmarks: Bookmark[]): Promise<ShelfEntry> {
-    return invoke<ShelfEntry>("shelf_set_bookmarks", { bookId: id, bookmarks });
+    return invoke<ShelfEntry>("linked_library_update_bookmarks", {
+      contentHash: id,
+      bookmarks,
+    });
+  }
+
+  async relink(id: string, sourcePath: string): Promise<ShelfEntry> {
+    return invoke<ShelfEntry>("linked_library_relink", {
+      contentHash: id,
+      sourcePath,
+    });
+  }
+
+  async replacePortableRecords(records: LibraryRecord[]): Promise<ShelfEntry[]> {
+    return invoke<ShelfEntry[]>("linked_library_replace_records", { records });
+  }
+
+  async readThumbnail(contentHash: string, mime?: string): Promise<ThumbnailAsset | null> {
+    const buf = await invoke<ArrayBuffer>("linked_library_thumbnail_read", { contentHash });
+    if (buf.byteLength === 0) return null;
+    return { bytes: new Uint8Array(buf), mime: mime || "image/webp" };
+  }
+
+  async writeThumbnail(contentHash: string, asset: ThumbnailAsset): Promise<void> {
+    await invoke("linked_library_thumbnail_write_raw", asset.bytes, {
+      headers: {
+        "x-content-hash": contentHash,
+        "x-thumbnail-mime": asset.mime,
+      },
+    });
+  }
+
+  async deleteThumbnail(contentHash: string): Promise<void> {
+    await invoke("linked_library_thumbnail_delete", { contentHash });
   }
 
   async deleteBook(id: string): Promise<void> {
-    await invoke("shelf_delete_book", { bookId: id });
+    await invoke("linked_library_delete_record", { contentHash: id });
   }
 }
 
@@ -456,6 +546,30 @@ export function getShelfStore(): ShelfStore {
   }
   return cachedStore;
 }
+
+const thumbnailMimeByHash = new Map<string, string>();
+
+/** 视口缩略图桥：所有路径、缓存位置和 ZIP 条目仍由 ShelfStore/Rust 控制。 */
+export const shelfThumbnailProvider: ThumbnailProvider = {
+  async readCachedThumbnail(descriptor) {
+    const hash = descriptor.contentHash ?? descriptor.id;
+    return getShelfStore().readThumbnail(
+      hash,
+      descriptor.thumbnailMime || thumbnailMimeByHash.get(hash)
+    );
+  },
+  async readSourceCover(descriptor) {
+    const bytes = await getShelfStore().readCover(descriptor.id);
+    return bytes && bytes.byteLength > 0
+      ? { bytes, mime: descriptor.coverMime || "image/jpeg" }
+      : null;
+  },
+  async writeDerivedThumbnail(descriptor, asset) {
+    const hash = descriptor.contentHash ?? descriptor.id;
+    await getShelfStore().writeThumbnail(hash, asset);
+    thumbnailMimeByHash.set(hash, asset.mime);
+  },
+};
 
 /** 测试用：重置缓存的 store。 */
 export function resetShelfStoreForTest(): void {

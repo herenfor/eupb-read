@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { loadBook, spineIndexForPath, spineItemPath, DrmError } from "./core/book";
 import type { Book } from "./core/types";
-import { resolvePath, splitHref } from "./core/paths";
+import { isFragmentOnly, resolvePath, splitHref } from "./core/paths";
 import { ResourceServer } from "./render/resources";
 import {
   DEFAULT_SETTINGS,
@@ -21,6 +21,7 @@ import {
   applyShelfProgressPatch,
   getShelfStore,
   markShelfEntryOpened,
+  shelfThumbnailProvider,
   type Bookmark,
   type ShelfEntry,
   type ShelfProgressPatch,
@@ -32,6 +33,23 @@ import {
   sha256Hex,
 } from "./ui/importBooks";
 import { ShelfProgressWriter } from "./ui/progressWriter";
+import {
+  archiveRecordsForBackend,
+  buildLibraryArchiveWithIssues,
+} from "./ui/libraryArchiveBridge";
+import {
+  exportLibraryArchive,
+  mergeLibraryArchives,
+  parseLibraryArchive,
+} from "./ui/libraryArchive";
+import {
+  emptyReaderNavigationHistory,
+  readerHistoryBack,
+  readerHistoryForward,
+  recordReaderNavigation,
+  type ReaderNavigationHistory,
+  type ReaderNavigationPosition,
+} from "./ui/readerNavigationHistory";
 import {
   fontFamilyFromFileName,
   fontIdFromHash,
@@ -47,7 +65,8 @@ import {
 } from "./ui/storage";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/core";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { readTextFile, stat as statFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 function isTauriEnv(): boolean {
@@ -59,6 +78,8 @@ type AppPhase =
   | { phase: "loading"; fileName: string }
   | { phase: "error"; message: string }
   | { phase: "ready" };
+
+type ReaderHistoryPosition = ReaderNavigationPosition;
 
 type ImportSource =
   | { kind: "file"; file: File }
@@ -105,6 +126,7 @@ export default function App() {
   const [startAtEnd, setStartAtEnd] = useState({ nonce: 0, atEnd: false });
   const [footnote, setFootnote] = useState<FootnotePayload | null>(null);
   const [chapterState, setChapterState] = useState<ChapterState>({ status: "loading" });
+  const [readerDisplayReady, setReaderDisplayReady] = useState(false);
   const [settings, setSettings] = useState<ReaderSettings>(() => {
     const saved = readSavedSettings();
     return {
@@ -154,10 +176,10 @@ export default function App() {
   const shelfBusyRef = useRef(false);
   const shelfEntriesRef = useRef<ShelfEntry[]>([]);
   shelfEntriesRef.current = shelfEntries;
-  // ---- 阅读跳转历史（返回跳转前的进度，最多 10 步） ----
-  const [readerHistory, setReaderHistory] = useState<
-    Array<{ spineIndex: number; page: number; anchor: { index: number; ratio: number } | null }>
-  >([]);
+  // ---- 阅读跳转历史（后退/前进各最多 3 步） ----
+  const [readerHistory, setReaderHistory] = useState<ReaderNavigationHistory>(
+    emptyReaderNavigationHistory
+  );
   const [bookmarkMenuOpen, setBookmarkMenuOpen] = useState(false);
   // ---- 用户自定义字体 ----
   const [userFonts, setUserFonts] = useState<UserFont[]>([]);
@@ -190,6 +212,18 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialPagePendingRef = useRef(false);
   const initialPageRef = useRef(0);
+  const chapterStateRef = useRef<ChapterState>(chapterState);
+  chapterStateRef.current = chapterState;
+  const navigationPendingRef = useRef(false);
+  // 每个稳定位置只能被一次显式跳转捕获；新书初始加载时
+  // 仍允许以已保存的基线位置记录“第一次跳转”。
+  const historyCaptureAllowedRef = useRef(true);
+  const lastStablePositionRef = useRef<ReaderHistoryPosition>({
+    spineIndex: 0,
+    page: 0,
+    anchor: null,
+  });
+  const persistShelfProgressRef = useRef<() => void>(() => {});
 
   // ---- 打开书（书架导入/书架打开共用；只承载阅读器状态，不改渲染核心） ----
   const openParsedBook = useCallback(
@@ -211,13 +245,21 @@ export default function App() {
       setBookKey(key);
       setRuntimeIssues([]);
       setChapterState({ status: "loading" });
+      setReaderDisplayReady(false);
       setSpineIndex(start);
       setAnchor(undefined);
       initialPagePendingRef.current = true;
       initialPageRef.current = saved?.page ?? 0;
       setInitialAnchor(saved?.anchor ?? null);
+      lastStablePositionRef.current = {
+        spineIndex: start,
+        page: saved?.page ?? 0,
+        anchor: saved?.anchor ?? null,
+      };
+      navigationPendingRef.current = true;
+      historyCaptureAllowedRef.current = true;
       setCurrentShelfId(shelfId);
-      setReaderHistory([]);
+      setReaderHistory(emptyReaderNavigationHistory());
       setBookmarkMenuOpen(false);
       setView("reader");
       setPhase({ phase: "ready" });
@@ -241,64 +283,90 @@ export default function App() {
     const store = getShelfStore();
 
     try {
-      for (const source of list) {
-        const fileName = source.kind === "file" ? source.file.name : source.name;
-        try {
-          const arrayBuffer =
-            source.kind === "file"
-              ? await source.file.arrayBuffer()
-              : await invoke<ArrayBuffer>("read_epub_file", { path: source.path });
-          const buf = new Uint8Array(arrayBuffer);
-          const contentHash = await sha256Hex(buf);
-
-          const duplicate = await findDuplicateEntry({
-            incomingHash: contentHash,
-            incomingSize: buf.byteLength,
-            entries: shelfEntriesRef.current,
-            contentHashById: contentHashByIdRef.current,
-            entryByContentHash: entryByContentHashRef.current,
-            readBook: (id) => store.readBook(id),
-            setContentHash: (id, hash) => store.setContentHash(id, hash),
-          });
-
-          if (duplicate) {
-            duplicateTitles.push(duplicate.title || fileName.replace(/\.epub$/i, ""));
+      if (isTauriEnv()) {
+        const paths = list.flatMap((source) => source.kind === "path" ? [source.path] : []);
+        if (paths.length !== list.length) {
+          throw new Error("桌面版导入必须保留用户选择的源文件路径");
+        }
+        const batch = await store.importPaths(paths);
+        for (const item of batch.results) {
+          const source = list[item.inputIndex];
+          const fileName = source?.kind === "path" ? source.name : `第 ${item.inputIndex + 1} 本`;
+          if (item.status === "failed") {
+            failed.push(`${fileName}：${item.error || "导入失败"}`);
             continue;
           }
-
-          const b = await loadBook(buf);
-          if (b.spine.length === 0) {
-            throw new Error("书中没有可阅读的内容（spine 为空）");
+          if (!item.record) {
+            failed.push(`${fileName}：后端未返回书架记录`);
+            continue;
           }
-          const cover = b.coverHref ? b.resources.get(b.coverHref) : undefined;
-          const result = await store.save({
-            entry: {
-              id: contentHash,
-              title: b.metadata.title || fileName.replace(/\.epub$/i, ""),
-              creator: b.metadata.creator ?? "",
-              fileName,
-              fileSize: buf.byteLength,
-              coverMime: cover?.mediaType ?? "",
-              contentHash,
-              addedAtMs: Date.now(),
-            },
-            bytes: buf,
-            coverBytes: cover?.data,
-            coverMime: cover?.mediaType,
-            sourcePath: source.kind === "path" ? source.path : undefined,
-          });
-          contentHashByIdRef.current.set(result.entry.id, contentHash);
-          entryByContentHashRef.current.set(contentHash, result.entry);
-          if (result.status === "duplicate") {
-            duplicateTitles.push(result.entry.title || fileName.replace(/\.epub$/i, ""));
+          contentHashByIdRef.current.set(item.record.id, item.record.contentHash ?? item.record.id);
+          entryByContentHashRef.current.set(item.record.contentHash ?? item.record.id, item.record);
+          if (item.status === "duplicate") {
+            duplicateTitles.push(item.record.title || fileName.replace(/\.epub$/i, ""));
           } else {
-            imported.push(result.entry);
+            imported.push(item.record);
           }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          failed.push(
-            `${fileName}：${error instanceof DrmError ? error.message : message}`
-          );
+        }
+      } else {
+        for (const source of list) {
+          const fileName = source.kind === "file" ? source.file.name : source.name;
+          try {
+            if (source.kind !== "file") {
+              throw new Error("浏览器预览无法读取原生文件路径");
+            }
+            const arrayBuffer = await source.file.arrayBuffer();
+            const buf = new Uint8Array(arrayBuffer);
+            const contentHash = await sha256Hex(buf);
+
+            const duplicate = await findDuplicateEntry({
+              incomingHash: contentHash,
+              incomingSize: buf.byteLength,
+              entries: shelfEntriesRef.current,
+              contentHashById: contentHashByIdRef.current,
+              entryByContentHash: entryByContentHashRef.current,
+              readBook: (id) => store.readBook(id),
+              setContentHash: (id, hash) => store.setContentHash(id, hash),
+            });
+
+            if (duplicate && duplicate.available !== false) {
+              duplicateTitles.push(duplicate.title || fileName.replace(/\.epub$/i, ""));
+              continue;
+            }
+
+            const b = await loadBook(buf);
+            if (b.spine.length === 0) {
+              throw new Error("书中没有可阅读的内容（spine 为空）");
+            }
+            const cover = b.coverHref ? b.resources.get(b.coverHref) : undefined;
+            const result = await store.save({
+              entry: {
+                id: contentHash,
+                title: b.metadata.title || fileName.replace(/\.epub$/i, ""),
+                creator: b.metadata.creator ?? "",
+                fileName,
+                fileSize: buf.byteLength,
+                coverMime: cover?.mediaType ?? "",
+                contentHash,
+                addedAtMs: Date.now(),
+              },
+              bytes: buf,
+              coverBytes: cover?.data,
+              coverMime: cover?.mediaType,
+            });
+            contentHashByIdRef.current.set(result.entry.id, contentHash);
+            entryByContentHashRef.current.set(contentHash, result.entry);
+            if (result.status === "duplicate") {
+              duplicateTitles.push(result.entry.title || fileName.replace(/\.epub$/i, ""));
+            } else {
+              imported.push(result.entry);
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            failed.push(
+              `${fileName}：${error instanceof DrmError ? error.message : message}`
+            );
+          }
         }
       }
 
@@ -313,11 +381,163 @@ export default function App() {
           failed,
         })
       );
+    } catch (error) {
+      setShelfNotice({ kind: "error", text: `导入失败：${String(error)}` });
     } finally {
       shelfBusyRef.current = false;
       setShelfBusy(false);
     }
   }, []);
+
+  const handleChooseBooks = useCallback(async () => {
+    if (!isTauriEnv()) {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      const selected = await openFileDialog({
+        multiple: true,
+        directory: false,
+        title: "选择 EPUB 书籍",
+        filters: [{ name: "EPUB 电子书", extensions: ["epub"] }],
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      await handleImportSources(
+        paths.map((path) => ({
+          kind: "path" as const,
+          path,
+          name: path.split(/[\\/]/).pop() || "book.epub",
+        }))
+      );
+    } catch (error) {
+      setShelfNotice({ kind: "error", text: `无法打开文件选择器：${String(error)}` });
+    }
+  }, [handleImportSources]);
+
+  const handleExportArchive = useCallback(async () => {
+    try {
+      const built = buildLibraryArchiveWithIssues(shelfEntriesRef.current, {
+        ...settings,
+        uiScale,
+      });
+      if (built.skipped.length > 0) {
+        throw new Error(`有 ${built.skipped.length} 条书架记录缺少有效内容指纹`);
+      }
+      const text = exportLibraryArchive(built.archive);
+      if (isTauriEnv()) {
+        const path = await saveFileDialog({
+          title: "导出阅读存档",
+          defaultPath: `epub-reader-${new Date().toISOString().slice(0, 10)}.json`,
+          filters: [{ name: "EPUB Reader 存档", extensions: ["json"] }],
+        });
+        if (!path) return;
+        await writeTextFile(path, text);
+      } else {
+        const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `epub-reader-${new Date().toISOString().slice(0, 10)}.json`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+      setShelfNotice({ kind: "ok", text: `已导出 ${Object.keys(built.archive.records).length} 本书的存档` });
+    } catch (error) {
+      setShelfNotice({ kind: "error", text: `存档导出失败：${String(error)}` });
+    }
+  }, [settings, uiScale]);
+
+  const handleImportArchive = useCallback(async () => {
+    if (shelfBusyRef.current) return;
+    shelfBusyRef.current = true;
+    setShelfBusy(true);
+    try {
+      let text: string | null = null;
+      if (isTauriEnv()) {
+        const path = await openFileDialog({
+          multiple: false,
+          directory: false,
+          title: "导入阅读存档",
+          filters: [{ name: "EPUB Reader 存档", extensions: ["json"] }],
+        });
+        if (path && !Array.isArray(path)) {
+          if ((await statFile(path)).size > 16 * 1024 * 1024) {
+            throw new Error("存档文件超过 16 MiB，已拒绝读取");
+          }
+          text = await readTextFile(path);
+        }
+      } else {
+        text = await new Promise<string | null>((resolve) => {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = "application/json,.json";
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) resolve(null);
+            else if (file.size > 16 * 1024 * 1024) {
+              setShelfNotice({ kind: "error", text: "存档文件超过 16 MiB，已拒绝读取" });
+              resolve(null);
+            }
+            else void file.text().then(resolve, () => resolve(null));
+          };
+          input.addEventListener("cancel", () => resolve(null), { once: true });
+          input.click();
+        });
+      }
+      if (text === null) return;
+      const incoming = parseLibraryArchive(text);
+      if (incoming.errors.length > 0) {
+        const first = incoming.errors[0];
+        throw new Error(`${first.path}：${first.message}（共 ${incoming.errors.length} 项）`);
+      }
+      const current = buildLibraryArchiveWithIssues(shelfEntriesRef.current, {
+        ...settings,
+        uiScale,
+      });
+      if (current.skipped.length > 0) {
+        throw new Error(`当前书架有 ${current.skipped.length} 条记录缺少有效内容指纹`);
+      }
+      const merged = mergeLibraryArchives(current.archive, incoming.archive);
+      const nextEntries = await getShelfStore().replacePortableRecords(
+        archiveRecordsForBackend(merged)
+      );
+      setShelfEntries(nextEntries);
+
+      const importedSettings = merged.settings ?? {};
+      setSettings((previous) => ({
+        ...previous,
+        ...(typeof importedSettings.fontSizePx === "number" && importedSettings.fontSizePx >= 12 && importedSettings.fontSizePx <= 32
+          ? { fontSizePx: importedSettings.fontSizePx }
+          : {}),
+        ...(importedSettings.theme === "light" || importedSettings.theme === "dark" || importedSettings.theme === "sepia"
+          ? { theme: importedSettings.theme }
+          : {}),
+        ...(typeof importedSettings.gapPx === "number" && importedSettings.gapPx >= 0 && importedSettings.gapPx <= 96
+          ? { gapPx: importedSettings.gapPx }
+          : {}),
+        ...(typeof importedSettings.fontFamily === "string" ? { fontFamily: importedSettings.fontFamily } : {}),
+        ...(typeof importedSettings.lineHeight === "number" && importedSettings.lineHeight >= 1 && importedSettings.lineHeight <= 3 ? { lineHeight: importedSettings.lineHeight } : {}),
+        ...(typeof importedSettings.fontWeight === "number" && importedSettings.fontWeight >= 100 && importedSettings.fontWeight <= 900 ? { fontWeight: importedSettings.fontWeight } : {}),
+        ...(typeof importedSettings.letterSpacingPx === "number" && importedSettings.letterSpacingPx >= 0 && importedSettings.letterSpacingPx <= 32 ? { letterSpacingPx: importedSettings.letterSpacingPx } : {}),
+        ...(typeof importedSettings.wordSpacingPx === "number" && importedSettings.wordSpacingPx >= 0 && importedSettings.wordSpacingPx <= 64 ? { wordSpacingPx: importedSettings.wordSpacingPx } : {}),
+        ...(typeof importedSettings.customFontName === "string" ? { customFontName: importedSettings.customFontName } : {}),
+        ...(typeof importedSettings.customCss === "string" ? { customCss: importedSettings.customCss } : {}),
+      }));
+      if (typeof importedSettings.uiScale === "number" && importedSettings.uiScale >= 0.75 && importedSettings.uiScale <= 1.5) {
+        setUiScale(importedSettings.uiScale);
+      }
+      const unavailableCount = nextEntries.filter((entry) => entry.available === false).length;
+      setShelfNotice({
+        kind: unavailableCount > 0 ? "warn" : "ok",
+        text: `已合并 ${Object.keys(incoming.archive.records).length} 本书的存档${unavailableCount > 0 ? `；${unavailableCount} 本需重新定位源文件` : ""}`,
+      });
+    } catch (error) {
+      setShelfNotice({ kind: "error", text: `存档导入失败：${String(error)}` });
+    } finally {
+      shelfBusyRef.current = false;
+      setShelfBusy(false);
+    }
+  }, [settings, uiScale]);
 
   // ---- 书架启动加载 ----
   useEffect(() => {
@@ -438,14 +658,41 @@ export default function App() {
   const handleShelfOpen = useCallback(
     async (id: string) => {
       if (shelfBusyRef.current) return;
-      const entry = shelfEntriesRef.current.find((e) => e.id === id);
-      if (!entry) return;
+      const originalEntry = shelfEntriesRef.current.find((e) => e.id === id);
+      if (!originalEntry) return;
       shelfBusyRef.current = true;
       setShelfBusy(true);
       setShelfError(null);
-      setPhase({ phase: "loading", fileName: entry.fileName });
+      setPhase({ phase: "loading", fileName: originalEntry.fileName });
       try {
-        const buf = await getShelfStore().readBook(id);
+        let entry = originalEntry;
+        if (isTauriEnv() && entry.available === false) {
+          const selected = await openFileDialog({
+            multiple: false,
+            directory: false,
+            title: `重新定位《${entry.title}》`,
+            filters: [{ name: "EPUB 电子书", extensions: ["epub"] }],
+          });
+          if (!selected || Array.isArray(selected)) {
+            shelfBusyRef.current = false;
+            setShelfBusy(false);
+            setPhase({ phase: "idle" });
+            return;
+          }
+          entry = await getShelfStore().relink(id, selected);
+          setShelfEntries((prev) =>
+            prev.map((item) => (item.id === id ? entry : item))
+          );
+        }
+        let buf: Uint8Array;
+        try {
+          buf = await getShelfStore().readBook(id);
+        } catch (error) {
+          setShelfEntries((prev) =>
+            prev.map((item) => (item.id === id ? { ...item, available: false } : item))
+          );
+          throw error;
+        }
         const b = await loadBook(buf);
         if (b.spine.length === 0) {
           setShelfError("这本书没有可阅读的内容");
@@ -537,16 +784,44 @@ export default function App() {
 
   // ---- 章节状态回调（稳定引用；负责恢复页码） ----
   const onPageState = useCallback((s: ChapterState) => {
+    chapterStateRef.current = s;
     setChapterState(s);
     if (s.status === "ready" && initialPagePendingRef.current) {
       initialPagePendingRef.current = false;
       const page = initialPageRef.current;
-      if (page > 0) readerRef.current?.setPage(page);
+      // Content anchors are more precise than page numbers. Page is only a
+      // fallback for legacy progress without an anchor.
+      if (page > 0 && !lastStablePositionRef.current.anchor) {
+        readerRef.current?.setPage(page);
+      }
     }
   }, []);
 
+  const handleReaderDisplayReady = useCallback(() => {
+    navigationPendingRef.current = false;
+    historyCaptureAllowedRef.current = true;
+    setReaderDisplayReady(true);
+    const state = chapterStateRef.current;
+    const readingAnchor = readerRef.current?.getReadingAnchor();
+    if (state.status === "ready" && !state.empty) {
+      lastStablePositionRef.current = {
+        spineIndex,
+        page: state.currentPage,
+        anchor:
+          readingAnchor && readingAnchor.index >= 0
+            ? { index: readingAnchor.index, ratio: readingAnchor.ratio }
+            : null,
+      };
+    }
+    // Display-ready flips a state gate; the following render runs the normal
+    // progress effect with the newest derived percentage and anchor.
+  }, [spineIndex]);
+
   const handleRequestChapter = useCallback(
     (index: number, opts?: { atEnd?: boolean }) => {
+      navigationPendingRef.current = true;
+      historyCaptureAllowedRef.current = false;
+      setReaderDisplayReady(false);
       setSpineIndex(index);
       setAnchor(undefined);
       // 对象每次请求都新建：连续回翻多次时每次都能触发 atEnd 武装
@@ -579,38 +854,89 @@ export default function App() {
   }, [handleFootnoteClose]);
 
   // ---- 目录/书内链接跳转 ----
-  const handleTocNavigate = (href: string): void => {
+  /** 当前稳定阅读位置；同步 ref 避免 ready 更新尚未完成 React render 的竞态。 */
+  const currentReaderPosition = useCallback((): ReaderHistoryPosition => {
+    const state = chapterStateRef.current;
+    const readingAnchor = readerRef.current?.getReadingAnchor();
+    return {
+      spineIndex,
+      page: state.status === "ready" ? state.currentPage : lastStablePositionRef.current.page,
+      anchor:
+        readingAnchor && readingAnchor.index >= 0
+          ? { index: readingAnchor.index, ratio: readingAnchor.ratio }
+          : lastStablePositionRef.current.anchor,
+    };
+  }, [spineIndex]);
+
+  /** 捕获当前位置供一次普通书内跳转撤销；调用方负责保证一次点击只调用一次。 */
+  const captureReaderHistory = useCallback((href: string): void => {
+    const state = chapterStateRef.current;
+    if (!book || view !== "reader" || !historyCaptureAllowedRef.current) return;
+    if (state.status === "ready" && state.empty) return;
+    // 跨章链接必须确实命中 spine；纯 fragment 则必须属于当前有效章节。
+    // 这样 paginator 的通用 before 通知不会把无效 href 变成假历史。
+    if (
+      isFragmentOnly(href)
+        ? spineIndex < 0 || spineIndex >= book.spine.length
+        : spineIndexForPath(book, href) < 0
+    ) {
+      return;
+    }
+    const snapshot =
+      !navigationPendingRef.current && state.status === "ready"
+        ? currentReaderPosition()
+        : {
+            spineIndex: lastStablePositionRef.current.spineIndex,
+            page: lastStablePositionRef.current.page,
+            anchor: lastStablePositionRef.current.anchor
+              ? { ...lastStablePositionRef.current.anchor }
+              : null,
+          };
+    lastStablePositionRef.current = snapshot;
+    historyCaptureAllowedRef.current = false;
+    setReaderHistory((prev) => recordReaderNavigation(prev, snapshot));
+  }, [book, view, spineIndex, currentReaderPosition]);
+
+  /** 只执行 href 跳转，不记录历史；UI 入口和 paginator 通知入口共用。 */
+  const navigateReaderHref = useCallback((href: string): void => {
     if (!book) return;
     const idx = spineIndexForPath(book, href);
     const { anchor: a } = splitHref(href);
     if (idx >= 0) {
+      navigationPendingRef.current = true;
+      historyCaptureAllowedRef.current = false;
+      setReaderDisplayReady(false);
       setBookmarkMenuOpen(false);
-      // 记录跳转前阅读进度，供“返回”按钮回退（最多 10 步）
-      if (view === "reader" && chapterState.status === "ready" && !chapterState.empty) {
-        const readingAnchor = readerRef.current?.getReadingAnchor();
-        setReaderHistory((prev) => [
-          ...prev.slice(-9),
-          {
-            spineIndex,
-            page: chapterState.currentPage,
-            anchor:
-              readingAnchor && readingAnchor.index >= 0
-                ? { index: readingAnchor.index, ratio: readingAnchor.ratio }
-                : null,
-          },
-        ]);
-      }
       setSpineIndex(idx);
       setAnchor(a || undefined);
       setAnchorNonce((n) => n + 1);
       // 保持目录展开：方便连续选择章节；用 ✕/遮罩/Esc 关闭
     }
-  };
+  }, [book]);
+
+  /** 侧边目录入口：先记录一次，再执行跳转。 */
+  const handleTocNavigate = useCallback((href: string): void => {
+    if (!book) return;
+    if (spineIndexForPath(book, href) < 0) return;
+    captureReaderHistory(href);
+    navigateReaderHref(href);
+  }, [book, captureReaderHistory, navigateReaderHref]);
+
+  /** iframe 普通书内链接：历史由 paginator 的 before 通知记录一次。 */
+  const handleInternalNavigate = useCallback((href: string): void => {
+    navigateReaderHref(href);
+  }, [navigateReaderHref]);
 
   const handleHistoryBack = useCallback(() => {
-    const pos = readerHistory[readerHistory.length - 1];
-    if (!pos) return;
-    setReaderHistory((prev) => prev.slice(0, -1));
+    const current = currentReaderPosition();
+    const transition = readerHistoryBack(readerHistory, current);
+    if (!transition.target) return;
+    lastStablePositionRef.current = transition.target;
+    navigationPendingRef.current = true;
+    historyCaptureAllowedRef.current = false;
+    setReaderDisplayReady(false);
+    setReaderHistory(transition.history);
+    const pos = transition.target;
     // 恢复跳转前位置：章节 + 页码 + 内容锚点
     setSpineIndex(pos.spineIndex);
     setAnchor(undefined);
@@ -621,7 +947,28 @@ export default function App() {
     setFootnote(null);
     setTocOpen(false);
     setMenuOpen(false);
-  }, [readerHistory]);
+  }, [readerHistory, currentReaderPosition]);
+
+  const handleHistoryForward = useCallback(() => {
+    const current = currentReaderPosition();
+    const transition = readerHistoryForward(readerHistory, current);
+    if (!transition.target) return;
+    lastStablePositionRef.current = transition.target;
+    navigationPendingRef.current = true;
+    historyCaptureAllowedRef.current = false;
+    setReaderDisplayReady(false);
+    setReaderHistory(transition.history);
+    const pos = transition.target;
+    setSpineIndex(pos.spineIndex);
+    setAnchor(undefined);
+    setAnchorNonce((n) => n + 1);
+    initialPagePendingRef.current = true;
+    initialPageRef.current = pos.page;
+    setInitialAnchor(pos.anchor);
+    setFootnote(null);
+    setTocOpen(false);
+    setMenuOpen(false);
+  }, [readerHistory, currentReaderPosition]);
 
   // ---- 书签 ----
   const currentBookmarks = currentShelfId
@@ -679,9 +1026,13 @@ export default function App() {
     );
     void getShelfStore()
       .setBookmarks(currentShelfId, next)
-      .then((saved) =>
+      .then(() =>
         setShelfEntries((prev) =>
-          prev.map((entry) => (entry.id === currentShelfId ? saved : entry))
+          // 后端返回的是写入时刻的完整记录；期间用户可能已经翻页，
+          // 因此这里只确认书签字段，不能用旧快照覆盖乐观进度。
+          prev.map((entry) =>
+            entry.id === currentShelfId ? { ...entry, bookmarks: next } : entry
+          )
         )
       )
       .catch((error) => setShelfError(`书签保存失败：${String(error)}`));
@@ -690,20 +1041,11 @@ export default function App() {
   const handleSelectBookmark = useCallback(
     (bookmarkId: string) => {
       const bookmark = currentBookmarks.find((item) => item.id === bookmarkId);
-      if (!bookmark || chapterState.status !== "ready") return;
-      // 书签跳转也进入跳转历史，支持 ↩ 撤回
-      const anchor = readerRef.current?.getReadingAnchor();
-      setReaderHistory((prev) => [
-        ...prev.slice(-9),
-        {
-          spineIndex,
-          page: chapterState.currentPage,
-          anchor:
-            anchor && anchor.index >= 0
-              ? { index: anchor.index, ratio: anchor.ratio }
-              : null,
-        },
-      ]);
+      if (!bookmark || !book) return;
+      captureReaderHistory(spineItemPath(book, spineIndex) ?? "");
+      navigationPendingRef.current = true;
+      historyCaptureAllowedRef.current = false;
+      setReaderDisplayReady(false);
       setSpineIndex(bookmark.spineIndex);
       setAnchor(undefined);
       setAnchorNonce((n) => n + 1);
@@ -719,7 +1061,7 @@ export default function App() {
       setTocOpen(false);
       setMenuOpen(false);
     },
-    [currentBookmarks, spineIndex, chapterState]
+    [currentBookmarks, spineIndex, book, captureReaderHistory]
   );
 
   // ---- 外部链接：Tauri 用系统默认浏览器，浏览器开发模式开新标签页 ----
@@ -738,14 +1080,19 @@ export default function App() {
   // ---- 阅读进度保存 ----
   useEffect(() => {
     if (phase.phase !== "ready" || !book) return;
-    if (chapterState.status === "ready" && !chapterState.empty) {
+    if (
+      readerDisplayReady &&
+      !navigationPendingRef.current &&
+      chapterState.status === "ready" &&
+      !chapterState.empty
+    ) {
       writeProgress(bookKey, {
         spineIndex,
         page: chapterState.currentPage,
         anchor: readerRef.current?.getReadingAnchor() ?? null,
       });
     }
-  }, [phase, book, bookKey, spineIndex, chapterState]);
+  }, [phase, book, bookKey, spineIndex, chapterState, readerDisplayReady]);
 
   // ---- 设置持久化 ----
   useEffect(() => {
@@ -826,10 +1173,14 @@ export default function App() {
   }, [chapterState, uiScale]);
 
   // ---- 状态栏时钟（时:分） ----
+  // 书架不显示时钟；在这里继续每秒 setState 会让 100+ 书籍卡片无意义地
+  // 参与整棵 App 的 React 重渲染。进入阅读界面时再启动并立即校时。
   useEffect(() => {
+    if (view !== "reader") return;
+    setClock(new Date());
     const t = window.setInterval(() => setClock(new Date()), 1000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [view]);
 
   const clockText = `${String(clock.getHours()).padStart(2, "0")}:${String(
     clock.getMinutes()
@@ -864,7 +1215,7 @@ export default function App() {
 
   // ---- 拖拽打开 ----
   // Tauri 环境：打包后 WebView2 会拦截原生拖放，HTML5 drop 事件不会触发，
-  // 必须走 Tauri 原生 onDragDropEvent（拿到的是文件路径，再经 read_epub_file 读字节）。
+  // 必须走 Tauri 原生 onDragDropEvent：只把文件路径交给 Rust 链接书库流式导入，WebView 不预读正文。
   // 纯浏览器环境：用 HTML5 事件兜底。
   useEffect(() => {
     if (!isTauriEnv()) {
@@ -958,12 +1309,19 @@ export default function App() {
 
   // ---- 书架进度回写（阅读器状态→书架索引，不修改阅读器本体） ----
   const persistShelfProgress = useCallback(() => {
-    if (view !== "reader" || !currentShelfId || chapterState.status !== "ready") return;
+    const state = chapterStateRef.current;
+    if (
+      navigationPendingRef.current ||
+      !readerDisplayReady ||
+      view !== "reader" ||
+      !currentShelfId ||
+      state.status !== "ready"
+    ) return;
     const a = readerRef.current?.getReadingAnchor();
     const patch: ShelfProgressPatch = {
       lastReadAtMs: Date.now(),
       spineIndex,
-      page: chapterState.currentPage,
+      page: state.currentPage,
       progressPct,
       anchorIndex: a?.index ?? null,
       anchorRatio: a?.ratio ?? null,
@@ -973,9 +1331,9 @@ export default function App() {
       applyShelfProgressPatch(prev, currentShelfId, patch)
     );
     progressWriterRef.current?.enqueue(currentShelfId, patch);
-  }, [view, currentShelfId, chapterState, spineIndex, progressPct]);
-
-  const persistShelfProgressRef = useRef<() => void>(() => {});
+  // page/anchor 变化必须触发写入；不能只依赖取整后的 progressPct，
+  // 否则长书连续数页保持同一百分比时会漏掉最新位置。
+  }, [view, currentShelfId, spineIndex, progressPct, readerDisplayReady, chapterState]);
   persistShelfProgressRef.current = persistShelfProgress;
 
   useEffect(() => {
@@ -1083,7 +1441,9 @@ export default function App() {
         issueCount={logItems.length}
         onBackToShelf={view === "reader" ? handleBackToShelf : undefined}
         onHistoryBack={view === "reader" ? handleHistoryBack : undefined}
-        canHistoryBack={readerHistory.length > 0}
+        canHistoryBack={readerHistory.back.length > 0 && readerDisplayReady && !navigationPendingRef.current}
+        onHistoryForward={view === "reader" ? handleHistoryForward : undefined}
+        canHistoryForward={readerHistory.forward.length > 0 && readerDisplayReady && !navigationPendingRef.current}
         onToggleBookmark={view === "reader" ? handleToggleBookmark : undefined}
         isBookmarked={view === "reader" && isCurrentPageBookmarked}
         onOpenBookmarks={view === "reader" ? () => setBookmarkMenuOpen(true) : undefined}
@@ -1115,10 +1475,13 @@ export default function App() {
               busy={shelfBusy}
               theme={settings.theme}
               onThemeChange={changeTheme}
-              onOpen={(id) => void handleShelfOpen(id)}
-              onImport={() => fileInputRef.current?.click()}
-              onDelete={(id) => void handleShelfDelete(id)}
-              onDeleteMany={(ids) => void handleShelfDeleteMany(ids)}
+              onOpen={handleShelfOpen}
+              onImport={() => void handleChooseBooks()}
+              onDelete={handleShelfDelete}
+              onDeleteMany={handleShelfDeleteMany}
+              onExportArchive={() => void handleExportArchive()}
+              onImportArchive={() => void handleImportArchive()}
+              thumbnailProvider={shelfThumbnailProvider}
             />
           </div>
         ) : (
@@ -1147,7 +1510,7 @@ export default function App() {
                     setSettings((s2) => ({ ...s2, customCss: css }))
                   }
                   onOpenFile={() => {
-                    fileInputRef.current?.click();
+                    void handleChooseBooks();
                     setMenuOpen(false);
                   }}
                   onFontDec={() => adjustFont(-2)}
@@ -1200,9 +1563,12 @@ export default function App() {
                   settings={settings}
                   userFonts={renderUserFonts}
                   onPageState={onPageState}
+                  onDisplayReady={handleReaderDisplayReady}
                   onRequestChapter={handleRequestChapter}
                   onIssues={handleIssues}
-                  onInternalLink={handleTocNavigate}
+                  onInternalLink={handleInternalNavigate}
+                  onBeforeInternalNavigate={captureReaderHistory}
+                  onInternalNavigationSettled={handleReaderDisplayReady}
                   onExternalLink={handleExternalLink}
                   onFootnote={(payload) => setFootnote(payload)}
                   onFootnoteClose={handleFootnoteClose}
@@ -1218,7 +1584,7 @@ export default function App() {
                   <>
                     <div className="big">无法打开</div>
                     <div>{phase.message}</div>
-                    <button onClick={() => fileInputRef.current?.click()}>重新选择文件</button>
+                    <button onClick={() => void handleChooseBooks()}>重新选择文件</button>
                   </>
                 )}
               </div>

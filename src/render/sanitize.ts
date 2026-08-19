@@ -1,7 +1,7 @@
 import { parseXmlText, hasParserError, getSerializer } from "../core/parseXml";
 import { resolvePath, isExternalUrl, isFragmentOnly } from "../core/paths";
 import { findElements, type XmlElementLike } from "../core/xml";
-import { rewriteCssUrls } from "./cssRewrite";
+import { hasAuthoredCssProperty, rewriteCssInlineWidths, rewriteCssUrls } from "./cssRewrite";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 
 export interface SanitizeOptions {
@@ -78,7 +78,7 @@ function isSafeColor(v: string): boolean {
   return SAFE_NAMES.has(v.trim().toLowerCase());
 }
 
-function buildOverrideCss(s: ReaderSettings): string {
+function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
   const bg =
     s.theme === "dark" ? "#1e1e1e" : s.theme === "sepia" ? "#f4ecd8" : "#ffffff";
   const fg = s.theme === "dark" ? "#d4d4d4" : s.theme === "sepia" ? "#3b2f1e" : "#1a1a1a";
@@ -195,8 +195,9 @@ function buildOverrideCss(s: ReaderSettings): string {
 /* [L2] 字体 fallback 只放 html；书在 body 上的内嵌字体声明优先。 */
 html { font-size: ${s.fontSizePx}px !important; font-family: ${family}; }
 ${fontFaceCss}
-/* [L2] 主题只覆盖背景色，不用 background 简写（会重置书的 body 背景图）。 */
-body { color: ${fg}; background-color: ${bg}; ${bodyFontCss} }
+/* [L2] 主题只覆盖背景色，不用 background 简写（会重置书的 body 背景图）。
+   浅色主题下安全的书籍 bgcolor 作为默认值合入这里，用户 CSS 仍在本样式末尾。 */
+body { color: ${fg}; background-color: ${bodyBgColor ?? bg}; ${bodyFontCss} }
 /* [L2] ruby 注音 rt 随主题换色（书常固定 ruby>rt{color:#333}）。 */
 #${VIEWER_ID} rt { color: ${fg}; }
 ${
@@ -379,6 +380,19 @@ export async function sanitizeChapter(
 
   // 5) 把正文包进分页容器（paginator 依赖 #epub-viewer 做多栏分页）
   const bodyEl = doc.getElementsByTagName("body")[0] ?? root;
+  const rawBgColor = bodyEl.getAttribute("bgcolor")?.trim() ?? "";
+  // 书籍 bgcolor 只作为浅色主题的安全默认背景色；深色/纸色主题保持主题色。
+  // 该值只进入 background-color longhand，不会重置 body 背景图。
+  const bodyBgColor =
+    opts.settings.theme === "light" && rawBgColor && isSafeColor(rawBgColor)
+      ? rawBgColor
+      : undefined;
+  // The old implementation emitted a separate bgcolor rule with !important
+  // after the user CSS, so it deterministically overrode user background
+  // declarations. Consume the legacy attribute after reading it, leaving one
+  // theme default and the user CSS in a predictable cascade. This only affects
+  // background-color; background images are not touched.
+  bodyEl.removeAttribute("bgcolor");
   // 不使用 div：新增祖先必须不能改变作者 `div p` 一类类型选择器的语义。
   // 自定义标签在注入 CSS 中显式 display:block，分页器继续只依赖稳定的 id。
   const viewer = doc.createElement(VIEWER_TAG);
@@ -418,7 +432,7 @@ export async function sanitizeChapter(
     for (let n = el.parentNode; n && n !== viewer; n = n.parentNode) {
       if (n.nodeType !== 1) continue;
       const e = n as Element;
-      if (/width\s*:/.test(e.getAttribute("style") ?? "")) return true;
+      if (hasAuthoredCssProperty(e.getAttribute("style") ?? "", "width")) return true;
       if (e.getAttribute("width")) return true;
     }
     return false;
@@ -442,18 +456,7 @@ export async function sanitizeChapter(
     if (insideFullpage(el) || ancestorHasWidth(el)) continue;
     const st = el.getAttribute("style");
     if (st) {
-      el.setAttribute(
-        "style",
-        st.replace(
-          /(^|;)(\s*)width\s*:\s*(\d+(?:\.\d+)?)\s*%/gi,
-          (match, pre: string, sp: string, x: string) => {
-            const pct = parseFloat(x);
-            return Number.isFinite(pct) && pct > 0 && pct <= 100
-              ? `${pre}${sp}width: ${pctToMin(x)}`
-              : match;
-          }
-        )
-      );
+      el.setAttribute("style", rewriteCssInlineWidths(st, TEXT_MEASURE.maxEm));
     }
     const wAttr = el.getAttribute("width");
     if (wAttr && /^\s*\d+(?:\.\d+)?\s*%\s*$/.test(wAttr)) {
@@ -478,7 +481,11 @@ export async function sanitizeChapter(
   const svgImages = findElements(viewer, "image");
   const hasOwnSize = (el: XmlElementLike): boolean => {
     const st = el.getAttribute("style") ?? "";
-    if (/\b(?:width|height|max-width|max-height|min-width|min-height)\s*:/.test(st)) {
+    if (
+      ["width", "height", "max-width", "max-height", "min-width", "min-height"].some(
+        (property) => hasAuthoredCssProperty(st, property)
+      )
+    ) {
       return true;
     }
     // xmldom 对不存在的属性返回 ""（不是 null），要按空值判断
@@ -537,19 +544,8 @@ export async function sanitizeChapter(
 
   const styleEl = doc.createElement("style");
   styleEl.setAttribute("data-reader", "overrides");
-  styleEl.textContent = buildOverrideCss(opts.settings);
+  styleEl.textContent = buildOverrideCss(opts.settings, bodyBgColor);
   head.appendChild(styleEl);
-
-  // 参考脚本优化：书声明了 body bgcolor 时，浅色主题下让版面底色跟随书的设定
-  // （只接受安全颜色写法，防止 CSS 注入）
-  const bgcolor = bodyEl.getAttribute("bgcolor");
-  if (bgcolor && opts.settings.theme === "light" && isSafeColor(bgcolor)) {
-    const bgStyle = doc.createElement("style");
-    bgStyle.setAttribute("data-reader", "bgcolor");
-    // 同样只用 background-color：body 上的背景图（目录页等）应继续显示
-    bgStyle.textContent = `body { background-color: ${bgcolor} !important; }`;
-    head.appendChild(bgStyle);
-  }
 
   const serialized = (await getSerializer()).serializeToString(doc);
   const html = restoreStyleRawTextCombinators(serialized);

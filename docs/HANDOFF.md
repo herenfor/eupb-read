@@ -32,10 +32,12 @@ src/
     ShelfView.tsx   书架（网格/搜索/排序/密度/主题/批量选择）
     ReaderView.tsx  阅读视图
     Toolbar / TocPanel / MenuPanel / FootnotePop / LogPanel
-    shelf.ts        书架存储抽象（Tauri 应用数据目录 + IndexedDB dev 回退）
+    shelf.ts        Tauri 链接书库 + IndexedDB dev 的统一接口
+    libraryArchive  无设备路径的存档 schema、校验与合并
+    thumbnail.ts    近视口缩略图队列与派生
     storage.ts      设置与阅读进度
   test/        测试夹具与单元测试
-src-tauri/    Tauri 2 壳（书架文件命令 + 拖拽读取）
+src-tauri/    Tauri 2 壳（Rust 链接书库、缩略图缓存与字体命令）
 scripts/      构建/自检/测试工具
 ```
 
@@ -44,13 +46,13 @@ scripts/      构建/自检/测试工具
 ```bash
 pnpm install
 pnpm dev          # 浏览器开发模式（localhost:5173）
-pnpm test         # 单元测试（当前 158 项）
+pnpm test         # 单元测试（当前 228 项）
 pnpm build        # TypeScript 检查 + 生产构建
 pnpm tauri dev    # 桌面窗口调试（需要系统 Tauri 依赖）
 pnpm tauri build  # 桌面打包
 ```
 
-Windows 一键打包见 `scripts/build-windows.ps1`。
+Windows 一键打包见 `scripts/build-windows.ps1`；0.1.7 的 WSL→Windows 安全同步与测试版验收见 `docs/RELEASE_0.1.7.md`。
 
 ## 渲染分层规范
 
@@ -93,15 +95,18 @@ width: X% → width: min(X%, X/100 × 40rem)
 
 ### 书架存储
 
-- Tauri 环境：书籍保存到系统应用数据目录 `app_data_dir()/books/<id>/book.epub`，索引为 `shelf.json`；
-- 浏览器开发环境：IndexedDB 等价回退；
-- 书籍 ID 由标识 + 文件名 + 文件大小哈希生成，重复导入只更新文件与元数据、保留进度。
+- Tauri 环境使用链接式书库，用户源 EPUB 留在原路径，不复制到应用目录，也不会在删除书架条目或卸载时被应用删除。
+- 可同步状态保存为 `app_local_data_dir()/linked-library/library-records.json`；本机绝对路径、stat 与封面 ZIP 定位单独保存为 `device-bindings.json`。书籍 ID 是 EPUB 完整字节的小写 SHA-256。
+- 设备缩略图位于 `app_local_data_dir()/linked-library/thumbnails/`，最大 240×360、全局四并发、单项 5 MiB、LRU 总上限 100 MiB；启动会清理索引外孤立文件和临时文件。
+- 重复导入只更新同哈希的本机绑定，不覆盖进度、书签或首次添加时间；源文件缺失时保留记录，重新定位必须再次匹配完整哈希。
+- “导出存档”产生不含路径、正文、封面和缩略图的 v1 JSON；浏览器开发环境仍使用 IndexedDB 保存测试字节，只是 UI 语义回退，不代表桌面持久化设计。
+- 完整实现与 Windows 待验收项见 `docs/tasks/active/linked-library-refactor.md`，不要恢复旧 `shelf.json`/`books/<id>` runtime 命令。
 
 ## 测试
 
 ### 单元测试
 
-`pnpm test`（158 项）覆盖解析内核、消毒与 CSS 改写、脚注识别、书架纯函数、怪书容错及分页交互回归等。
+当前 `pnpm test` 基线为 23 个测试文件、228 项；另有 Rust 10 项测试。覆盖解析内核、消毒与 CSS 改写、脚注识别、链接书库/存档/缩略图、桌面单实例恢复顺序、阅读历史状态机、书架纯函数、怪书容错及分页交互回归等。
 
 ### 端到端回归
 
@@ -122,7 +127,7 @@ width: X% → width: min(X%, X/100 × 40rem)
 - Linux：需 `pkg-config`、GTK/WebKitGTK 开发包；
 - macOS：需要 macOS 系统与 Xcode Command Line Tools。
 
-版本号需保持三处一致：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`。
+版本号需保持四处一致：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、根包在 `src-tauri/Cargo.lock` 中的版本。
 
 ## 发布前检查清单
 

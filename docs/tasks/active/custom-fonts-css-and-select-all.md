@@ -1,7 +1,8 @@
 # 任务：书架全选、用户自定义字体与自定义 CSS
 
-- 状态：已实现，本地验证完成，待用户审核/Windows 打包确认
+- 状态：已同步，待 Windows 打包确认
 - 创建日期：2026-08-18
+- 最后更新：2026-08-18
 - 对应 Bug：无（0.1.6 功能）
 
 ## 目标
@@ -25,7 +26,7 @@
 
 - `pnpm test`：16 文件 174/174 通过（新增 fontStore 2、sanitize 2）。
 - `pnpm build`：通过。
-- `cargo fmt`：通过；完整 `cargo check` 仍因沙箱跨目录 rename 无法在隔离沙箱执行，需有权限 shell/Windows 编译确认。
+- `cargo fmt`：通过；2026-08-18 交接复验中完整 `cargo check` 和 Rust 2/2 单测通过。
 - Chromium：
   - 批量选择：导入 3 本 → 全选 → 已选 3 本 → 取消全选 → 已选 0 本。
   - 自定义 CSS：`#epub-viewer p { color: red !important; }` 生效，正文 `p` computed color = red。
@@ -36,3 +37,9 @@
 - Windows WebView2/NSIS 未重新编译；Rust 字体命令需在 Windows 打包时最终验证。
 - 字体内容没有做文件魔数校验，仅按扩展名过滤；未来可加 `ttf-parser` 等校验。
 - 未处理同一字体多文件/多 weight 的 family 合并，后续用户上传字体系列时可再扩展。
+
+## 源仓同步状态
+
+- [x] 已更新 `docs/SOURCE_DELTA.md`
+- [x] 用户已审核并同步到真实源仓
+- 源仓提交：`d934588b6518dca819e72d2f129a68225cba6592`，最终 0.1.6 基线 `e8aabcdeb03543402338aee00fb2e33d52e39841`

@@ -1,7 +1,7 @@
 # One-click packaging script for Windows (PowerShell)
 # Usage: run from project root:  .\scripts\build-windows.ps1
 # Version is read from src-tauri\tauri.conf.json (keep package.json /
-# tauri.conf.json / Cargo.toml in sync when bumping).
+# tauri.conf.json / Cargo.toml / the epub-reader Cargo.lock entry in sync when bumping).
 # Output:
 #   Installer: src-tauri\target\release\bundle\nsis\EPUB Reader_<version>_x64-setup.exe
 #   Portable : src-tauri\target\release\epub-reader.exe

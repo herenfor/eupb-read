@@ -47,6 +47,8 @@ interface ReaderViewProps {
   /** 用户上传字体的会话内资源（family + blob URL） */
   userFonts: Array<{ family: string; url: string }>;
   onPageState(s: ChapterState): void;
+  /** Paginator display gate released after final anchor/page positioning. */
+  onDisplayReady(): void;
   /** 请求切换到相邻章节（next/prev 或空章自动前进） */
   onRequestChapter(index: number, opts?: { atEnd?: boolean }): void;
   /** 章节切换请求（nonce 单调递增；atEnd=true 表示加载完成后翻到最后一页） */
@@ -54,6 +56,10 @@ interface ReaderViewProps {
   onIssues(issues: string[]): void;
   /** 书内链接跳转（已解析为书内路径，含可选 #anchor） */
   onInternalLink(href: string): void;
+  /** 普通书内链接改变位置前通知 UI 记录一次撤销快照。 */
+  onBeforeInternalNavigate(href: string): void;
+  /** 同章 fragment 已同步完成定位，可再次捕获下一次跳转。 */
+  onInternalNavigationSettled(): void;
   /** 外部链接（http/https/mailto/tel）交给系统默认浏览器/应用打开 */
   onExternalLink(url: string): void;
   /** 脚注弹层（文本/HTML/固定状态 + 标记在阅读区坐标系的矩形） */
@@ -85,8 +91,18 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   const lastReadyEmptyRef = useRef(false);
   const turnIntentRef = useRef(new TurnIntentBuffer());
   const outerWheelRef = useRef(new WheelTurnAccumulator());
+  // ChapterPaginator 的生命周期只随 book/server 创建；这些 ref 保证它
+  // 调用到每次 render 的最新回调，不捕获首次 loading 阶段的旧闭包。
+  const onInternalLinkRef = useRef(props.onInternalLink);
+  const onBeforeInternalNavigateRef = useRef(props.onBeforeInternalNavigate);
+  const onInternalNavigationSettledRef = useRef(props.onInternalNavigationSettled);
+  const onDisplayReadyRef = useRef(props.onDisplayReady);
 
   spineIndexRef.current = spineIndex;
+  onInternalLinkRef.current = props.onInternalLink;
+  onBeforeInternalNavigateRef.current = props.onBeforeInternalNavigate;
+  onInternalNavigationSettledRef.current = props.onInternalNavigationSettled;
+  onDisplayReadyRef.current = props.onDisplayReady;
 
   // 每次请求（nonce 变化）时按 atEnd 武装；chapter effect 消费后归 false
   useEffect(() => {
@@ -137,7 +153,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       },
       (issues) => props.onIssues(issues),
       book.fixedLayout,
-      (href) => props.onInternalLink(href),
+      (href) => onInternalLinkRef.current(href),
+      (href) => onBeforeInternalNavigateRef.current(href),
+      () => onInternalNavigationSettledRef.current(),
       (dir) => turnPageRef.current(dir),
       (dir) => turnPageRef.current(dir),
       (payload) => {
@@ -167,6 +185,9 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
         // paginator 的普通 ready 可能早于目录锚点/startAtEnd 最终定位；
         // 这里只消费“显示门已解除”的稳定边界，避免缓冲输入抢跑。
         if (lastStateRef.current !== "ready" || lastReadyEmptyRef.current) return;
+        // 先公布当前稳定位置，再消费连续滚轮/按键。若该输入立即
+        // 触发换章，App 随后设置的 pending 不会被旧章回调反向清除。
+        onDisplayReadyRef.current();
         const pending = turnIntentRef.current.markReady();
         if (pending !== null) turnPageRef.current(pending);
       }

@@ -447,15 +447,23 @@ describe("sanitizeChapter", () => {
     expect(out).not.toContain("height: auto !important");
   });
 
-  it("book 的 bgcolor 在浅色主题下应用到版面，深色主题忽略", async () => {
+  it("book 的 bgcolor 在浅色主题下应用到版面，深色/纸色忽略", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body bgcolor="#f5f0e6"><p>正文</p></body></html>`;
     const light = await sanitizeChapter(html, opts());
-    expect(light.html).toContain("background-color: #f5f0e6 !important");
+    expect(light.html).toContain("body { color: #1a1a1a; background-color: #f5f0e6;");
+    expect(light.html).not.toContain('data-reader="bgcolor"');
     const dark = await sanitizeChapter(html, {
       ...opts(),
       settings: { ...DEFAULT_SETTINGS, theme: "dark" as const },
     });
-    expect(dark.html).not.toContain("background-color: #f5f0e6 !important");
+    expect(dark.html).toContain("body { color: #d4d4d4; background-color: #1e1e1e;");
+    expect(dark.html).not.toContain("background-color: #f5f0e6");
+    const sepia = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "sepia" as const },
+    });
+    expect(sepia.html).toContain("body { color: #3b2f1e; background-color: #f4ecd8;");
+    expect(sepia.html).not.toContain("background-color: #f5f0e6");
   });
 
   it("bgcolor 非法值不注入（防 CSS 注入）", async () => {
@@ -485,6 +493,23 @@ describe("sanitizeChapter", () => {
     expect(out).toContain("min-width:50%");
     expect(out).not.toContain("max-min(");
     expect(out).not.toContain("min-min(");
+  });
+
+  it("祖先注释中的 width 不阻断子元素的活动 width 改写", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div style="/* width:20em; */"><span style="width:50%">x</span></div>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts());
+    expect(out).toContain('style="/* width:20em; */"');
+    expect(out).toContain("width: min(50%, 20rem)");
+  });
+
+  it("图片 style 中的注释尺寸不阻断纯图片页识别", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<img src="cover.png" style="/* width:12em; height:8em; */"/>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts("OEBPS/Text/cover.xhtml"));
+    expect(out).toContain('class="fullpage-image"');
   });
 
   it("全页图块内部 / 已定宽祖先内部 / img 的 width:% 不换算", async () => {
@@ -591,13 +616,25 @@ background-position:center center;background-size:cover;background-color:#f9ebdf
     expect(out).not.toMatch(/body\s*\{\s*color:[^}]*background:\s*#/);
   });
 
-  it("bgcolor 注入不遮挡 body 背景图（只用 background-color 且作用于 body）", async () => {
+  it("bgcolor 默认值不遮挡 body 背景图，且用户 CSS 可覆盖", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
 <style>body{background-image:url(../Images/bdimg.webp)}</style>
 </head><body bgcolor="#f5f0e6"><p>正文</p></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());
     expect(out).toContain('url("blob:test/OEBPS/Images/bdimg.webp")');
-    expect(out).toContain("body { background-color: #f5f0e6 !important; }");
+    expect(out).toContain("body { color: #1a1a1a; background-color: #f5f0e6;");
+    expect(out).not.toContain('data-reader="bgcolor"');
+    const defaultIndex = out.indexOf("background-color: #f5f0e6;");
+    const userCss = await sanitizeChapter(
+      `<html xmlns="http://www.w3.org/1999/xhtml"><body bgcolor="#f5f0e6"><p>正文</p></body></html>`,
+      {
+        ...opts(),
+        settings: { ...DEFAULT_SETTINGS, customCss: "body { background-color: #123456; }" },
+      }
+    );
+    const userIndex = userCss.html.indexOf("body { background-color: #123456; }");
+    expect(defaultIndex).toBeGreaterThanOrEqual(0);
+    expect(userIndex).toBeGreaterThan(userCss.html.indexOf("background-color: #f5f0e6;"));
     // 不再给 viewer 铺不透明背景，否则会遮住 body 的背景图
     expect(out).not.toMatch(/epub-viewer\s*\{\s*background:/);
   });

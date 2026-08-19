@@ -4,6 +4,7 @@ import { isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes"
 import type { ResourceServer } from "./resources";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 import { VisibilityGate } from "./displayGate";
+import { hasAuthoredCssProperty } from "./cssRewrite";
 
 /** 常规布局应远早于此完成；极端字体/引擎停滞时只解除隐藏，不伪造 ready。 */
 const INITIAL_RENDER_GATE_TIMEOUT_MS = 20_000;
@@ -13,6 +14,11 @@ export type ChapterState =
   | { status: "measuring" }
   | { status: "ready"; pageCount: number; currentPage: number; empty: boolean }
   | { status: "error"; message: string };
+
+/** True only for an authored inline width declaration (comments are inert). */
+export function hasAuthoredInlineWidth(styleText: string): boolean {
+  return hasAuthoredCssProperty(styleText, "width");
+}
 
 /** 脚注弹层数据（由分页器发往 UI 层）。 */
 export interface FootnotePayload {
@@ -151,12 +157,43 @@ function styleHasPercentageHorizontalMargin(style: CSSStyleDeclaration): boolean
   return horizontal.some((value) => value.includes("%"));
 }
 
-/** 样式表中的类/标签规则也可能声明水平百分比 margin（如 margin-left:70%）。 */
-export function hasPercentageHorizontalMarginInRules(doc: Document, el: Element): boolean {
+type TypedStyleMapHost = {
+  computedStyleMap?: () => {
+    get(property: string): { toString(): string } | undefined;
+  };
+};
+
+/**
+ * CSS Typed OM 保留最终获胜 margin 的百分比/calc 表达式；传统
+ * getComputedStyle() 则已将它解析为 px。调用方必须先解除阅读器的
+ * reader-top auto margin，避免读到 L3 默认值而不是作者最终级联。
+ * 返回 undefined 表示当前引擎不支持或读取失败，供兼容回退使用。
+ */
+export function hasComputedPercentageHorizontalMargin(el: Element): boolean | undefined {
+  try {
+    const styleMap = (el as Element & TypedStyleMapHost).computedStyleMap?.();
+    if (!styleMap) return undefined;
+    return ["margin-left", "margin-right"].some((property) =>
+      styleMap.get(property)?.toString().includes("%")
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 兼容不支持 Typed OM 的旧 WebView：从可读样式表中寻找百分比声明。
+ * 任何一个外链样式表不可读时，负结果都不可靠，返回 undefined 交给
+ * 几何兜底；单个 SecurityError 不得中断整章测量。
+ */
+export function hasPercentageHorizontalMarginInRules(
+  doc: Document,
+  el: Element
+): boolean | undefined {
   const walk = (rules: CSSRuleList): boolean => {
     for (const rule of Array.from(rules)) {
-      if (rule.type === CSSRule.STYLE_RULE) {
-        const styleRule = rule as CSSStyleRule;
+      const styleRule = rule as CSSStyleRule;
+      if (typeof styleRule.selectorText === "string") {
         const selector = styleRule.selectorText ?? "";
         if (!selector) continue;
         try {
@@ -166,17 +203,28 @@ export function hasPercentageHorizontalMarginInRules(doc: Document, el: Element)
         } catch {
           /* 复杂/伪类选择器匹配失败时忽略 */
         }
-      } else if (rule.type === CSSRule.MEDIA_RULE) {
-        const media = rule as CSSMediaRule;
-        if (media.cssRules && walk(media.cssRules)) return true;
+      }
+      // @media/@supports/@layer 等嵌套规则都可能携带作者 margin 声明。
+      const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+      try {
+        if (nested.cssRules && walk(nested.cssRules)) return true;
+      } catch {
+        // 当前 sheet 已经可读时，单条嵌套规则的失败只代表该分支不可判定；
+        // 继续扫描其他规则，外层 sheet 的不可读标记由调用处统一处理。
       }
     }
     return false;
   };
+
+  let unreadableSheet = false;
   for (const sheet of Array.from(doc.styleSheets)) {
-    if (sheet.cssRules && walk(sheet.cssRules)) return true;
+    try {
+      if (walk(sheet.cssRules)) return true;
+    } catch {
+      unreadableSheet = true;
+    }
   }
-  return false;
+  return unreadableSheet ? undefined : false;
 }
 
 /** 百分比声明只有解析出实际水平偏移时才进入页面相对布局分支。 */
@@ -187,6 +235,49 @@ export function isPercentageMarginLayout(
 ): boolean {
   if (!hasPercentage) return false;
   return (parseFloat(computedLeft) || 0) !== 0 || (parseFloat(computedRight) || 0) !== 0;
+}
+
+/**
+ * 最后一道跨引擎兜底：未知来源的 margin 在作者原位仍留有明确余量，但
+ * C-04 再叠加正文版心会越出包含块时，保留作者原位。仅接受有限、非负、
+ * 非 auto-like 的显式 margin；普通 2em 缩进与作者原位本就越列不命中。
+ */
+export function shouldKeepContainingBlockMarginsWhenBaseWouldOverflow({
+  parentWidth,
+  width,
+  marginLeft,
+  marginRight,
+}: {
+  parentWidth: number;
+  width: number;
+  marginLeft: number;
+  marginRight: number;
+}): boolean {
+  if (
+    !Number.isFinite(parentWidth) ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(marginLeft) ||
+    !Number.isFinite(marginRight) ||
+    parentWidth <= 0 ||
+    width < 0 ||
+    marginLeft < 0 ||
+    marginRight < 0
+  ) {
+    return false;
+  }
+  const base = (parentWidth - width) / 2;
+  if (
+    isAutoLikeHorizontalMargin({ parentWidth, width, marginLeft, marginRight })
+  ) {
+    return false;
+  }
+  const epsilon = 0.5;
+  // CSS auto margin 会在 getComputedStyle 中变成“恰好填满剩余空间”的 px。
+  // 只有作者原位仍留出明确余量，才能证明不是这类 auto-resolved 布局。
+  const originalHasRoom = marginLeft + width + marginRight < parentWidth - epsilon;
+  const withReaderBaseOverflows =
+    base + marginLeft + width + marginRight > parentWidth + epsilon;
+  return originalHasRoom && withReaderBaseOverflows;
 }
 
 /**
@@ -203,6 +294,241 @@ export function isSymmetricHorizontalMargin(left: string, right: string): boolea
     mr > 0 &&
     Math.abs(ml - mr) < 0.5
   );
+}
+
+/**
+ * getComputedStyle 会把 `margin:auto` 解析为实际 px。只有两侧余量都等于
+ * 当前盒子的居中余量时，才能把它当作作者/阅读器的 auto 居中，而不是
+ * 显式写出的相等 margin。
+ */
+export function isAutoLikeHorizontalMargin({
+  parentWidth,
+  width,
+  marginLeft,
+  marginRight,
+}: {
+  parentWidth: number;
+  width: number;
+  marginLeft: number;
+  marginRight: number;
+}): boolean {
+  if (
+    !Number.isFinite(parentWidth) ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(marginLeft) ||
+    !Number.isFinite(marginRight)
+  ) {
+    return false;
+  }
+  const autoCenter = (parentWidth - width) / 2;
+  return (
+    autoCenter > 0 &&
+    marginLeft > 0 &&
+    Math.abs(marginLeft - marginRight) < 0.5 &&
+    Math.abs(marginLeft - autoCenter) < 0.5
+  );
+}
+
+/**
+ * C-18 的正对称 margin 豁免只属于 fit/max-content 这类 intrinsic-size
+ * 容器。普通 width:auto/固定宽度元素仍由 C-04 把作者 margin 映射到正文
+ * 版心；否则目录标题的显式左右缩进会再次被 L3 auto margin 吞掉。
+ */
+export function shouldKeepSymmetricMarginsCentered(
+  left: string,
+  right: string,
+  hasIntrinsicSizeIntent: boolean
+): boolean {
+  return hasIntrinsicSizeIntent && isSymmetricHorizontalMargin(left, right);
+}
+
+export interface ReaderTopFloatContainmentInput {
+  /** 只允许 viewer 的直接子页面级元素进入。 */
+  readerTop: boolean;
+  /** 必须是浏览器最终计算出的物理方向 float。 */
+  float: string;
+  /** `.illus` 等整页布局不能被版心补偿改变。 */
+  fullpage: boolean;
+  parentWidth: number;
+  width: number;
+  /** 阅读器默认版心的 border-box 上限（通常为 40rem）。 */
+  contentWidth: number;
+  marginLeft: string;
+  marginRight: string;
+  /** 作者明确要求全宽/突破版心时保持原布局。 */
+  authorFullWidthIntent: boolean;
+}
+
+/**
+ * L3/L4 浮动页面级元素的版心内缩纯决策门。
+ *
+ * Chromium 会让没有作者 margin 的顶层 float 直接贴在多栏 viewer 的窗口
+ * 边缘；普通 reader-top 则由 L3 auto margin 居中。这里仅给“窄于 40rem、
+ * 没有作者水平 margin、也没有全宽意图”的页面级 float 恢复同一版心边缘。
+ * 纯函数不触碰 DOM，供 applyBookMargins 与稳定回归测试共同使用。
+ */
+export function getReaderTopFloatContainmentMargins(
+  input: ReaderTopFloatContainmentInput
+): { left: number; right: number } | null {
+  const epsilon = 0.5;
+  const float = input.float.trim().toLowerCase();
+  if (!input.readerTop || input.fullpage || !/^(?:left|right)$/u.test(float)) {
+    return null;
+  }
+  if (
+    !Number.isFinite(input.parentWidth) ||
+    !Number.isFinite(input.width) ||
+    !Number.isFinite(input.contentWidth) ||
+    input.parentWidth <= 0 ||
+    input.width < 0 ||
+    input.contentWidth <= 0 ||
+    input.width > input.contentWidth + epsilon ||
+    input.authorFullWidthIntent
+  ) {
+    return null;
+  }
+  const meaningful = (value: string): boolean => {
+    if (!value || value.trim().toLowerCase() === "auto") return false;
+    const parsed = parseFloat(value);
+    // Unknown expressions (`calc`, `var`, env-dependent values) are treated as
+    // meaningful so a conservative fallback never overwrites author layout.
+    return !Number.isFinite(parsed) || Math.abs(parsed) > epsilon;
+  };
+  if (meaningful(input.marginLeft) || meaningful(input.marginRight)) return null;
+
+  const inset = Math.max(0, (input.parentWidth - Math.min(input.parentWidth, input.contentWidth)) / 2);
+  // Match the physical float side: a right float gets right margin to move its
+  // right edge inward; a left float gets left margin to move its left edge in.
+  return float === "right" ? { left: 0, right: inset } : { left: inset, right: 0 };
+}
+
+/**
+ * 只把明确的全宽/突破表达式视为作者意图；`max-width` 本身是上限，不能
+ * 证明作者要求突破版心。`min()/max()/clamp()` 混合表达式也不作猜测，
+ * 除非它明确包含 viewport 单位（例如 `calc(100vw - 2rem)`）。
+ */
+export function isAuthorFullWidthValue(
+  value: string,
+  property: "width" | "max-width" | "min-width"
+): boolean {
+  const compact = value.trim().toLowerCase().replace(/\s+/g, "");
+  if (!compact || compact === "auto" || property === "max-width") return false;
+  if (/^100(?:\.0+)?%$/u.test(compact)) return true;
+  // A plain calc with a page-relative 100% base is an explicit full-page
+  // expression; bounded min/max/clamp forms intentionally do not qualify.
+  if (/^calc\(100%[+-]/u.test(compact)) return true;
+  // Viewport units express page-relative/full-page intent even when a narrow
+  // window makes their current computed width happen to fit inside 40rem.
+  return /(?:dvw|svw|lvw|vw|vi|vmin|vmax)(?:$|[^a-z])/u.test(compact);
+}
+
+type FullWidthRuleResult = boolean | undefined;
+
+/** 只在当前生效的 author CSSOM 条件分支中寻找明确全宽意图。 */
+export function hasAuthoredFullWidthIntentInRules(
+  doc: Document,
+  el: HTMLElement
+): FullWidthRuleResult {
+  const win = doc.defaultView;
+  const conditionState = (rule: CSSRule): FullWidthRuleResult => {
+    const conditional = rule as CSSRule & {
+      conditionText?: string;
+      media?: { mediaText?: string };
+    };
+    if (rule.type === 4) {
+      const query = conditional.media?.mediaText;
+      if (!query || !win || typeof win.matchMedia !== "function") return undefined;
+      try {
+        return win.matchMedia(query).matches;
+      } catch {
+        return undefined;
+      }
+    }
+    if (rule.type === 12) {
+      const query = conditional.conditionText;
+      const css = (win as Window & { CSS?: { supports?: (condition: string) => boolean } }).CSS;
+      if (!query || typeof css?.supports !== "function") return undefined;
+      try {
+        return css.supports(query);
+      } catch {
+        return undefined;
+      }
+    }
+    return true;
+  };
+
+  const walk = (rules: CSSRuleList): FullWidthRuleResult => {
+    let unknownCondition = false;
+    for (const rule of Array.from(rules)) {
+      const active = conditionState(rule);
+      if (active === false) continue;
+      if (active === undefined) {
+        unknownCondition = true;
+        continue;
+      }
+      const styleRule = rule as CSSStyleRule;
+      if (typeof styleRule.selectorText === "string" && styleRule.selectorText) {
+        try {
+          if (
+            el.matches(styleRule.selectorText) &&
+            (["width", "max-width", "min-width"] as const).some((property) =>
+              isAuthorFullWidthValue(styleRule.style.getPropertyValue(property), property)
+            )
+          ) {
+            return true;
+          }
+        } catch {
+          /* 复杂选择器匹配失败时继续扫描其他规则。 */
+        }
+      }
+      const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+      try {
+        if (nested.cssRules) {
+          const nestedResult = walk(nested.cssRules);
+          if (nestedResult === true) return true;
+          if (nestedResult === undefined) unknownCondition = true;
+        }
+      } catch {
+        // 对无法识别的条件/规则保守不推断，调用方会跳过本次补偿。
+        unknownCondition = true;
+      }
+    }
+    return unknownCondition ? undefined : false;
+  };
+  let unknownSheet = false;
+  for (const sheet of Array.from(doc.styleSheets)) {
+    const owner = sheet.ownerNode as Element | null;
+    // Reader-injected overrides contain the L3 max-width rules themselves;
+    // they are not author intent and must not veto this compatibility fix.
+    const readerMarker = owner?.getAttribute?.("data-reader");
+    if (owner?.hasAttribute?.("data-reader") || readerMarker != null) {
+      continue;
+    }
+    try {
+      const result = walk(sheet.cssRules);
+      if (result === true) return true;
+      if (result === undefined) unknownSheet = true;
+    } catch {
+      // An unreadable author sheet is an unknown source; do not infer intent.
+      unknownSheet = true;
+    }
+  }
+  return unknownSheet ? undefined : false;
+}
+
+function hasAuthorFullWidthIntent(doc: Document, el: HTMLElement): boolean {
+  const inline = el.style;
+  if (
+    (["width", "max-width", "min-width"] as const).some((property) =>
+      isAuthorFullWidthValue(inline.getPropertyValue(property), property)
+    )
+  ) {
+    return true;
+  }
+  // Unknown author CSS conditions are treated as intent for this gate: the
+  // layout fix must not overwrite a rule whose full-width meaning we cannot
+  // reliably determine in the current engine.
+  return hasAuthoredFullWidthIntentInRules(doc, el) !== false;
 }
 
 interface InlineStyleValue {
@@ -249,6 +575,181 @@ export function isMediaOnlyFloatContent(nodes: Iterable<Node>): boolean {
   return hasMedia;
 }
 
+const MEDIA_ONLY_TAGS = new Set(["img", "svg", "image", "video", "audio", "canvas"]);
+
+/**
+ * Recursive variant used only for the trailing decorative-float guard. Wrapper
+ * elements and comments are allowed, while any non-whitespace text vetoes the
+ * media-only classification. A media element itself counts as the payload;
+ * SVG descendants are still visited so embedded visible text is not hidden.
+ */
+export function isMediaOnlyFloatSubtree(nodes: Iterable<Node>): boolean {
+  let hasMedia = false;
+  const visit = (node: Node): boolean => {
+    if (node.nodeType === 3) return (node.textContent ?? "").trim() === "";
+    if (node.nodeType === 8) return true;
+    if (node.nodeType !== 1) return true;
+    const el = node as Element;
+    const tag = el.tagName.toLowerCase();
+    if (MEDIA_ONLY_TAGS.has(tag)) hasMedia = true;
+    const children = (el as unknown as { childNodes?: Iterable<Node> }).childNodes;
+    if (!children) return true;
+    for (const child of children) if (!visit(child)) return false;
+    return true;
+  };
+  for (const node of nodes) if (!visit(node)) return false;
+  return hasMedia;
+}
+
+export interface FloatFixRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+export interface TrailingFloatFixGeometry {
+  float: string;
+  position: string;
+  mediaOnly: boolean;
+  beforeColumns: readonly number[];
+  afterColumns: readonly number[];
+  afterRects: readonly FloatFixRect[];
+  afterVisualRects: readonly FloatFixRect[];
+  previousVisualRects: readonly FloatFixRect[];
+  estimatedBeforeBottom: number;
+  contentBottom: number;
+  viewerLeft: number;
+  scrollLeft: number;
+  step: number;
+  pageWidth: number;
+  epsilon?: number;
+}
+
+/** Conservative, DOM-independent decision gate for the trailing media float. */
+export function shouldApplyTrailingFloatMarginFix(g: TrailingFloatFixGeometry): boolean {
+  const epsilon = g.epsilon ?? 0.5;
+  if (!/^(?:left|right)$/u.test(g.float) || !/^(?:static|relative)$/u.test(g.position)) return false;
+  if (!g.mediaOnly || g.beforeColumns.length < 2 || g.afterColumns.length !== 1) return false;
+  if (!Number.isFinite(g.step) || g.step <= 0 || !Number.isFinite(g.pageWidth) || g.pageWidth <= 0) {
+    return false;
+  }
+  if (!g.afterRects.length || !g.afterVisualRects.length) return false;
+  if (
+    !Number.isFinite(g.estimatedBeforeBottom) ||
+    g.estimatedBeforeBottom <= g.contentBottom + epsilon
+  ) {
+    return false;
+  }
+  const columnFor = (x: number): number =>
+    Math.floor((x + g.scrollLeft - g.viewerLeft + epsilon) / g.step);
+  const afterColumn = g.afterColumns[0];
+  const columnLeft = g.viewerLeft + afterColumn * g.step - g.scrollLeft;
+  const columnRight = columnLeft + g.pageWidth;
+  for (const rect of g.afterVisualRects) {
+    if (
+      rect.width <= epsilon ||
+      rect.height <= epsilon ||
+      columnFor(rect.left) !== afterColumn ||
+      rect.left < columnLeft - epsilon ||
+      rect.right > columnRight + epsilon
+    ) {
+      return false;
+    }
+  }
+  const visualBottom = Math.max(...g.afterVisualRects.map((rect) => rect.bottom));
+  if (visualBottom > g.contentBottom + epsilon) return false;
+  for (const candidate of g.afterVisualRects) {
+    for (const previous of g.previousVisualRects) {
+      const overlapW = Math.min(candidate.right, previous.right) - Math.max(candidate.left, previous.left);
+      const overlapH = Math.min(candidate.bottom, previous.bottom) - Math.max(candidate.top, previous.top);
+      if (overlapW > epsilon && overlapH > epsilon) return false;
+    }
+  }
+  return true;
+}
+
+/** 书籍常用全角空格/NBSP 把行内色块补到指定视觉列，不应继续参与行尾悬挂空白。 */
+export function hasTrailingManualPaddingWhitespace(text: string): boolean {
+  // 允许全角/NBSP 后再跟少量普通空格（EPUB 编辑器常混用），但必须
+  // 至少出现一个不可折叠宽空白，避免把普通英文行尾空格误判为视觉补齐。
+  return /[\u3000\u00a0 ]*[\u3000\u00a0][\u3000\u00a0 ]*$/u.test(text);
+}
+
+type InlineBoxVisualStyle = Pick<
+  CSSStyleDeclaration,
+  | "backgroundColor"
+  | "borderLeftStyle"
+  | "borderRightStyle"
+  | "borderLeftWidth"
+  | "borderRightWidth"
+  | "paddingLeft"
+  | "paddingRight"
+>;
+
+/** 是否存在足以让行尾空白具备视觉意义的盒子外观。 */
+export function hasVisibleInlineBox(style: InlineBoxVisualStyle): boolean {
+  const background = style.backgroundColor.trim().toLowerCase();
+  const transparentBackground =
+    background === "" ||
+    background === "transparent" ||
+    /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/u.test(background);
+  const hasBorder =
+    (style.borderLeftStyle !== "none" && (parseFloat(style.borderLeftWidth) || 0) > 0) ||
+    (style.borderRightStyle !== "none" && (parseFloat(style.borderRightWidth) || 0) > 0);
+  const hasPadding =
+    (parseFloat(style.paddingLeft) || 0) > 0 || (parseFloat(style.paddingRight) || 0) > 0;
+  return !transparentBackground || hasBorder || hasPadding;
+}
+
+/**
+ * 行内盒原子化的纯决策门控。实际 DOM 写回前后都必须通过它：初始条件
+ * 防止普通文字被处理，after 条件防止 inline-block 自身仍然越界时留下坏写回。
+ */
+export function shouldApplyInlineBoxOverflowFix({
+  display,
+  trailingPaddingWhitespace,
+  visibleBox,
+  textAlign,
+  rectRight,
+  containerRight,
+  fixedRectRight,
+  fixedWidth,
+  containerWidth,
+}: {
+  display: string;
+  trailingPaddingWhitespace: boolean;
+  visibleBox: boolean;
+  textAlign: string;
+  rectRight: number;
+  containerRight: number;
+  fixedRectRight: number;
+  fixedWidth: number;
+  containerWidth: number;
+}): boolean {
+  const epsilon = 0.5;
+  // `end` is direction-dependent (RTL ends on the left).  This compensation
+  // is deliberately conservative until the line direction is part of the
+  // geometry contract, so only an explicit physical right alignment qualifies.
+  const rightAligned = textAlign.trim().toLowerCase() === "right";
+  return (
+    display === "inline" &&
+    trailingPaddingWhitespace &&
+    visibleBox &&
+    rightAligned &&
+    Number.isFinite(rectRight) &&
+    Number.isFinite(containerRight) &&
+    rectRight > containerRight + epsilon &&
+    Number.isFinite(fixedRectRight) &&
+    Number.isFinite(fixedWidth) &&
+    Number.isFinite(containerWidth) &&
+    fixedRectRight <= containerRight + epsilon &&
+    fixedWidth <= containerWidth + epsilon
+  );
+}
+
 export class ChapterPaginator {
   private blobUrl?: string;
   private viewer: HTMLElement | null = null;
@@ -290,6 +791,14 @@ export class ChapterPaginator {
   private fitContentFixes: Array<{ el: HTMLElement; maxWidth: string }> = [];
   /** float 收缩补偿写回过的元素（下次测量前清除 width） */
   private floatFixes: HTMLElement[] = [];
+  /** 末尾媒体 float 的临时负 margin-top 写回（每轮测量前恢复）。 */
+  private trailingFloatFixes: Array<{ el: HTMLElement; marginTop: InlineStyleValue }> = [];
+  /** 行尾悬挂空白导致越过 computed-right 包含块的可见行内盒写回。 */
+  private inlineBoxFixes: Array<{
+    el: HTMLElement;
+    display: InlineStyleValue;
+    textIndent: InlineStyleValue;
+  }> = [];
   /** 首次布局显示门；token 与 loadSeq 一致，旧章不能揭示新章。 */
   private displayGate: VisibilityGate;
 
@@ -313,6 +822,10 @@ export class ChapterPaginator {
     private fixedLayout = false,
     /** 书内链接点击回调（已解析为书内路径，含可选锚点），供阅读器跳转 */
     private onNavigate?: (href: string) => void,
+    /** 有效书内链接真正改变位置前通知 UI 记录一次可撤销快照。 */
+    private onBeforeInternalNavigate?: (href: string) => void,
+    /** 不需要重载章节的同章锚点跳转已同步完成。 */
+    private onInternalNavigationSettled?: () => void,
     /** 滚轮翻页回调（累积阈值后触发，1=下一页 -1=上一页） */
     private onWheelNavigate?: (dir: 1 | -1) => void,
     /** 键盘翻页回调（焦点在书页内时也有效） */
@@ -476,9 +989,11 @@ export class ChapterPaginator {
     const measuredHeight = this.iframe.clientHeight;
     // 第二遍 margin / fit-content 处理写回的 inline 值要先恢复，
     // 避免字号/窗口变化后按旧值布局
+    this.restoreInlineBoxFixes();
     this.restoreBookMargins();
     this.restoreFitContentFix();
     this.restoreFloatWidths();
+    this.restoreTrailingFloatFixes();
     const parent = viewer.parentElement;
     const parentCs = parent && doc.defaultView ? doc.defaultView.getComputedStyle(parent) : null;
     const baseW = parent?.clientWidth || this.iframe.clientWidth || viewer.clientWidth;
@@ -534,6 +1049,8 @@ export class ChapterPaginator {
     this.applyFitContentFix();
     this.applyBookMargins();
     this.applyFloatShrinkFix();
+    this.applyTrailingFloatMarginFix();
+    this.applyInlineBoxOverflowFix();
     // 只在整轮测量与二阶段补偿完成后提交尺寸；若测量期间窗口又变化，
     // ResizeObserver 仍会发现新尺寸并发起下一轮。
     this.measuredViewport = { width: measuredWidth, height: measuredHeight };
@@ -582,47 +1099,60 @@ export class ChapterPaginator {
     );
     if (candidates.length === 0) return;
 
-    // 第一遍：记录阅读器默认居中后的元素宽度与原始 max-width 意图。
+    // 先暂时移除 L3 auto margin，再读取“作者/用户最终获胜的级联”。
+    // getComputedStyle 会把百分比解析成 px，必须优先用 Typed OM 保留
+    // 70% / calc(...%) 这类指定值；旧 WebView 才回退到 CSSOM 扫描。
     // 注意：多栏里元素若跨列碎片，getBoundingClientRect().width 会把碎片
     // 并成一个超宽矩形，必须用 computed width。
     const widths = new Map<HTMLElement, number>();
     const maxWidths = new Map<HTMLElement, string>();
     const percentageMargins = new Map<
       HTMLElement,
-      { maxWidth: InlineStyleValue; relaxedReaderMaxWidth: boolean }
-    >();
-    for (const el of candidates) {
-      void el.offsetWidth;
-      let cs = win.getComputedStyle(el);
-      maxWidths.set(el, cs.maxWidth);
-
-      // 水平百分比 margin 是相对包含块的页面布局。若作者没有自己的 inline
-      // max-width，暂时解除 L3 的 40rem 默认值，才能读到作者原本的剩余宽度。
-      if (
-        hasPercentageHorizontalMargin(el.style) ||
-        hasPercentageHorizontalMarginInRules(doc, el)
-      ) {
-        const maxWidth = snapshotInlineStyleProperty(el.style, "max-width");
-        const relaxedReaderMaxWidth = maxWidth.value === "";
-        percentageMargins.set(el, { maxWidth, relaxedReaderMaxWidth });
-        if (relaxedReaderMaxWidth) {
-          el.style.setProperty("max-width", "none");
-          void el.offsetWidth;
-          cs = win.getComputedStyle(el);
-        }
+      {
+        percentage: boolean | undefined;
+        maxWidth?: InlineStyleValue;
+        relaxedReaderMaxWidth: boolean;
       }
-
-      const borderBoxW = getBorderBoxWidth(cs);
-      widths.set(
-        el,
-        borderBoxW > 0 ? borderBoxW : el.getBoundingClientRect().width
-      );
-    }
-
+    >();
     const restoreReaderMargins = readerSheet
       ? this.disableReaderTopMarginRules(readerSheet)
       : () => {};
     try {
+      for (const el of candidates) {
+        void el.offsetWidth;
+        let cs = win.getComputedStyle(el);
+        maxWidths.set(el, cs.maxWidth);
+
+        const typedPercentage = hasComputedPercentageHorizontalMargin(el);
+        const percentage =
+          typedPercentage ??
+          (hasPercentageHorizontalMargin(el.style) ||
+            hasPercentageHorizontalMarginInRules(doc, el));
+        const marginProbe: {
+          percentage: boolean | undefined;
+          maxWidth?: InlineStyleValue;
+          relaxedReaderMaxWidth: boolean;
+        } = { percentage, relaxedReaderMaxWidth: false };
+
+        // 水平百分比 margin 是相对包含块的页面布局。若作者没有自己的 inline
+        // max-width，暂时解除 L3 的 40rem 默认值，才能读到作者原本的剩余宽度。
+        if (percentage === true) {
+          const maxWidth = snapshotInlineStyleProperty(el.style, "max-width");
+          const relaxedReaderMaxWidth = maxWidth.value === "";
+          marginProbe.maxWidth = maxWidth;
+          marginProbe.relaxedReaderMaxWidth = relaxedReaderMaxWidth;
+          if (relaxedReaderMaxWidth) {
+            el.style.setProperty("max-width", "none");
+            void el.offsetWidth;
+            cs = win.getComputedStyle(el);
+          }
+        }
+        percentageMargins.set(el, marginProbe);
+
+        const borderBoxW = getBorderBoxWidth(cs);
+        widths.set(el, borderBoxW > 0 ? borderBoxW : el.getBoundingClientRect().width);
+      }
+
       for (const el of candidates) {
         // 同一测量周期内已修正过则跳过，避免把上次写回的 margin
         // 再当成书 margin 叠加一次（导致 namebox 732/-32 这类错误）。
@@ -648,7 +1178,7 @@ export class ChapterPaginator {
         // [L4-C16] 百分比水平 margin 已经以包含块为基准，不能再叠加版心
         // base。此时 max-width 已按需解除，computed width/margin 就是书的
         // 原始页面布局；用 inline important 穿过 L3 margin 默认值写回。
-        if (isPercentageMarginLayout(Boolean(percentage), left, right)) {
+        if (isPercentageMarginLayout(percentage?.percentage === true, left, right)) {
           const ml = parseFloat(left) || 0;
           const mr = parseFloat(right) || 0;
           this.marginFixes.push({
@@ -665,7 +1195,7 @@ export class ChapterPaginator {
 
         // 有百分比声明但实际水平值为 0：不属于流体定位，撤销上面为测量
         // 临时写入的 max-width，继续走普通版心逻辑。
-        if (percentage?.relaxedReaderMaxWidth) {
+        if (percentage?.relaxedReaderMaxWidth && percentage.maxWidth) {
           restoreInlineStyleProperty(el.style, "max-width", percentage.maxWidth);
         }
 
@@ -694,24 +1224,89 @@ export class ChapterPaginator {
           continue;
         }
 
+        // [L3/L4-C31] Chromium may let a top-level float escape the reader's
+        // 40rem containing block: with the reader auto margin temporarily
+        // removed, restore only the physical float-side inset. Keep this
+        // branch after the intrinsic-size path so C-18 retains precedence.
+        // Explicit author margins, full-page classes, a box wider than the
+        // reader measure, or authored full-width/breakout intent all remain
+        // in the book's original layout.
+        const floatMargins = getReaderTopFloatContainmentMargins({
+          readerTop: el.classList.contains("reader-top"),
+          float: cs.float,
+          fullpage:
+            el.classList.contains("illus") ||
+            el.classList.contains("kuchie") ||
+            el.classList.contains("cover") ||
+            el.classList.contains("duokan-image-single") ||
+            el.classList.contains("duokan-image-fullscreen"),
+          parentWidth: parentW,
+          width,
+          contentWidth: TEXT_MEASURE.maxEm * this.settings.fontSizePx,
+          marginLeft: left,
+          marginRight: right,
+          authorFullWidthIntent: hasAuthorFullWidthIntent(doc, el),
+        });
+        if (floatMargins) {
+          this.marginFixes.push({
+            el,
+            left: snapshotInlineStyleProperty(el.style, "margin-left"),
+            right: snapshotInlineStyleProperty(el.style, "margin-right"),
+          });
+          el.setAttribute("data-reader-margin-fixed", "1");
+          el.style.setProperty("margin-left", `${floatMargins.left}px`, "important");
+          el.style.setProperty("margin-right", `${floatMargins.right}px`, "important");
+          continue;
+        }
+
         if (!meaningful(left) && !meaningful(right)) continue;
 
-        // [L3/L4-C18] margin:1em 一类正对称水平留白没有方向性。
-        // 保持阅读器的 auto 居中即可；不能进入 ml>0 的单向缩进分支。
-        if (isSymmetricHorizontalMargin(left, right)) continue;
+        const ml = parseFloat(left) || 0;
+        const mr = parseFloat(right) || 0;
+        // 作者/阅读器真正的 auto margin 即使在 computed style 中已变成 px，
+        // 仍应保持居中；显式相等 margin 不会恰好等于全部剩余空间。
+        if (
+          isAutoLikeHorizontalMargin({
+            parentWidth: parentW,
+            width,
+            marginLeft: ml,
+            marginRight: mr,
+          })
+        ) {
+          continue;
+        }
 
-        const autoCenter = (parentW - width) / 2;
-        const autoLike =
-          parseFloat(left) !== 0 &&
-          Math.abs(parseFloat(left) - parseFloat(right)) < 0.5 &&
-          Math.abs(parseFloat(left) - autoCenter) < 0.5;
-        if (autoLike) continue;
+        // [L3/L4-C18] fit/max-content 盒的 margin:1em 是双侧留白，经过
+        // intrinsic-size 补偿后保持 reader auto 居中。普通 width:auto 或
+        // 固定宽度元素仍走 C-04，保留作者相对正文版心的显式缩进。
+        if (shouldKeepSymmetricMarginsCentered(left, right, hadFitContent)) continue;
+
+        // [L3/L4-C16] Typed OM 和 CSSOM 都无法证明 margin 来源时，只在
+        // 作者原位留有余量、叠加正文版心必越列的严格情形保留原位。
+        // 这不是按尺寸猜百分比；普通 2em 缩进和原位本就越列都不会命中。
+        if (
+          percentage?.percentage === undefined &&
+          shouldKeepContainingBlockMarginsWhenBaseWouldOverflow({
+            parentWidth: parentW,
+            width,
+            marginLeft: ml,
+            marginRight: mr,
+          })
+        ) {
+          this.marginFixes.push({
+            el,
+            left: snapshotInlineStyleProperty(el.style, "margin-left"),
+            right: snapshotInlineStyleProperty(el.style, "margin-right"),
+          });
+          el.setAttribute("data-reader-margin-fixed", "1");
+          el.style.setProperty("margin-left", `${ml}px`, "important");
+          el.style.setProperty("margin-right", `${mr}px`, "important");
+          continue;
+        }
 
         // 把书的不对称 margin 解释为“相对居中版心列的缩进”：
         // 正文列左缘 = (parent - width)/2；书 margin-left:2em 意味着
         // 元素左缘再缩进 2em，与正文首行 text-indent 对齐。
-        const ml = parseFloat(left) || 0;
-        const mr = parseFloat(right) || 0;
         const base = (parentW - width) / 2;
         let desiredLeft: number;
         let desiredRight: number;
@@ -812,6 +1407,112 @@ export class ChapterPaginator {
     this.floatFixes = [];
   }
 
+  private restoreTrailingFloatFixes(): void {
+    for (const fix of this.trailingFloatFixes) {
+      restoreInlineStyleProperty(fix.el.style, "margin-top", fix.marginTop);
+    }
+    this.trailingFloatFixes = [];
+  }
+
+  /** 恢复上一轮行尾行内盒原子化写回的 inline 值及优先级。 */
+  private restoreInlineBoxFixes(): void {
+    for (const fix of this.inlineBoxFixes) {
+      // The marker is only a per-measure guard.  It must not survive the
+      // restore phase or a later resize/reflow would skip the candidate.
+      fix.el.removeAttribute("data-reader-inline-box-fixed");
+      restoreInlineStyleProperty(fix.el.style, "display", fix.display);
+      restoreInlineStyleProperty(fix.el.style, "text-indent", fix.textIndent);
+    }
+    this.inlineBoxFixes = [];
+  }
+
+  /**
+   * L5-C25：Chromium computed right 对齐行中的尾随全角空白会挂在可见 inline
+   * 盒外，导致目录色块越过其段落 inline-end，窄视口时还会制造残余列。
+   * 仅在可见盒、手工补齐空白、实际几何越界且原子化后确实消除越界时写回；
+   * 普通文字、无外观 span、链接/ruby/脚注语义节点都保持原样。
+   */
+  private applyInlineBoxOverflowFix(): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !doc.defaultView) return;
+    const win = doc.defaultView;
+    const epsilon = 0.5;
+
+    const isExcludedSemanticNode = (el: HTMLElement): boolean => {
+      const tag = el.tagName.toLowerCase();
+      if (tag === "a" || tag === "ruby" || tag === "rt" || tag === "rp" || tag === "sup") {
+        return true;
+      }
+      return Boolean(el.closest("ruby, rt, rp, sup, .duokan-footnote, .zhangyue-footnote"));
+    };
+
+    const lineContainer = (
+      el: HTMLElement,
+      rect: DOMRect
+    ): { rect: DOMRect; textAlign: string } | null => {
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        const cs = win.getComputedStyle(parent);
+        if (/^(?:inline|ruby)$/u.test(cs.display)) continue;
+        const rects = Array.from(parent.getClientRects());
+        const matching =
+          rects.find((r) => r.bottom > rect.top + epsilon && r.top < rect.bottom - epsilon) ??
+          parent.getBoundingClientRect();
+        return { rect: matching, textAlign: cs.textAlign };
+      }
+      return null;
+    };
+
+    for (const el of Array.from(viewer.querySelectorAll("*")) as HTMLElement[]) {
+      // Most chapter nodes do not carry manual padding whitespace.  Check
+      // text before getComputedStyle to avoid forcing style/layout work for
+      // every element on every measure pass.
+      if (!hasTrailingManualPaddingWhitespace(el.textContent ?? "")) continue;
+      if (el.hasAttribute("data-reader-inline-box-fixed") || isExcludedSemanticNode(el)) {
+        continue;
+      }
+      const cs = win.getComputedStyle(el);
+      if (cs.display !== "inline") continue;
+      const originalDisplay = cs.display;
+      if (!hasVisibleInlineBox(cs)) continue;
+
+      const before = el.getBoundingClientRect();
+      const container = lineContainer(el, before);
+      if (!container || container.textAlign.trim().toLowerCase() !== "right") {
+        continue;
+      }
+      if (before.right <= container.rect.right + epsilon) continue;
+
+      const original = {
+        display: snapshotInlineStyleProperty(el.style, "display"),
+        textIndent: snapshotInlineStyleProperty(el.style, "text-indent"),
+      };
+      el.style.setProperty("display", "inline-block", "important");
+      el.style.setProperty("text-indent", "0", "important");
+      void el.offsetWidth;
+      const after = el.getBoundingClientRect();
+      const afterContainer = lineContainer(el, after) ?? container;
+      const effective = shouldApplyInlineBoxOverflowFix({
+        display: originalDisplay,
+        trailingPaddingWhitespace: true,
+        visibleBox: true,
+        textAlign: container.textAlign,
+        rectRight: before.right,
+        containerRight: container.rect.right,
+        fixedRectRight: after.right,
+        fixedWidth: after.width,
+        containerWidth: afterContainer.rect.width,
+      });
+      if (!effective) {
+        restoreInlineStyleProperty(el.style, "display", original.display);
+        restoreInlineStyleProperty(el.style, "text-indent", original.textIndent);
+        continue;
+      }
+      el.setAttribute("data-reader-inline-box-fixed", "1");
+      this.inlineBoxFixes.push({ el, ...original });
+    }
+  }
+
   /**
    * L5-C08：CSS 多栏里浮动元素的 shrink-to-fit 异常（气泡塌成逐字宽）。
    * 用 Canvas 逐文本节点测量 max-content，按父容器可用宽度收缩并写回 px，
@@ -868,7 +1569,7 @@ export class ChapterPaginator {
     for (const el of Array.from(viewer.querySelectorAll("*")) as HTMLElement[]) {
       const cs = win.getComputedStyle(el);
       if (cs.float === "none") continue;
-      if (/\bwidth\s*:/.test(el.getAttribute("style") ?? "")) continue;
+      if (hasAuthoredInlineWidth(el.getAttribute("style") ?? "")) continue;
       // 只修复“塌缩成逐字宽”的浮动元素；已有明确宽度且正常布局
       // （如目录标题 width:100% + float:left）不处理。
       const currentWidth = parseFloat(cs.width);
@@ -919,6 +1620,102 @@ export class ChapterPaginator {
       el.style.setProperty("width", `${target}px`);
       this.floatFixes.push(el);
     }
+  }
+
+  /**
+   * L5-C30：Chromium 可把章节末尾的纯图片 float 拆到下一列，制造只有装饰
+   * 内容的错误第 2 页。只试探最后一个直接子元素，并用事务式负 margin-top
+   * 把它收回上一列；任何单列、边界或兄弟重叠条件失败都立即恢复原值。
+   */
+  private applyTrailingFloatMarginFix(): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !doc.defaultView || this.step <= 0 || this.pageWidth <= 0) return;
+    const children = Array.from(viewer.children) as HTMLElement[];
+    const candidate = children.at(-1);
+    if (!candidate) return;
+    const win = doc.defaultView;
+    const cs = win.getComputedStyle(candidate);
+    if (!/^(?:left|right)$/u.test(cs.float) || !/^(?:static|relative)$/u.test(cs.position)) return;
+    if (!isMediaOnlyFloatSubtree(candidate.childNodes)) return;
+
+    const viewerRect = viewer.getBoundingClientRect();
+    const paddingBottom = parseFloat(win.getComputedStyle(viewer).paddingBottom) || 0;
+    const contentBottom = viewerRect.bottom - paddingBottom;
+    const epsilon = 0.5;
+    const toRect = (r: DOMRect): FloatFixRect => ({
+      left: r.left,
+      right: r.right,
+      top: r.top,
+      bottom: r.bottom,
+      width: r.width,
+      height: r.height,
+    });
+    const rectsOf = (el: Element): FloatFixRect[] =>
+      Array.from(el.getClientRects()).map(toRect).filter((r) => r.width > 0 && r.height > 0);
+    const beforeRects = rectsOf(candidate);
+    if (!beforeRects.length) return;
+    const columnFor = (x: number): number =>
+      Math.floor((x + viewer.scrollLeft - viewerRect.left + epsilon) / this.step);
+    const columnsFor = (rects: FloatFixRect[]): number[] =>
+      Array.from(
+        new Set(
+          rects.flatMap((r) => [columnFor(r.left), columnFor(Math.max(r.left, r.right - epsilon))])
+        )
+      );
+    const beforeColumns = columnsFor(beforeRects);
+    if (beforeColumns.length < 2) return;
+    const firstColumn = Math.min(...beforeColumns);
+    const firstColumnTop = Math.min(
+      ...beforeRects
+        .filter((rect) => columnFor(rect.left) === firstColumn)
+        .map((rect) => rect.top)
+    );
+    const scrollHeight = candidate.scrollHeight;
+    if (!Number.isFinite(scrollHeight) || scrollHeight <= 0 || !Number.isFinite(firstColumnTop)) {
+      return;
+    }
+    const estimatedBeforeBottom = firstColumnTop + scrollHeight;
+    if (estimatedBeforeBottom <= contentBottom + epsilon) return;
+
+    const originalMarginTop = snapshotInlineStyleProperty(candidate.style, "margin-top");
+    const computedMarginTop = parseFloat(cs.marginTop);
+    const shift = estimatedBeforeBottom - contentBottom + 1;
+    if (!Number.isFinite(shift) || shift <= 0) return;
+    const baseMargin = Number.isFinite(computedMarginTop) ? computedMarginTop : 0;
+    candidate.style.setProperty("margin-top", `${baseMargin - shift}px`, "important");
+    void viewer.offsetWidth;
+    const afterRects = rectsOf(candidate);
+    const visualRectsOf = (root: HTMLElement): FloatFixRect[] =>
+      [root, ...Array.from(root.querySelectorAll("*")) as HTMLElement[]]
+        .flatMap((el) => rectsOf(el));
+    const afterVisualRects = visualRectsOf(candidate);
+    const previousVisualRects = children
+      .slice(0, -1)
+      .flatMap((el) => visualRectsOf(el));
+    const afterColumns = columnsFor(afterRects);
+    const accepted = shouldApplyTrailingFloatMarginFix({
+      float: cs.float,
+      position: cs.position,
+      mediaOnly: true,
+      beforeColumns,
+      afterColumns,
+      afterRects,
+      afterVisualRects,
+      previousVisualRects,
+      estimatedBeforeBottom,
+      contentBottom,
+      viewerLeft: viewerRect.left,
+      scrollLeft: viewer.scrollLeft,
+      step: this.step,
+      pageWidth: this.pageWidth,
+      epsilon,
+    });
+    if (!accepted) {
+      restoreInlineStyleProperty(candidate.style, "margin-top", originalMarginTop);
+      return;
+    }
+    this.trailingFloatFixes.push({ el: candidate, marginTop: originalMarginTop });
   }
 
   /**
@@ -1279,14 +2076,25 @@ export class ChapterPaginator {
       // 激活 :target，再由分页器将目标元素定位到对应分页列。
       const fragment = getFragmentNavigation(href);
       if (fragment) {
+        // 缺失目标只同步 hash，不制造一条“已跳转”的假历史；step/viewer
+        // 检查保证通知发生在实际可执行 jumpToAnchor 之前。
+        const target = this.contentDoc?.getElementById(fragment.anchor);
+        if (!target || !this.viewer || this.step <= 0) {
+          syncFragmentHash(this.iframe.contentWindow, fragment.hash);
+          return;
+        }
+        this.onBeforeInternalNavigate?.(href);
         syncFragmentHash(this.iframe.contentWindow, fragment.hash);
         this.jumpToAnchor(fragment.anchor);
+        this.onInternalNavigationSettled?.();
       }
       return;
     }
     const { path, anchor } = splitHref(href);
     const resolved = resolvePath(this._currentPath, path);
-    this.onNavigate?.(anchor ? `${resolved}#${anchor}` : resolved);
+    const destination = anchor ? `${resolved}#${anchor}` : resolved;
+    this.onBeforeInternalNavigate?.(destination);
+    this.onNavigate?.(destination);
   }
 
   /** 显示脚注弹层：记录标记（供重排重定位）并通知阅读器。 */
@@ -1426,6 +2234,8 @@ export class ChapterPaginator {
   private cleanupDoc(): void {
     this.lastFootnoteEl = null;
     this.footnotePinned = false;
+    this.restoreInlineBoxFixes();
+    this.restoreTrailingFloatFixes();
     this.contentDoc?.removeEventListener("load", this.imgHandler, true);
     this.contentDoc?.removeEventListener("click", this.linkHandler, true);
     this.contentDoc?.removeEventListener("click", this.handleDocClick, true);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rewriteCssUrls } from "./cssRewrite";
+import { hasAuthoredCssProperty, rewriteCssUrls, stripCssComments } from "./cssRewrite";
 
 describe("rewriteCssUrls", () => {
   const urlFor = (p: string): string | undefined => `blob:test/${p}`;
@@ -171,5 +171,95 @@ p.cut { width: 90%; }`;
     const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor, { getText });
     expect(out).toContain("循环 @import 已跳过：a.css");
     expect(out).toContain(".x { width: min(90%, 36rem); }");
+  });
+
+  it("注释内的 import/url/width 原样保留且不会读取或泄漏规则", () => {
+    const comment = `/* @import "hidden.css"; .hidden { width: 50%; background: url(hidden.png); } */`;
+    let reads = 0;
+    const out = rewriteCssUrls(
+      `${comment}\n.real { width: 50%; background: url(active.png); }`,
+      "OEBPS/Styles/main.css",
+      urlFor,
+      {
+        getText: () => {
+          reads += 1;
+          return ".leak { color: red; }";
+        },
+      }
+    );
+    expect(reads).toBe(0);
+    expect(out).toContain(comment);
+    expect(out).toContain(".real { width: min(50%, 20rem);");
+    expect(out).toContain('url("blob:test/OEBPS/Styles/active.png")');
+    expect(out).not.toContain(".leak");
+  });
+
+  it("quoted url 中的 comment-like 字符属于 URL 内容", () => {
+    const out = rewriteCssUrls(
+      `.cover { background: url("a/*b*/.png"); }`,
+      "OEBPS/Styles/main.css",
+      urlFor
+    );
+    expect(out).toContain('url("blob:test/OEBPS/Styles/a/*b*/.png")');
+  });
+
+  it("递归导入中的注释也不会在父级后续 pass 中暴露", () => {
+    const childComment = `/* @import "hidden.css"; .hidden { width: 40%; } */`;
+    const out = rewriteCssUrls(
+      `@import "child.css";\n.parent { width: 50%; }`,
+      "OEBPS/Styles/main.css",
+      urlFor,
+      {
+        getText: (p) => (p.endsWith("/child.css") ? `${childComment}\n.child { width: 25%; }` : undefined),
+      }
+    );
+    expect(out).toContain(childComment);
+    expect(out).toContain(".child { width: min(25%, 10rem); }");
+    expect(out).toContain(".parent { width: min(50%, 20rem); }");
+    expect(out).not.toContain("hidden.css → 内联");
+  });
+
+  it("未闭合注释保护到文本末尾", () => {
+    const css = `/* width: 90%; background: url(hidden.png);`;
+    expect(rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor)).toBe(css);
+  });
+
+  it("作者文本中的旧占位符字面量不会被误删或恢复污染", () => {
+    const literal = "__READER_CSS_COMMENT_0__";
+    const css = `/* real comment */\n.visible { --token: ${literal}; content: "${literal}"; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(`--token: ${literal}`);
+    expect(out).toContain(`content: "${literal}"`);
+    expect(stripCssComments(`.x { content: "${literal}"; }`)).toContain(literal);
+  });
+
+  it("根注释与递归子 CSS 的作者占位符字面量互不污染", () => {
+    const literal = "__READER_CSS_COMMENT_0__";
+    const out = rewriteCssUrls(
+      `/* root comment */\n@import "child.css";`,
+      "OEBPS/Styles/main.css",
+      urlFor,
+      { getText: () => `.child { --token: ${literal}; content: "${literal}"; }` }
+    );
+    expect(out).toContain(`--token: ${literal}`);
+    expect(out).toContain(`content: "${literal}"`);
+  });
+
+  it("注释关键词不影响活动 width 与 float 判定", () => {
+    const out = rewriteCssUrls(
+      `/* img body float: left; */\n.card { width: 50%; }\n.card2 { /* float: left; */ width: 25%; }`,
+      "OEBPS/Styles/main.css",
+      urlFor
+    );
+    expect(out).toContain(".card { width: min(50%, 20rem); }");
+    expect(out).toContain(".card2 { /* float: left; */ width: min(25%, 10rem); }");
+  });
+
+  it("属性来源判断忽略注释但保留字符串与活动声明", () => {
+    expect(stripCssComments('a { content: "/* width: 50%; */"; }')).toContain(
+      'content: "/* width: 50%; */"'
+    );
+    expect(hasAuthoredCssProperty("/* width: 50%; */", "width")).toBe(false);
+    expect(hasAuthoredCssProperty("/* width: 50%; */ width: 25%;", "width")).toBe(true);
   });
 });
