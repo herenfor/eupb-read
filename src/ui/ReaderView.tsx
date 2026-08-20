@@ -1,9 +1,15 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { Book } from "../core/types";
 import { nextLinearIndex, spineItemPath } from "../core/book";
-import { ChapterPaginator, type ChapterState, type FootnotePayload } from "../render/paginator";
+import {
+  ChapterPaginator,
+  type ChapterState,
+  type FootnotePayload,
+  type WithinChapterNavigationOptions,
+} from "../render/paginator";
 import type { ResourceServer } from "../render/resources";
 import type { ReaderSettings } from "../render/settings";
+import { createSettingsReloadDebouncer } from "./settingsReload";
 import { TurnIntentBuffer, WheelTurnAccumulator } from "./turnIntent";
 
 export interface ReaderHandle {
@@ -19,11 +25,15 @@ export interface ReaderHandle {
     ratio: number;
     charsRead: number;
     totalChars: number;
+    textOffset: number | null;
+    textSnippet: string | null;
   } | null;
   /** 当前锚点元素的一行文本（书签列表展示用） */
   getAnchorText(): string | null;
   /** 跳到页内锚点（注释返回链接等） */
   jumpToAnchor(anchor: string): void;
+  /** 在已完成布局的当前章节内同步导航；失败不改变位置。 */
+  navigateWithinCurrentChapter(options: WithinChapterNavigationOptions): boolean;
   /** 脚注标记当前矩形（阅读区坐标系），弹层随重排重定位用。 */
   getFootnoteMarkerRect(): {
     left: number;
@@ -41,7 +51,7 @@ interface ReaderViewProps {
   spineIndex: number;
   /** 目录跳转的页内锚点（随章节切换一起更新） */
   anchor?: string;
-  /** 锚点变更序号：同章节重复跳转时强制重载 */
+  /** 锚点变更序号：仅用于跨章或同章 direct 失败后的兼容重载 */
   anchorNonce: number;
   settings: ReaderSettings;
   /** 用户上传字体的会话内资源（family + blob URL） */
@@ -67,7 +77,14 @@ interface ReaderViewProps {
   /** 桌面端 hover 移出脚注标记时关闭弹层 */
   onFootnoteClose(): void;
   /** 打开书时恢复的阅读锚点（可选，页码之外的精确定位） */
-  initialAnchor?: { index: number; ratio: number } | null;
+  initialAnchor?: {
+    index: number;
+    ratio: number;
+    anchorTextOffset: number | null;
+    anchorTextSnippet: string | null;
+  } | null;
+  /** Legacy page fallback; paginator consumes it only after both anchors fail. */
+  initialPage?: number;
 }
 
 function parseViewport(vp: string | undefined): { w: number; h: number } | null {
@@ -118,6 +135,16 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       : settings;
   // 渲染层设置：把用户上传字体的 blob URL 注入分页器/sanitize
   const renderSettings: ReaderSettings = { ...effSettings, customFonts: props.userFonts };
+  const settingsReloadDebouncerRef = useRef<ReturnType<typeof createSettingsReloadDebouncer> | null>(null);
+  if (!settingsReloadDebouncerRef.current) {
+    settingsReloadDebouncerRef.current = createSettingsReloadDebouncer(150);
+  }
+  const latestRenderSettingsRef = useRef(renderSettings);
+  latestRenderSettingsRef.current = renderSettings;
+  const settingsIdentityRef = useRef<{
+    settings: ReaderSettings;
+    userFonts: ReaderViewProps["userFonts"];
+  } | null>(null);
 
   // 创建分页器（book/server 就绪后；App 端用 key 保证 book 变化时整体重建）
   useEffect(() => {
@@ -194,21 +221,24 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     );
     paginatorRef.current = p;
     return () => {
+      settingsReloadDebouncerRef.current?.cancel();
       turnIntentRef.current.reset();
       outerWheelRef.current.reset();
       p.dispose();
       paginatorRef.current = null;
+      // ResourceServer 的所有权终点必须在 paginator dispose 之后；章节 iframe
+      // 不再读取共享图片/字体 URL 后，才撤销整本书资源。
+      server.revokeAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, server]);
 
   // 章节切换 → 加载
-  const initialAnchorRef = useRef(props.initialAnchor ?? null);
-  // 目录返回/历史回退可能在同一 ReaderView 生命周期内更新 initialAnchor
   useEffect(() => {
-    initialAnchorRef.current = props.initialAnchor ?? null;
-  }, [props.initialAnchor]);
-  useEffect(() => {
+    // A chapter/anchor transition owns the next load.  A settings timer from
+    // the previous chapter must not start a second load after this effect.
+    settingsReloadDebouncerRef.current?.cancel();
+    settingsIdentityRef.current = { settings, userFonts: props.userFonts };
     const p = paginatorRef.current;
     if (!p) return;
     autoAdvanceRef.current = false;
@@ -220,7 +250,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     }
     turnIntentRef.current.markLoading();
     void (async () => {
-      // 目录/翻章是显式章节跳转：即使点的是当前章，也要回到开头或页内锚点，
+      // 跨章/兼容重载是显式章节跳转：回到开头或页内锚点，
       // 而不是沿用旧页号与旧阅读锚点。回翻上一章时把 atEnd 交给 paginator：
       // 由它“翻到最后一页后再显示”，避免先闪第一页。
       const startAtEnd = pendingStartAtEndRef.current;
@@ -229,24 +259,40 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
         anchor: props.anchor,
         resetPage: true,
         startAtEnd,
+        readingAnchor: props.initialAnchor
+          ? {
+              index: props.initialAnchor.index,
+              ratio: props.initialAnchor.ratio,
+              textOffset: props.initialAnchor.anchorTextOffset,
+              textSnippet: props.initialAnchor.anchorTextSnippet,
+              charsRead: props.initialAnchor.anchorTextOffset ?? 0,
+              totalChars: 0,
+            }
+          : null,
+        fallbackPage: props.initialPage ?? 0,
       });
-      // 打开书恢复阅读锚点：在 load 清空换章锚点之后、iframe 就绪之前设置
-      if (initialAnchorRef.current) {
-        p.setReadingAnchor({ path, ...initialAnchorRef.current });
-        initialAnchorRef.current = null;
-      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, spineIndex, props.anchorNonce]);
 
-  // 设置变更 → 重载（阅读位置由分页器内容锚点保留；仅在实际变化时触发）
-  const prevSettingsRef = useRef(renderSettings);
+  // 设置变更 → 合并后重载（阅读位置由分页器内容锚点保留；仅在实际变化时触发）。
+  // 章节 effect 已先记录该次 render 的设置，因此章节切换只走一次正常 load，
+  // 不会再被 settings effect 追加一个重载。
   useEffect(() => {
+    const previous = settingsIdentityRef.current;
+    if (!previous) {
+      settingsIdentityRef.current = { settings, userFonts: props.userFonts };
+      return;
+    }
+    if (previous.settings === settings && previous.userFonts === props.userFonts) return;
+    settingsIdentityRef.current = { settings, userFonts: props.userFonts };
     const p = paginatorRef.current;
     if (!p) return;
-    if (prevSettingsRef.current === renderSettings) return;
-    prevSettingsRef.current = renderSettings;
-    void p.reloadWithSettings(renderSettings);
+    settingsReloadDebouncerRef.current?.schedule(() => {
+      const current = paginatorRef.current;
+      if (!current || current !== p) return;
+      void current.reloadWithSettings(latestRenderSettingsRef.current);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, props.userFonts]);
 
@@ -325,6 +371,13 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       },
       jumpToAnchor(anchor) {
         paginatorRef.current?.jumpToAnchor(anchor);
+      },
+      navigateWithinCurrentChapter(options) {
+        const paginator = paginatorRef.current;
+        if (!paginator) return false;
+        const navigated = paginator.navigateWithinCurrentChapter(options);
+        if (navigated) onInternalNavigationSettledRef.current();
+        return navigated;
       },
       getFootnoteMarkerRect() {
         const p = paginatorRef.current;

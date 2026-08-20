@@ -1,10 +1,17 @@
+import { sanitizePersistedTextAnchor } from "../render/textAnchor";
+
 const PREFIX = "epub-reader:";
 
 export interface SavedProgress {
   spineIndex: number;
   page: number;
   /** 内容锚点（精确恢复阅读位置；页码为兜底） */
-  anchor?: { index: number; ratio: number } | null;
+  anchor?: {
+    index: number;
+    ratio: number;
+    anchorTextOffset?: number | null;
+    anchorTextSnippet?: string | null;
+  } | null;
 }
 
 export function readProgress(key: string): SavedProgress | null {
@@ -18,6 +25,13 @@ export function readProgress(key: string): SavedProgress | null {
       (typeof parsed.anchor.index !== "number" || typeof parsed.anchor.ratio !== "number")
     ) {
       parsed.anchor = null;
+    } else if (parsed.anchor) {
+      const text = sanitizePersistedTextAnchor({
+        textOffset: parsed.anchor.anchorTextOffset,
+        textSnippet: parsed.anchor.anchorTextSnippet,
+      });
+      parsed.anchor.anchorTextOffset = text.textOffset;
+      parsed.anchor.anchorTextSnippet = text.textSnippet;
     }
     return parsed;
   } catch {

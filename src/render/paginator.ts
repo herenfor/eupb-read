@@ -2,9 +2,18 @@ import { sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { resolvePath, isExternalUrl, isFragmentOnly, splitHref } from "../core/paths";
 import { isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes";
 import type { ResourceServer } from "./resources";
+import { OwnedBlobUrls } from "./blobOwnership";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 import { VisibilityGate } from "./displayGate";
 import { hasAuthoredCssProperty } from "./cssRewrite";
+import { waitForDoubleRaf, waitForFontsReady } from "./asyncWait";
+import {
+  buildVisibleTextIndex,
+  resolveTextAnchorOffset,
+  sanitizePersistedTextAnchor,
+  type TextAnchorData,
+  type VisibleTextIndex,
+} from "./textAnchor";
 
 /** 常规布局应远早于此完成；极端字体/引擎停滞时只解除隐藏，不伪造 ready。 */
 const INITIAL_RENDER_GATE_TIMEOUT_MS = 20_000;
@@ -14,6 +23,26 @@ export type ChapterState =
   | { status: "measuring" }
   | { status: "ready"; pageCount: number; currentPage: number; empty: boolean }
   | { status: "error"; message: string };
+
+export interface ChapterMeasurementToken {
+  disposed: boolean;
+  loadSeq: number;
+  expectedLoadSeq: number;
+  contentDoc: Document | null;
+  expectedDoc: Document;
+  viewer: HTMLElement | null;
+  expectedViewer: HTMLElement;
+}
+
+/** 异步字体/rAF边界后的统一过期检查，阻止旧文档进入后续布局补偿。 */
+export function isChapterMeasurementCurrent(token: ChapterMeasurementToken): boolean {
+  return (
+    !token.disposed &&
+    token.loadSeq === token.expectedLoadSeq &&
+    token.contentDoc === token.expectedDoc &&
+    token.viewer === token.expectedViewer
+  );
+}
 
 /** True only for an authored inline width declaration (comments are inert). */
 export function hasAuthoredInlineWidth(styleText: string): boolean {
@@ -45,7 +74,62 @@ export interface LoadOptions {
    * 避免先渲染第一页再跳到最后页的闪页。
    */
   startAtEnd?: boolean;
+  /** Persisted content position. It is applied before layout, never by DOM offset. */
+  readingAnchor?: ReadingAnchor | null;
+  /** Saved page for records that have no valid content anchor. */
+  fallbackPage?: number | null;
 }
+
+/** Synchronous navigation that reuses the currently completed chapter layout. */
+export interface WithinChapterNavigationOptions {
+  /** Encoded fragment without the leading `#`; empty string clears :target. */
+  fragment?: string;
+  /** Persisted content anchor to restore in the current chapter. */
+  readingAnchor?: {
+    index: number;
+    ratio: number;
+    anchorTextOffset: number | null;
+    anchorTextSnippet: string | null;
+  } | null;
+  /** Page fallback used only when content/legacy anchors cannot be resolved. */
+  fallbackPage?: number | null;
+  /** Navigate to the natural first column and clear the old fragment. */
+  toStart?: boolean;
+}
+
+export interface ReadingAnchor extends TextAnchorData {
+  index: number;
+  ratio: number;
+  charsRead: number;
+  totalChars: number;
+}
+
+/** Pure restore precedence shared by initial layout and tests. */
+export function resolveRestoredPage({
+  pageCount,
+  anchorCol,
+  fallbackPage,
+  currentPage,
+}: {
+  pageCount: number;
+  anchorCol: number | null;
+  fallbackPage: number | null;
+  currentPage: number;
+}): { page: number; consumeFallback: boolean } {
+  const last = Math.max(0, pageCount - 1);
+  if (anchorCol !== null) {
+    // A saved fallback belongs only to this load. Consume it even when the
+    // higher-priority text/legacy anchor wins, so later image reflow cannot
+    // jump back to the old page.
+    return { page: Math.min(Math.max(0, anchorCol), last), consumeFallback: fallbackPage !== null };
+  }
+  if (fallbackPage !== null) {
+    return { page: Math.min(Math.max(0, fallbackPage), last), consumeFallback: true };
+  }
+  return { page: Math.min(Math.max(0, currentPage), last), consumeFallback: false };
+}
+
+type ResolvedAnchorColumn = { col: number; source: "text" | "legacy" };
 
 /**
  * 单章分页控制器：把一章 XHTML 渲染进 iframe，用 CSS 多栏布局分页。
@@ -55,17 +139,9 @@ export interface LoadOptions {
  * 2. iframe load 后（子资源已就绪），等待 document.fonts.ready
  * 3. 容器全宽，列宽 = 页宽；正文版心由注入 CSS 的 em 上限居中控制
  * 4. 页数 = 内容占据的列数；翻页 = 调 scrollLeft
- * 5. 阅读位置用"内容锚点"保留：页中心取样元素 + 元素内横向比例，
- *    重排/重载后按比例映射回新布局，保证正在读的行保持在页面中部
+ * 5. 阅读位置用文本内容锚点保留：成功排版后以 code-point offset/snippet
+ *    通过 Range 选择新列；页面中心仅作只读 caret 采样，legacy 元素/页码兜底。
  */
-/** 叶子文本长度（无元素子级的元素文本；父容器不重复计数）。 */
-function leafTextLen(el: HTMLElement): number {
-  if (el.children.length === 0) return (el.textContent ?? "").replace(/\s/g, "").length;
-  let n = 0;
-  for (const c of Array.from(el.children)) n += leafTextLen(c as HTMLElement);
-  return n;
-}
-
 /** 页内 fragment 的原始 hash 与用于 getElementById 的解码锚点。 */
 export interface FragmentNavigation {
   hash: string;
@@ -95,7 +171,7 @@ export function getFragmentNavigation(href: string): FragmentNavigation | null {
  * 因此同步失败不能阻断分页器的显式列定位。
  */
 export function syncFragmentHash(win: Window | null | undefined, hash: string): void {
-  if (hash.length < 2 || !hash.startsWith("#")) return;
+  if (hash !== "" && (hash.length < 2 || !hash.startsWith("#"))) return;
   try {
     const iframeLocation = win?.location;
     if (iframeLocation && iframeLocation.hash !== hash) iframeLocation.hash = hash;
@@ -157,6 +233,216 @@ function styleHasPercentageHorizontalMargin(style: CSSStyleDeclaration): boolean
   return horizontal.some((value) => value.includes("%"));
 }
 
+const HORIZONTAL_MARGIN_PROPERTIES = [
+  "margin",
+  "margin-left",
+  "margin-right",
+  "margin-inline",
+  "margin-inline-start",
+  "margin-inline-end",
+] as const;
+
+/**
+ * 当前元素是否在注释外的 inline style 中明确声明了任一水平 margin。
+ * `margin` 简写即使只写为 0 也算作者意图：这里判断的是来源而非数值。
+ */
+function hasAuthoredInlineHorizontalMargin(el: HTMLElement): boolean {
+  const styleText = el.getAttribute("style") ?? "";
+  return HORIZONTAL_MARGIN_PROPERTIES.some((property) =>
+    hasAuthoredCssProperty(styleText, property)
+  );
+}
+
+type AuthoredHorizontalMarginResult = boolean | undefined;
+
+function ruleHasHorizontalMargin(style: CSSStyleDeclaration): boolean {
+  return HORIZONTAL_MARGIN_PROPERTIES.some(
+    (property) => style.getPropertyValue(property).trim() !== ""
+  );
+}
+
+/**
+ * 判断当前元素有没有作者/用户明确声明的水平 margin。
+ *
+ * 调用时 L3 `.reader-top` 的 auto margin 已临时移除，因此同一
+ * `data-reader=overrides` 样式表末尾的 customCss 仍可作为用户意图读取，
+ * 而内建 auto margin 不会造成假阳性。无法读取的 stylesheet、未知条件或
+ * 未来 grouping rule 不能安全否定，返回 undefined 维持 C-04 的旧保守行为。
+ */
+export function hasAuthoredHorizontalMargin(
+  doc: Document,
+  el: HTMLElement
+): AuthoredHorizontalMarginResult {
+  if (hasAuthoredInlineHorizontalMargin(el)) return true;
+
+  let unknownSource = false;
+  const walk = (rules: CSSRuleList): boolean => {
+    for (const rule of Array.from(rules)) {
+      const active = getActiveCssCondition(rule, doc.defaultView);
+      if (active === false) continue;
+      if (active === undefined) {
+        unknownSource = true;
+        continue;
+      }
+
+      if (rule.type === 1) {
+        const styleRule = rule as CSSStyleRule;
+        const selector = styleRule.selectorText ?? "";
+        if (selector && ruleHasHorizontalMargin(styleRule.style)) {
+          try {
+            if (el.matches(selector)) return true;
+          } catch {
+            // Invalid/unavailable selector matching cannot prove that the
+            // computed nonzero margin comes from UA CSS.
+            unknownSource = true;
+          }
+        }
+      }
+
+      const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+      try {
+        if (nested.cssRules && walk(nested.cssRules)) return true;
+      } catch {
+        unknownSource = true;
+      }
+    }
+    return false;
+  };
+
+  for (const sheet of Array.from(doc.styleSheets ?? [])) {
+    try {
+      if (walk(sheet.cssRules)) return true;
+    } catch {
+      unknownSource = true;
+    }
+  }
+  return unknownSource ? undefined : false;
+}
+
+const HORIZONTAL_SIZING_PROPERTIES = ["width", "min-width", "max-width"] as const;
+type AuthoredSizingIntentResult = boolean | undefined;
+
+function ruleHasHorizontalSizing(style: CSSStyleDeclaration): boolean {
+  return HORIZONTAL_SIZING_PROPERTIES.some(
+    (property) => style.getPropertyValue(property).trim() !== ""
+  );
+}
+
+/**
+ * 判断直接子元素是否存在作者/用户的 width/min-width/max-width sizing intent。
+ *
+ * reader overrides 中唯一已知的默认 sizing 是 L3 的 `max-width:40rem`；它
+ * 不应阻止 C-40。其余 reader stylesheet 命中规则无法和 customCss 在旧引擎
+ * 中可靠区分，因此返回 undefined，宁可保守保留 C-04，也不吞掉用户 sizing。
+ */
+export function hasAuthoredSizingIntent(
+  doc: Document,
+  el: HTMLElement
+): AuthoredSizingIntentResult {
+  const inlineStyle = el.getAttribute("style") ?? "";
+  if (HORIZONTAL_SIZING_PROPERTIES.some((property) => hasAuthoredCssProperty(inlineStyle, property))) {
+    return true;
+  }
+  if (el.hasAttribute("width")) return true;
+
+  let unknownSource = false;
+  const walk = (rules: CSSRuleList, readerSheet: boolean): boolean => {
+    for (const rule of Array.from(rules)) {
+      const active = getActiveCssCondition(rule, doc.defaultView);
+      if (active === false) continue;
+      if (active === undefined) {
+        // Keyframes declarations are not selector-applied sizing sources;
+        // their cssRules must not make an otherwise complete static cascade
+        // probe unknown (a separate animation layout issue is out of scope).
+        if (rule.type === 7) continue;
+        unknownSource = true;
+        continue;
+      }
+
+      if (rule.type === 1) {
+        const styleRule = rule as CSSStyleRule;
+        const selector = styleRule.selectorText ?? "";
+        if (selector && ruleHasHorizontalSizing(styleRule.style)) {
+          let matches = false;
+          try {
+            matches = el.matches(selector);
+          } catch {
+            unknownSource = true;
+          }
+          if (matches) {
+            if (
+              readerSheet &&
+              selector.includes("#epub-viewer") &&
+              selector.includes(".reader-top") &&
+              styleRule.style.getPropertyValue("width").trim() === "" &&
+              styleRule.style.getPropertyValue("min-width").trim() === "" &&
+              styleRule.style.getPropertyValue("max-width").trim() === `${TEXT_MEASURE.maxEm}rem`
+            ) {
+              // Known L3 reader default; it is not author sizing intent.
+            } else {
+              // customCss is appended to the same reader stylesheet in the
+              // current sanitizer. Without declaration provenance, a match
+              // there is unknown rather than proof of author sizing.
+              if (readerSheet) {
+                unknownSource = true;
+              } else {
+                return true;
+              }
+            }
+          }
+        }
+      }
+
+      const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+      try {
+        if (nested.cssRules && walk(nested.cssRules, readerSheet)) return true;
+      } catch {
+        unknownSource = true;
+      }
+    }
+    return false;
+  };
+
+  for (const sheet of Array.from(doc.styleSheets ?? [])) {
+    const owner = sheet.ownerNode as Element | null;
+    const readerSheet = owner?.hasAttribute?.("data-reader") || owner?.getAttribute?.("data-reader") != null;
+    try {
+      if (walk(sheet.cssRules, readerSheet)) return true;
+    } catch {
+      unknownSource = true;
+    }
+  }
+  return unknownSource ? undefined : false;
+}
+
+/** Only a known UA-only margin may bypass C-04; unknown sources preserve legacy behavior. */
+export function shouldApplyBookMarginCompensation(
+  authoredHorizontalMargin: AuthoredHorizontalMarginResult
+): boolean {
+  return authoredHorizontalMargin !== false;
+}
+
+/**
+ * Mirrors the C-04 candidate gate: resolved zero/auto margins cannot trigger
+ * compensation, while an unparsed expression remains conservative/meaningful.
+ */
+export function isMeaningfulHorizontalMargin(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized !== "" && normalized !== "auto" && parseFloat(normalized) !== 0;
+}
+
+/** C-16 percentage margins never reach C-37/C-04, so they need no CSSOM source probe. */
+export function shouldProbeAuthoredHorizontalMargin(
+  percentageMargin: boolean | undefined,
+  left: string,
+  right: string
+): boolean {
+  return (
+    percentageMargin !== true &&
+    (isMeaningfulHorizontalMargin(left) || isMeaningfulHorizontalMargin(right))
+  );
+}
+
 type TypedStyleMapHost = {
   computedStyleMap?: () => {
     get(property: string): { toString(): string } | undefined;
@@ -179,6 +465,425 @@ export function hasComputedPercentageHorizontalMargin(el: Element): boolean | un
   } catch {
     return undefined;
   }
+}
+
+type PercentageWidthValue = number | null | undefined;
+
+function parsePercentageWidthValue(value: string): number | null {
+  const match = value.trim().match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))%$/u);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+type TypedWidthStyleMapHost = {
+  computedStyleMap?: () => {
+    get(property: string): { toString(): string } | undefined;
+  };
+};
+
+type WidthCascadeCandidate = {
+  value: string;
+  important: boolean;
+  specificity: number;
+  order: number;
+};
+
+function selectorSpecificity(selector: string, el: Element): number | undefined {
+  const matching = selector
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => {
+      try {
+        return part !== "" && el.matches(part);
+      } catch {
+        return false;
+      }
+    });
+  const candidate = matching.length > 0 ? matching : [selector];
+  let best = 0;
+  for (const part of candidate) {
+    // These pseudo-classes have selector-specific specificity rules which
+    // this small fallback parser intentionally does not implement.  A legacy
+    // engine must not guess their cascade order and accidentally exempt C-31.
+    if (/(?::where|:is|:not|:has)\s*\(/u.test(part)) return undefined;
+    const withoutStrings = part.replace(/(["']).*?\1/gu, "");
+    const ids = (withoutStrings.match(/#[\w-]+/gu) ?? []).length;
+    const classes = (withoutStrings.match(/(?:\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+(?:\([^)]*\))?)/gu) ?? []).length;
+    const elements = (withoutStrings
+      .replace(/#[\w-]+/gu, " ")
+      .replace(/(?:\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+(?:\([^)]*\))?)/gu, " ")
+      .match(/(?:^|[ >+~])([a-zA-Z][\w-]*)/gu) ?? []).length;
+    best = Math.max(best, ids * 1_000_000 + classes * 1_000 + elements);
+  }
+  return best;
+}
+
+function getActiveCssCondition(
+  rule: CSSRule,
+  win: Window | null | undefined
+): boolean | undefined {
+  const conditional = rule as CSSRule & {
+    conditionText?: string;
+    media?: { mediaText?: string };
+  };
+  if (rule.type === 4) {
+    const query = conditional.media?.mediaText;
+    if (!query || !win || typeof win.matchMedia !== "function") return undefined;
+    try {
+      return win.matchMedia(query).matches;
+    } catch {
+      return undefined;
+    }
+  }
+  if (rule.type === 12) {
+    const query = conditional.conditionText;
+    const css = (win as Window & { CSS?: { supports?: (condition: string) => boolean } } | null | undefined)?.CSS;
+    if (!query || typeof css?.supports !== "function") return undefined;
+    try {
+      return css.supports(query);
+    } catch {
+      return undefined;
+    }
+  }
+  // @layer, @container and future grouping rules have cascade/condition
+  // semantics that this fallback intentionally does not model.  @import is
+  // safe to recurse into as a source-order container; other unknown groups
+  // must remain conservative.
+  if (rule.type !== 1 && rule.type !== 3 && (rule as CSSRule & { cssRules?: CSSRuleList }).cssRules) {
+    return undefined;
+  }
+  return true;
+}
+
+/**
+ * 读取页面元素最终获胜的作者 width 是否是明确百分比。
+ *
+ * Typed OM 在支持的引擎中提供当前最终值；旧 WebView 只能读取 CSSOM，
+ * 因此回退只按简单选择器的基础重要性/特异性/源顺序排序，而不是宣称
+ * 实现完整 CSS cascade。返回 null 表示已知不是百分比，undefined 表示
+ * CSSOM 不完整/不可读，调用方必须对后者保持 C-31 原行为。
+ */
+export function getAuthoredPercentageWidth(el: Element, doc: Document): PercentageWidthValue {
+  try {
+    const typedMap = (el as Element & TypedWidthStyleMapHost).computedStyleMap?.();
+    const typed = typedMap?.get("width");
+    if (typed) {
+      // A present Typed OM value is the final computed value.  If it is px,
+      // do not resurrect an earlier author percentage from CSSOM.
+      const typedText = typed.toString();
+      if (typedText.trim() !== "") return parsePercentageWidthValue(typedText);
+    }
+  } catch {
+    // Fall through to the CSSOM/inline cascade fallback.
+  }
+
+  const inlineStyle = (el as HTMLElement).style as CSSStyleDeclaration | undefined;
+  const inlineValue = inlineStyle?.getPropertyValue?.("width") ?? "";
+  const inlinePriority = inlineStyle?.getPropertyPriority?.("width") ?? "";
+  let best: WidthCascadeCandidate | null = inlineValue
+    ? {
+        value: inlineValue,
+        important: inlinePriority === "important",
+        specificity: 1_000_000_000,
+        order: Number.MAX_SAFE_INTEGER,
+      }
+    : null;
+  let order = 0;
+  let unknownSheet = false;
+  let readerSheetHasMatchingWidth = false;
+  const isBetter = (next: WidthCascadeCandidate, current: WidthCascadeCandidate | null): boolean => {
+    if (!current) return true;
+    if (next.important !== current.important) return next.important;
+    if (next.specificity !== current.specificity) return next.specificity > current.specificity;
+    return next.order >= current.order;
+  };
+  const walk = (rules: CSSRuleList): void => {
+    for (const rule of Array.from(rules)) {
+      order += 1;
+      const active = getActiveCssCondition(rule, doc.defaultView);
+      if (active === false) continue;
+      if (active === undefined) {
+        unknownSheet = true;
+        continue;
+      }
+      if (rule.type === 1) {
+        const styleRule = rule as CSSStyleRule;
+        const selector = styleRule.selectorText ?? "";
+        if (selector) {
+          let matches = false;
+          try {
+            matches = el.matches(selector);
+          } catch {
+            unknownSheet = true;
+            matches = false;
+          }
+          const value = styleRule.style.getPropertyValue("width");
+          if (matches && value) {
+            const specificity = selectorSpecificity(selector, el);
+            if (specificity === undefined) {
+              unknownSheet = true;
+              continue;
+            }
+            const candidate: WidthCascadeCandidate = {
+              value,
+              important: styleRule.style.getPropertyPriority("width") === "important",
+              specificity,
+              order,
+            };
+            if (isBetter(candidate, best)) best = candidate;
+          }
+        }
+      }
+      const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+      try {
+        if (nested.cssRules) walk(nested.cssRules);
+      } catch {
+        unknownSheet = true;
+      }
+    }
+  };
+
+  for (const sheet of Array.from(doc.styleSheets ?? [])) {
+    const owner = sheet.ownerNode as Element | null;
+    const isReaderSheet = owner?.hasAttribute?.("data-reader") || owner?.getAttribute?.("data-reader") != null;
+    try {
+      if (isReaderSheet) {
+        // `customCss` is appended to this same reader stylesheet.  In an old
+        // WebView we cannot distinguish it from built-in overrides reliably;
+        // a matching explicit width therefore makes the author-only fallback
+        // unknown instead of letting an earlier EPUB rule form a false group.
+        const inspectReaderWidth = (rules: CSSRuleList): void => {
+          for (const rule of Array.from(rules)) {
+            const active = getActiveCssCondition(rule, doc.defaultView);
+            if (active === undefined) {
+              unknownSheet = true;
+              continue;
+            }
+            if (active === false) continue;
+            if (rule.type === 1) {
+              const styleRule = rule as CSSStyleRule;
+              const selector = styleRule.selectorText ?? "";
+              const value = styleRule.style.getPropertyValue("width");
+              if (selector && value) {
+                try {
+                  if (el.matches(selector)) readerSheetHasMatchingWidth = true;
+                } catch {
+                  unknownSheet = true;
+                }
+              }
+            }
+            const nested = rule as CSSRule & { cssRules?: CSSRuleList };
+            try {
+              if (nested.cssRules) inspectReaderWidth(nested.cssRules);
+            } catch {
+              unknownSheet = true;
+            }
+          }
+        };
+        inspectReaderWidth(sheet.cssRules);
+      } else {
+        walk(sheet.cssRules);
+      }
+    } catch {
+      unknownSheet = true;
+    }
+  }
+
+  // An inline !important declaration wins over every author stylesheet.  It
+  // remains usable even when an unrelated external sheet is unreadable.
+  if ((unknownSheet || readerSheetHasMatchingWidth) && inlinePriority !== "important") return undefined;
+  if (!best) return null;
+  return parsePercentageWidthValue(best.value);
+}
+
+export interface PercentageFloatGroupEntry {
+  eligible: boolean;
+  readerTop: boolean;
+  float: string;
+  clear: string;
+  /** null = known non-percentage (e.g. px); undefined = unreadable/unknown. */
+  percentageWidth: PercentageWidthValue;
+  marginLeft?: string;
+  marginRight?: string;
+  position?: string;
+  writingMode?: string;
+  direction?: string;
+  authorFullWidthIntent?: boolean;
+  percentageMargin?: boolean | undefined;
+}
+
+/**
+ * C-31 的连续作者栅格门控。只对至少两个直接 sibling、同方向、明确为
+ * 百分比且总和约等于一整行的 float 组返回 true；其他元素逐项保持旧补偿。
+ */
+export function getPercentageFloatGroupMembers(
+  entries: readonly PercentageFloatGroupEntry[]
+): boolean[] {
+  const result = entries.map(() => false);
+  let index = 0;
+  while (index < entries.length) {
+    const first = entries[index];
+    const direction = first.float.trim().toLowerCase();
+    if (
+      !first.eligible ||
+      !first.readerTop ||
+      first.clear.trim().toLowerCase() !== "none" ||
+      !/^(?:left|right)$/u.test(direction) ||
+      typeof first.percentageWidth !== "number" ||
+      first.percentageWidth <= 0 ||
+      first.percentageWidth > 100
+    ) {
+      index += 1;
+      continue;
+    }
+    const group: number[] = [index];
+    let sum = first.percentageWidth;
+    let cursor = index + 1;
+    while (cursor < entries.length) {
+      const entry = entries[cursor];
+      const width = entry.percentageWidth;
+      if (
+        !entry.eligible ||
+        !entry.readerTop ||
+        entry.clear.trim().toLowerCase() !== "none" ||
+        entry.float.trim().toLowerCase() !== direction ||
+        typeof width !== "number" ||
+        width <= 0 ||
+        width > 100
+      ) {
+        break;
+      }
+      group.push(cursor);
+      sum += width;
+      cursor += 1;
+    }
+    if (group.length >= 2 && sum >= 99 && sum <= 101) {
+      for (const member of group) result[member] = true;
+    }
+    index = Math.max(cursor, index + 1);
+  }
+  return result;
+}
+
+/**
+ * 阶段 2 的完整安全门。粗粒度 C-31 组还必须是物理水平、静态/相对定位、
+ * 无全宽意图，且最终级联 margin 已经解析为有限近零值；任何信息缺失都
+ * 保守回退到作者原始 float，不尝试以百分比猜测布局。
+ */
+export function getSafePercentageFloatGroupMembers(
+  entries: readonly PercentageFloatGroupEntry[]
+): boolean[] {
+  const coarse = getPercentageFloatGroupMembers(entries);
+  const safe = coarse.map(() => false);
+  const finiteNearZero = (value: string | undefined): boolean => {
+    if (value === undefined) return false;
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) && Math.abs(parsed) <= 0.5;
+  };
+  let index = 0;
+  while (index < coarse.length) {
+    if (!coarse[index]) {
+      index += 1;
+      continue;
+    }
+    const group: number[] = [];
+    while (index < coarse.length && coarse[index]) group.push(index++);
+    const valid = group.every((member) => {
+      const entry = entries[member];
+      return (
+        /^(?:static|relative)$/u.test((entry.position ?? "").trim().toLowerCase()) &&
+        (entry.writingMode ?? "").trim().toLowerCase() === "horizontal-tb" &&
+        (entry.direction ?? "").trim().toLowerCase() === "ltr" &&
+        entry.authorFullWidthIntent === false &&
+        entry.percentageMargin === false &&
+        finiteNearZero(entry.marginLeft) &&
+        finiteNearZero(entry.marginRight)
+      );
+    });
+    if (valid) for (const member of group) safe[member] = true;
+  }
+  return safe;
+}
+
+/** 将完整百分比组投影到当前包含块与 40rem 版心中的较小宽度。 */
+export function getPercentageFloatGroupTargetWidths(
+  percentages: readonly number[],
+  parentWidth: number,
+  contentWidth: number
+): number[] | null {
+  if (
+    percentages.length < 2 ||
+    !Number.isFinite(parentWidth) ||
+    !Number.isFinite(contentWidth) ||
+    parentWidth <= 0 ||
+    contentWidth <= 0 ||
+    percentages.some((value) => !Number.isFinite(value) || value <= 0 || value > 100)
+  ) return null;
+  const total = percentages.reduce((sum, value) => sum + value, 0);
+  if (total < 99 || total > 101) return null;
+  const targetParent = Math.min(parentWidth, contentWidth);
+  return percentages.map((percentage) =>
+    Math.min(parentWidth * percentage / 100, targetParent * percentage / 100)
+  );
+}
+
+export interface PercentageFloatGroupRect {
+  left: number;
+  right: number;
+  top: number;
+  width: number;
+}
+
+/** 组写回后的事务式几何门，失败时调用方必须恢复整组。 */
+export function isPercentageFloatGroupGeometryValid({
+  rects,
+  viewerLeft,
+  scrollLeft,
+  step,
+  parentWidth,
+  contentWidth,
+  epsilon = 0.75,
+}: {
+  rects: readonly (readonly PercentageFloatGroupRect[])[];
+  viewerLeft: number;
+  scrollLeft: number;
+  step: number;
+  parentWidth: number;
+  contentWidth: number;
+  epsilon?: number;
+}): boolean {
+  if (
+    rects.length < 2 ||
+    !Number.isFinite(viewerLeft) ||
+    !Number.isFinite(scrollLeft) ||
+    !Number.isFinite(step) ||
+    !Number.isFinite(parentWidth) ||
+    !Number.isFinite(contentWidth) ||
+    step <= 0 ||
+    parentWidth <= 0 ||
+    contentWidth <= 0
+  ) return false;
+  if (rects.some((memberRects) => memberRects.length !== 1)) return false;
+  const first = rects[0][0];
+  if (!first || first.width <= 0) return false;
+  const expectedParentWidth = Math.min(parentWidth, contentWidth);
+  const firstColumn = Math.floor((first.left - viewerLeft + scrollLeft + epsilon) / step);
+  if (firstColumn < 0) return false;
+  const columnStart = viewerLeft + firstColumn * step - scrollLeft;
+  const columnLeft = columnStart + (parentWidth - expectedParentWidth) / 2;
+  const columnRight = columnLeft + expectedParentWidth;
+  return rects.every((memberRects) => {
+    const rect = memberRects[0];
+    if (!rect || rect.width <= 0) return false;
+    const column = Math.floor((rect.left - viewerLeft + scrollLeft + epsilon) / step);
+    return (
+      column === firstColumn &&
+      Math.abs(rect.top - first.top) <= epsilon &&
+      rect.left >= columnLeft - epsilon &&
+      rect.right <= columnRight + epsilon
+    );
+  });
 }
 
 /**
@@ -296,6 +1001,79 @@ export function isSymmetricHorizontalMargin(left: string, right: string): boolea
   );
 }
 
+export interface ReaderTopUaSymmetricInsetInput {
+  /** 只允许阅读器版心的直接子元素。 */
+  readerTop: boolean;
+  /** 只有 C-37 已证明没有作者/用户水平 margin 时才可进入。 */
+  authoredHorizontalMargin: AuthoredHorizontalMarginResult;
+  /** UA inset 不参与 float/fullpage 等已有更高优先级路径。 */
+  float: string;
+  fullpage: boolean;
+  percentageMargin: boolean | undefined;
+  parentWidth: number;
+  /** getBorderBoxWidth() 的当前 border-box 宽度。 */
+  borderBoxWidth: number;
+  /** getComputedStyle().width；用于把 border-box 结果换回 max-width。 */
+  cssWidth: number;
+  boxSizing: string;
+  marginLeft: string;
+  marginRight: string;
+}
+
+/**
+ * C-37 follow-up：UA 默认的 blockquote 等对称水平 margin 是盒内双侧留白，
+ * 不是 C-04 的单侧版心偏移。将其折算为居中的有效 max-width；返回值按
+ * 当前 box-sizing 表示（content-box 返回内容宽度，border-box 返回外框宽度）。
+ *
+ * 该纯函数只接受 reader-top、明确 UA-only、非浮动/非全页、非百分比且有限
+ * 的正对称 margin。目标宽度同时受包含块限制，避免窄视口出现负宽或溢出。
+ */
+export function getReaderTopUaSymmetricInsetMaxWidth(
+  input: ReaderTopUaSymmetricInsetInput
+): number | null {
+  if (
+    !input.readerTop ||
+    input.authoredHorizontalMargin !== false ||
+    input.fullpage ||
+    input.float.trim().toLowerCase() !== "none" ||
+    input.percentageMargin === true
+  ) {
+    return null;
+  }
+  if (
+    !Number.isFinite(input.parentWidth) ||
+    !Number.isFinite(input.borderBoxWidth) ||
+    !Number.isFinite(input.cssWidth) ||
+    input.parentWidth <= 0 ||
+    input.borderBoxWidth <= 0 ||
+    input.cssWidth < 0
+  ) {
+    return null;
+  }
+  const marginLeft = Number.parseFloat(input.marginLeft);
+  const marginRight = Number.parseFloat(input.marginRight);
+  if (
+    !Number.isFinite(marginLeft) ||
+    !Number.isFinite(marginRight) ||
+    marginLeft <= 0 ||
+    marginRight <= 0 ||
+    Math.abs(marginLeft - marginRight) > 0.5
+  ) {
+    return null;
+  }
+
+  const currentBorderBox = Math.min(input.borderBoxWidth, input.parentWidth);
+  const targetBorderBox = Math.max(
+    0,
+    Math.min(input.parentWidth, currentBorderBox - marginLeft - marginRight)
+  );
+  const extraBox = Math.max(0, input.borderBoxWidth - input.cssWidth);
+  const borderBoxSizing = input.boxSizing.trim().toLowerCase() === "border-box";
+  const target = borderBoxSizing ? targetBorderBox : targetBorderBox - extraBox;
+  if (!Number.isFinite(target) || target < 0) return null;
+  return target;
+}
+
 /**
  * getComputedStyle 会把 `margin:auto` 解析为实际 px。只有两侧余量都等于
  * 当前盒子的居中余量时，才能把它当作作者/阅读器的 auto 居中，而不是
@@ -342,6 +1120,43 @@ export function shouldKeepSymmetricMarginsCentered(
   return hasIntrinsicSizeIntent && isSymmetricHorizontalMargin(left, right);
 }
 
+export interface CenteredAuthorMarginInput {
+  readerTop: boolean;
+  float: string;
+  writingMode: string;
+  fullpage: boolean;
+  intrinsicSize: boolean;
+  percentageMargin: boolean | undefined;
+  authoredHorizontalMargin: AuthoredHorizontalMarginResult;
+  authoredSizingIntent: AuthoredSizingIntentResult;
+  textAlign: string;
+  marginLeft: string;
+  marginRight: string;
+}
+
+/**
+ * C-40：普通页面级居中块的显式对称 margin 是双侧留白，不是 C-04 单向
+ * 版心偏移。只有 margin/sizing 来源都已知为作者声明且没有 sizing intent
+ * 时才跳过 C-04；未知 CSSOM、固定宽度盒、float、fit/fullpage 和百分比
+ * margin 全部保留旧路径。
+ */
+export function shouldKeepCenteredAuthorMargins(
+  input: CenteredAuthorMarginInput
+): boolean {
+  return (
+    input.readerTop &&
+    input.float.trim().toLowerCase() === "none" &&
+    input.writingMode.trim().toLowerCase() === "horizontal-tb" &&
+    !input.fullpage &&
+    !input.intrinsicSize &&
+    input.percentageMargin !== true &&
+    input.authoredHorizontalMargin === true &&
+    input.authoredSizingIntent === false &&
+    input.textAlign.trim().toLowerCase() === "center" &&
+    isSymmetricHorizontalMargin(input.marginLeft, input.marginRight)
+  );
+}
+
 export interface ReaderTopFloatContainmentInput {
   /** 只允许 viewer 的直接子页面级元素进入。 */
   readerTop: boolean;
@@ -357,6 +1172,80 @@ export interface ReaderTopFloatContainmentInput {
   marginRight: string;
   /** 作者明确要求全宽/突破版心时保持原布局。 */
   authorFullWidthIntent: boolean;
+}
+
+export interface ReaderTopFloatLayoutInput extends ReaderTopFloatContainmentInput {
+  /** 作者 margin 来源；undefined 表示无法证明安全级联。 */
+  authoredHorizontalMargin: AuthoredHorizontalMarginResult;
+  /** true/undefined 都不能安全地重写百分比或未知 margin。 */
+  percentageMargin: boolean | undefined;
+  position: string;
+  writingMode: string;
+  direction: string;
+}
+
+/**
+ * 统一的顶层浮动布局单元门控。
+ *
+ * 只有物理水平书写、静态/相对定位、有限非负 margin 且没有明确突破
+ * 版心意图的单项 float 才能投影到阅读器版心。返回的两侧 margin 是
+ * border-box 外侧 margin：浮动侧加上阅读器版心 inset，另一侧保留书值。
+ * 百分比、未知级联、负值、绝对定位和非水平书写全部返回 null，由调用方
+ * 以原始测量值保留书籍布局，绝不落入 C-04/C-18。
+ */
+export function getReaderTopFloatLayoutMargins(
+  input: ReaderTopFloatLayoutInput
+): { left: number; right: number } | null {
+  const float = input.float.trim().toLowerCase();
+  const position = input.position.trim().toLowerCase();
+  const writingMode = input.writingMode.trim().toLowerCase();
+  const direction = input.direction.trim().toLowerCase();
+  if (
+    !input.readerTop ||
+    input.fullpage ||
+    !/^(?:left|right)$/u.test(float) ||
+    !/^(?:static|relative)$/u.test(position) ||
+    writingMode !== "horizontal-tb" ||
+    direction !== "ltr"
+  ) return null;
+  if (
+    !Number.isFinite(input.parentWidth) ||
+    !Number.isFinite(input.width) ||
+    !Number.isFinite(input.contentWidth) ||
+    input.parentWidth <= 0 ||
+    input.width < 0 ||
+    input.contentWidth <= 0 ||
+    input.width > input.contentWidth + 0.5 ||
+    input.authorFullWidthIntent ||
+    input.percentageMargin === true
+  ) return null;
+
+  // A failed CSSOM probe is intentionally conservative when the element has
+  // an actual margin. A zero-margin element does not need the author-source
+  // distinction and can still use the legacy C-31 projection.
+  const parseMargin = (value: string): number | null => {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || normalized === "auto") return 0;
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const marginLeft = parseMargin(input.marginLeft);
+  const marginRight = parseMargin(input.marginRight);
+  if (marginLeft === null || marginRight === null || marginLeft < 0 || marginRight < 0) return null;
+  if (
+    input.authoredHorizontalMargin === undefined &&
+    (marginLeft > 0.5 || marginRight > 0.5)
+  ) return null;
+
+  const inset = Math.max(
+    0,
+    (input.parentWidth - Math.min(input.parentWidth, input.contentWidth)) / 2
+  );
+  const left = float === "left" ? inset + marginLeft : marginLeft;
+  const right = float === "right" ? inset + marginRight : marginRight;
+  // Never create a new overflow while containing an otherwise valid float.
+  if (left + input.width + right > input.parentWidth + 0.5) return null;
+  return { left, right };
 }
 
 /**
@@ -752,6 +1641,10 @@ export function shouldApplyInlineBoxOverflowFix({
 
 export class ChapterPaginator {
   private blobUrl?: string;
+  /** sanitize 本章外链 CSS 产生的局部 Blob URL；不包含 ResourceServer 共享资源。 */
+  private chapterCssUrls = new OwnedBlobUrls();
+  /** 尚未提交给 iframe 的 sanitize 任务；换章时也必须取消其 URL 所有权。 */
+  private pendingCssUrls = new Set<OwnedBlobUrls>();
   private viewer: HTMLElement | null = null;
   private contentDoc: Document | null = null;
   private step = 0;
@@ -761,6 +1654,8 @@ export class ChapterPaginator {
   private metrics = { pageCount: 1, currentPage: 0 };
   private loadSeq = 0;
   private disposed = false;
+  /** Each measure owns its controller; lifecycle aborts all without cross-killing. */
+  private measureControllers = new Set<AbortController>();
   private reflowTimer: number | undefined;
   private imgHandler = (): void => this.scheduleReflow();
   private linkHandler = (e: Event): void => this.handleLinkClick(e);
@@ -770,6 +1665,9 @@ export class ChapterPaginator {
   private footnoteHoverInHandler = (e: Event): void => this.handleFootnoteHoverIn(e);
   private footnoteHoverOutHandler = (e: MouseEvent): void => this.handleFootnoteHoverOut(e);
   private pendingAnchor: string | undefined;
+  private pendingFallbackPage: number | null = null;
+  /** Built once after current chapter layout is stable; never spans documents. */
+  private textIndex: VisibleTextIndex | null = null;
   /** 本次加载需要“停在最后一页且翻好页再显示”（回翻上一章防闪页） */
   private pendingStartAtEnd = false;
   private lastState: ChapterState = { status: "loading" };
@@ -791,6 +1689,17 @@ export class ChapterPaginator {
   private fitContentFixes: Array<{ el: HTMLElement; maxWidth: string }> = [];
   /** float 收缩补偿写回过的元素（下次测量前清除 width） */
   private floatFixes: HTMLElement[] = [];
+  /**
+   * 顶层浮动布局单元的完整事务快照。与 C-08 的 width 补偿分离，确保
+   * margin/max-width/priority 和 marker 在重排、换章、异常路径都可恢复。
+   */
+  private floatLayoutFixes: Array<{
+    el: HTMLElement;
+    left: InlineStyleValue;
+    right: InlineStyleValue;
+    width: InlineStyleValue;
+    maxWidth: InlineStyleValue;
+  }> = [];
   /** 末尾媒体 float 的临时负 margin-top 写回（每轮测量前恢复）。 */
   private trailingFloatFixes: Array<{ el: HTMLElement; marginTop: InlineStyleValue }> = [];
   /** 行尾悬挂空白导致越过 computed-right 包含块的可见行内盒写回。 */
@@ -802,13 +1711,8 @@ export class ChapterPaginator {
   /** 首次布局显示门；token 与 loadSeq 一致，旧章不能揭示新章。 */
   private displayGate: VisibilityGate;
 
-  /** 阅读位置锚点：页中心元素（子树元素序号 + 元素内横向比例 + 字数位置） */
-  private anchor: {
-    index: number;
-    ratio: number;
-    charsRead: number;
-    totalChars: number;
-  } | null = null;
+  /** 阅读位置锚点：中心只是采样坐标，不参与任何分页样式或结构。 */
+  private anchor: ReadingAnchor | null = null;
   private anchorPath: string | undefined;
 
   constructor(
@@ -846,6 +1750,7 @@ export class ChapterPaginator {
 
   /** 加载一章。path 为规范化内部路径。 */
   async load(path: string, opts: LoadOptions = {}): Promise<void> {
+    this.abortMeasureWaits();
     const seq = ++this.loadSeq;
     this.disposed = false;
     this.recomputeRetries = 0;
@@ -857,6 +1762,9 @@ export class ChapterPaginator {
       this.anchorPath = undefined;
       this.metrics.currentPage = 0;
     }
+    if (opts.readingAnchor) {
+      this.setReadingAnchor({ path, ...opts.readingAnchor });
+    }
     this._currentPath = path;
     this.pendingAnchor = opts.anchor;
     this.pendingStartAtEnd = opts.startAtEnd === true;
@@ -866,6 +1774,10 @@ export class ChapterPaginator {
     this.emit({ status: "loading" });
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
+    this.pendingFallbackPage =
+      typeof opts.fallbackPage === "number" && Number.isSafeInteger(opts.fallbackPage) && opts.fallbackPage >= 0
+        ? opts.fallbackPage
+        : null;
     this.iframe.src = "about:blank";
 
     const htmlText = this.server.textFor(path);
@@ -875,6 +1787,10 @@ export class ChapterPaginator {
       return;
     }
 
+    // CSS Blob URL 的所有权只在本次 sanitize/load 内；提交 iframe 前仍属于
+    // 局部任务，任何过期/异常路径都必须在这里回收。
+    const ownedCssUrls = new OwnedBlobUrls();
+    this.pendingCssUrls.add(ownedCssUrls);
     let sanitized;
     try {
       sanitized = await sanitizeChapter(htmlText, {
@@ -883,26 +1799,50 @@ export class ChapterPaginator {
         urlFor: (p) => this.server.urlFor(p),
         getText: (p) => this.server.textFor(p),
         makeUrl: (text, mediaType) =>
-          URL.createObjectURL(new Blob([text], { type: mediaType })),
+          ownedCssUrls.add(URL.createObjectURL(new Blob([text], { type: mediaType }))),
         settings: this.settings,
       });
     } catch (e) {
+      this.pendingCssUrls.delete(ownedCssUrls);
+      ownedCssUrls.revokeAll();
       if (seq === this.loadSeq) {
         this.emit({ status: "error", message: `章节渲染失败：${(e as Error).message}` });
         this.displayGate.release(seq);
       }
       return;
     }
-    if (seq !== this.loadSeq || this.disposed) return;
-    if (sanitized.issues.length > 0) this.onIssues?.(sanitized.issues);
-
-    this.blobUrl = URL.createObjectURL(
-      new Blob([sanitized.html], { type: "text/html; charset=utf-8" })
-    );
+    if (seq !== this.loadSeq || this.disposed) {
+      this.pendingCssUrls.delete(ownedCssUrls);
+      ownedCssUrls.revokeAll();
+      return;
+    }
+    let nextBlobUrl: string | undefined;
+    try {
+      nextBlobUrl = URL.createObjectURL(
+        new Blob([sanitized.html], { type: "text/html; charset=utf-8" })
+      );
+      // iframe.src 提交是本次局部 CSS URL 转为当前章节所有权的边界。
+      this.pendingCssUrls.delete(ownedCssUrls);
+      this.chapterCssUrls = ownedCssUrls;
+      this.blobUrl = nextBlobUrl;
+      this.iframe.addEventListener("load", this.onIframeLoad);
+      this.iframe.src = nextBlobUrl;
+      if (sanitized.issues.length > 0) this.onIssues?.(sanitized.issues);
+    } catch (e) {
+      this.pendingCssUrls.delete(ownedCssUrls);
+      ownedCssUrls.revokeAll();
+      if (nextBlobUrl) URL.revokeObjectURL(nextBlobUrl);
+      this.iframe.removeEventListener("load", this.onIframeLoad);
+      if (this.blobUrl === nextBlobUrl) this.blobUrl = undefined;
+      if (this.chapterCssUrls === ownedCssUrls) this.chapterCssUrls = new OwnedBlobUrls();
+      if (seq === this.loadSeq && !this.disposed) {
+        this.emit({ status: "error", message: `章节渲染失败：${(e as Error).message}` });
+        this.displayGate.release(seq);
+      }
+      return;
+    }
     // sanitize 较慢或快速换章时重新计算兜底时间；原 visibility 快照保持不变。
     this.displayGate.hold(seq);
-    this.iframe.addEventListener("load", this.onIframeLoad);
-    this.iframe.src = this.blobUrl;
   }
 
   private onIframeLoad = (): void => {
@@ -963,8 +1903,9 @@ export class ChapterPaginator {
    * 返回前已经完成自愈重试与最终入口定位，调用方随后才可揭示内容。
    */
   private async prepareChapterForDisplay(seq: number, atEnd: boolean): Promise<boolean> {
-    await this.measure();
+    if (!(await this.measure(seq))) return false;
     if (seq !== this.loadSeq || this.disposed) return false;
+    this.rebuildTextIndexForCurrentDoc();
     const ready = await this.recompute(true, seq);
     if (!ready || seq !== this.loadSeq || this.disposed) return false;
 
@@ -981,15 +1922,30 @@ export class ChapterPaginator {
   }
 
   /** 设置分栏并等待字体就绪后测量（带超时保护：任何一步挂起都不能阻塞 ready）。 */
-  private async measure(): Promise<void> {
+  private async measure(expectedLoadSeq: number = this.loadSeq): Promise<boolean> {
     const doc = this.contentDoc;
     const viewer = this.viewer;
-    if (!doc || !viewer) return;
+    if (
+      !doc ||
+      !viewer ||
+      !isChapterMeasurementCurrent({
+        disposed: this.disposed,
+        loadSeq: this.loadSeq,
+        expectedLoadSeq,
+        contentDoc: this.contentDoc,
+        expectedDoc: doc,
+        viewer: this.viewer,
+        expectedViewer: viewer,
+      })
+    ) {
+      return false;
+    }
     const measuredWidth = this.iframe.clientWidth;
     const measuredHeight = this.iframe.clientHeight;
     // 第二遍 margin / fit-content 处理写回的 inline 值要先恢复，
     // 避免字号/窗口变化后按旧值布局
     this.restoreInlineBoxFixes();
+    this.restoreFloatLayoutFixes();
     this.restoreBookMargins();
     this.restoreFitContentFix();
     this.restoreFloatWidths();
@@ -1029,31 +1985,72 @@ export class ChapterPaginator {
     viewer.style.height = "100%";
     // 同步回流一次，确保 scrollWidth 反映新布局
     void viewer.scrollWidth;
-    const timeout = (ms: number): Promise<void> =>
-      new Promise((r) => setTimeout(r, ms));
+    const waitController = new AbortController();
+    this.measureControllers.add(waitController);
     try {
       // fonts.ready 极端情况下可能挂起（字体请求异常），5s 超时兜底
-      await Promise.race([doc.fonts.ready, timeout(5000)]);
-    } catch {
-      /* 字体 API 不可用时直接继续 */
+      const fonts = await waitForFontsReady(doc.fonts?.ready ?? Promise.resolve(), {
+        signal: waitController.signal,
+        timeoutMs: 5000,
+      });
+      if (fonts === "aborted") return false;
+      if (
+        !isChapterMeasurementCurrent({
+          disposed: this.disposed,
+          loadSeq: this.loadSeq,
+          expectedLoadSeq,
+          contentDoc: this.contentDoc,
+          expectedDoc: doc,
+          viewer: this.viewer,
+          expectedViewer: viewer,
+        })
+      ) {
+        return false;
+      }
+      // 布局稳定后再读一次（rAF 同样加超时兜底）
+      const frames = await waitForDoubleRaf({
+        signal: waitController.signal,
+        timeoutMs: 2000,
+        requestAnimationFrame: doc.defaultView?.requestAnimationFrame?.bind(doc.defaultView),
+        cancelAnimationFrame: doc.defaultView?.cancelAnimationFrame?.bind(doc.defaultView),
+      });
+      if (frames === "aborted") return false;
+      if (
+        !isChapterMeasurementCurrent({
+          disposed: this.disposed,
+          loadSeq: this.loadSeq,
+          expectedLoadSeq,
+          contentDoc: this.contentDoc,
+          expectedDoc: doc,
+          viewer: this.viewer,
+          expectedViewer: viewer,
+        })
+      ) {
+        return false;
+      }
+      // [L5-C18] fit-content 会改变最终 border-box 宽度，必须先稳定宽度再计算
+      // 页面级 margin；反过来会把多栏中的异常旧宽度固化成错误横向位置。
+      this.applyFitContentFix();
+      this.applyBookMargins();
+      this.applyFloatShrinkFix();
+      this.applyTrailingFloatMarginFix();
+      this.applyInlineBoxOverflowFix();
+      // 只在整轮测量与二阶段补偿完成后提交尺寸；若测量期间窗口又变化，
+      // ResizeObserver 仍会发现新尺寸并发起下一轮。
+      this.measuredViewport = { width: measuredWidth, height: measuredHeight };
+      return isChapterMeasurementCurrent({
+        disposed: this.disposed,
+        loadSeq: this.loadSeq,
+        expectedLoadSeq,
+        contentDoc: this.contentDoc,
+        expectedDoc: doc,
+        viewer: this.viewer,
+        expectedViewer: viewer,
+      });
+    } finally {
+      this.measureControllers.delete(waitController);
+      waitController.abort();
     }
-    // 布局稳定后再读一次（rAF 同样加超时兜底）
-    await Promise.race([
-      new Promise<void>((r) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => r()))
-      ),
-      timeout(2000),
-    ]);
-    // [L5-C18] fit-content 会改变最终 border-box 宽度，必须先稳定宽度再计算
-    // 页面级 margin；反过来会把多栏中的异常旧宽度固化成错误横向位置。
-    this.applyFitContentFix();
-    this.applyBookMargins();
-    this.applyFloatShrinkFix();
-    this.applyTrailingFloatMarginFix();
-    this.applyInlineBoxOverflowFix();
-    // 只在整轮测量与二阶段补偿完成后提交尺寸；若测量期间窗口又变化，
-    // ResizeObserver 仍会发现新尺寸并发起下一轮。
-    this.measuredViewport = { width: measuredWidth, height: measuredHeight };
   }
 
   /** 恢复上一轮 margin 后处理写回的 inline 值。 */
@@ -1094,10 +2091,10 @@ export class ChapterPaginator {
         !c.classList.contains("illus") &&
         !c.classList.contains("kuchie") &&
         !c.classList.contains("cover") &&
-        !c.classList.contains("duokan-image-single") &&
         !c.classList.contains("duokan-image-fullscreen")
     );
     if (candidates.length === 0) return;
+    const candidateSet = new Set(candidates);
 
     // 先暂时移除 L3 auto margin，再读取“作者/用户最终获胜的级联”。
     // getComputedStyle 会把百分比解析成 px，必须优先用 Typed OM 保留
@@ -1114,6 +2111,8 @@ export class ChapterPaginator {
         relaxedReaderMaxWidth: boolean;
       }
     >();
+    const authoredHorizontalMargins = new Map<HTMLElement, AuthoredHorizontalMarginResult>();
+    const authoredSizingIntents = new Map<HTMLElement, AuthoredSizingIntentResult>();
     const restoreReaderMargins = readerSheet
       ? this.disableReaderTopMarginRules(readerSheet)
       : () => {};
@@ -1147,16 +2146,199 @@ export class ChapterPaginator {
             cs = win.getComputedStyle(el);
           }
         }
+        // The source probe walks CSSOM. C-16 percentage margins return before
+        // C-37/C-04, so only non-percentage candidates with an actual margin
+        // can reach that branch. Zero/auto direct children intentionally
+        // avoid an O(children × rules) scan here.
+        if (shouldProbeAuthoredHorizontalMargin(percentage, cs.marginLeft, cs.marginRight)) {
+          // Run while the L3 auto rules are removed. This distinguishes a UA
+          // default (for example blockquote's 40px/40px) from an actual book
+          // or customCss declaration before C-04 sees resolved px margins.
+          authoredHorizontalMargins.set(el, hasAuthoredHorizontalMargin(doc, el));
+          if (
+            cs.textAlign.trim().toLowerCase() === "center" &&
+            isSymmetricHorizontalMargin(cs.marginLeft, cs.marginRight)
+          ) {
+            // Fixed/unknown sizing intent must keep the conservative C-04 path;
+            // only a definite absence can authorize the C-40 natural-centering
+            // exemption below.
+            authoredSizingIntents.set(el, hasAuthoredSizingIntent(doc, el));
+          }
+        }
         percentageMargins.set(el, marginProbe);
 
         const borderBoxW = getBorderBoxWidth(cs);
         widths.set(el, borderBoxW > 0 ? borderBoxW : el.getBoundingClientRect().width);
       }
 
+      const preserveFloatLayout = (el: HTMLElement, leftValue: string, rightValue: string): void => {
+        const toPx = (value: string): string => {
+          const parsed = Number.parseFloat(value);
+          return Number.isFinite(parsed) ? `${parsed}px` : "0px";
+        };
+        this.floatLayoutFixes.push({
+          el,
+          left: snapshotInlineStyleProperty(el.style, "margin-left"),
+          right: snapshotInlineStyleProperty(el.style, "margin-right"),
+          width: snapshotInlineStyleProperty(el.style, "width"),
+          maxWidth: snapshotInlineStyleProperty(el.style, "max-width"),
+        });
+        el.setAttribute("data-reader-float-layout-fixed", "1");
+        el.style.setProperty("margin-left", toPx(leftValue), "important");
+        el.style.setProperty("margin-right", toPx(rightValue), "important");
+      };
+
+      // C-31 must inspect the complete direct-child sequence rather than the
+      // filtered candidate list: an excluded fullscreen element or any normal
+      // block between two floats is a real sibling boundary and must end the
+      // percentage grid group.
+      const groupEntries: PercentageFloatGroupEntry[] = Array.from(viewer.children).map((child) => {
+        const el = child as HTMLElement;
+        const cs = win.getComputedStyle(el);
+        const fullpage =
+          el.classList.contains("illus") ||
+          el.classList.contains("kuchie") ||
+          el.classList.contains("cover") ||
+          el.classList.contains("duokan-image-fullscreen");
+        const eligible = candidateSet.has(el) && !fullpage;
+        return {
+          eligible,
+          readerTop: el.classList.contains("reader-top"),
+          float: cs.float,
+          clear: cs.clear,
+          percentageWidth:
+            eligible && /^(?:left|right)$/u.test(cs.float.trim().toLowerCase())
+              ? getAuthoredPercentageWidth(el, doc)
+              : null,
+          marginLeft: cs.marginLeft,
+          marginRight: cs.marginRight,
+          position: cs.position,
+          writingMode: cs.writingMode,
+          direction: cs.direction,
+          authorFullWidthIntent: eligible ? hasAuthorFullWidthIntent(doc, el) : false,
+          percentageMargin: percentageMargins.get(el)?.percentage,
+        };
+      });
+      const percentageFloatGroupMembers = new Set<HTMLElement>();
+      getPercentageFloatGroupMembers(groupEntries).forEach((member, index) => {
+        if (member) percentageFloatGroupMembers.add(viewer.children[index] as HTMLElement);
+      });
+      const safePercentageFloatGroupMembers = new Set<HTMLElement>();
+      getSafePercentageFloatGroupMembers(groupEntries).forEach((member, index) => {
+        if (member) safePercentageFloatGroupMembers.add(viewer.children[index] as HTMLElement);
+      });
+
+      // Stage 2: process each safe complete percentage group as one layout
+      // unit. No wrapper is inserted; only existing direct children receive
+      // temporary inline width/margin declarations.
+      const groupEntriesByElement = new Map<HTMLElement, PercentageFloatGroupEntry>();
+      groupEntries.forEach((entry, index) => {
+        groupEntriesByElement.set(viewer.children[index] as HTMLElement, entry);
+      });
+      const children = Array.from(viewer.children) as HTMLElement[];
+      let groupIndex = 0;
+      while (groupIndex < children.length) {
+        const first = children[groupIndex];
+        if (!percentageFloatGroupMembers.has(first)) {
+          groupIndex += 1;
+          continue;
+        }
+        const members: HTMLElement[] = [];
+        while (
+          groupIndex < children.length &&
+          percentageFloatGroupMembers.has(children[groupIndex])
+        ) {
+          members.push(children[groupIndex++]);
+        }
+        if (!members.every((member) => safePercentageFloatGroupMembers.has(member))) continue;
+
+        const firstEntry = groupEntriesByElement.get(members[0]);
+        if (!firstEntry) continue;
+        const parent = members[0].parentElement;
+        const parentCs = parent && doc.defaultView ? doc.defaultView.getComputedStyle(parent) : null;
+        const parentW =
+          (parent?.clientWidth ?? viewer.clientWidth) -
+          (parseFloat(parentCs?.paddingLeft ?? "") || 0) -
+          (parseFloat(parentCs?.paddingRight ?? "") || 0);
+        const contentWidth = TEXT_MEASURE.maxEm * this.settings.fontSizePx;
+        const targetWidths = getPercentageFloatGroupTargetWidths(
+          members.map((member) => groupEntriesByElement.get(member)?.percentageWidth ?? NaN),
+          parentW,
+          contentWidth
+        );
+        if (!targetWidths) continue;
+        const inset = Math.max(0, (parentW - Math.min(parentW, contentWidth)) / 2);
+        const originalMargins = members.map((member) => {
+          const cs = win.getComputedStyle(member);
+          return { left: cs.marginLeft, right: cs.marginRight };
+        });
+        const snapshotStart = this.floatLayoutFixes.length;
+        const floatDirection = firstEntry.float.trim().toLowerCase();
+        members.forEach((member, index) => {
+          const snapshot = {
+            el: member,
+            left: snapshotInlineStyleProperty(member.style, "margin-left"),
+            right: snapshotInlineStyleProperty(member.style, "margin-right"),
+            width: snapshotInlineStyleProperty(member.style, "width"),
+            maxWidth: snapshotInlineStyleProperty(member.style, "max-width"),
+          };
+          this.floatLayoutFixes.push(snapshot);
+          member.setAttribute("data-reader-float-layout-fixed", "1");
+          member.style.setProperty("width", `${targetWidths[index]}px`, "important");
+          const sideInset = index === 0 ? inset : 0;
+          member.style.setProperty(
+            "margin-left",
+            `${floatDirection === "left" ? sideInset : 0}px`,
+            "important"
+          );
+          member.style.setProperty(
+            "margin-right",
+            `${floatDirection === "right" ? sideInset : 0}px`,
+            "important"
+          );
+        });
+        void viewer.offsetWidth;
+        const viewerRect = viewer.getBoundingClientRect();
+        const rects = members.map((member) =>
+          Array.from(member.getClientRects()).map((rect) => ({
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            width: rect.width,
+          }))
+        );
+        const validGeometry = isPercentageFloatGroupGeometryValid({
+          rects,
+          viewerLeft: viewerRect.left,
+          scrollLeft: viewer.scrollLeft,
+          step: this.step,
+          parentWidth: parentW,
+          contentWidth,
+        });
+        if (!validGeometry) {
+          for (let index = snapshotStart; index < this.floatLayoutFixes.length; index += 1) {
+            const fix = this.floatLayoutFixes[index];
+            fix.el.removeAttribute("data-reader-float-layout-fixed");
+            restoreInlineStyleProperty(fix.el.style, "margin-left", fix.left);
+            restoreInlineStyleProperty(fix.el.style, "margin-right", fix.right);
+            restoreInlineStyleProperty(fix.el.style, "width", fix.width);
+            restoreInlineStyleProperty(fix.el.style, "max-width", fix.maxWidth);
+          }
+          this.floatLayoutFixes.splice(snapshotStart);
+          // Keep the Stage 1 firewall in place after a failed group trial.
+          members.forEach((member, index) =>
+            preserveFloatLayout(member, originalMargins[index].left, originalMargins[index].right)
+          );
+        }
+      }
+
       for (const el of candidates) {
         // 同一测量周期内已修正过则跳过，避免把上次写回的 margin
         // 再当成书 margin 叠加一次（导致 namebox 732/-32 这类错误）。
-        if (el.hasAttribute("data-reader-margin-fixed")) continue;
+        if (
+          el.hasAttribute("data-reader-margin-fixed") ||
+          el.hasAttribute("data-reader-float-layout-fixed")
+        ) continue;
         void el.offsetWidth;
         const cs = win.getComputedStyle(el);
         const left = cs.marginLeft;
@@ -1168,12 +2350,53 @@ export class ChapterPaginator {
           (parseFloat(parentCs?.paddingLeft ?? "") || 0) -
           (parseFloat(parentCs?.paddingRight ?? "") || 0);
         const width = widths.get(el) ?? el.getBoundingClientRect().width;
-        const meaningful = (v: string): boolean =>
-          v !== "auto" && v !== "" && parseFloat(v) !== 0;
+        const meaningful = isMeaningfulHorizontalMargin;
         const originalMaxWidth = maxWidths.get(el) ?? "";
         const hadFitContent =
           fitContentElements.has(el) || /(?:fit-content|max-content)/.test(originalMaxWidth);
         const percentage = percentageMargins.get(el);
+        const fullpage =
+          el.classList.contains("illus") ||
+          el.classList.contains("kuchie") ||
+          el.classList.contains("cover") ||
+          el.classList.contains("duokan-image-fullscreen");
+        const isTopFloat =
+          el.classList.contains("reader-top") && /^(?:left|right)$/u.test(cs.float.trim().toLowerCase());
+
+
+        // Float is a separate layout unit. It must never fall through to the
+        // ordinary block margin compensator, even when a conservative gate
+        // decides that the original book geometry cannot be projected.
+        if (isTopFloat) {
+          const floatGroupMember = percentageFloatGroupMembers.has(el);
+          const floatMargins = floatGroupMember
+            ? null
+            : getReaderTopFloatLayoutMargins({
+                readerTop: true,
+                float: cs.float,
+                fullpage,
+                parentWidth: parentW,
+                width,
+                contentWidth: TEXT_MEASURE.maxEm * this.settings.fontSizePx,
+                marginLeft: left,
+                marginRight: right,
+                authorFullWidthIntent: hasAuthorFullWidthIntent(doc, el),
+                authoredHorizontalMargin: authoredHorizontalMargins.get(el),
+                percentageMargin: percentage?.percentage,
+                position: cs.position,
+                writingMode: cs.writingMode,
+                direction: cs.direction,
+              });
+          if (floatMargins) {
+            preserveFloatLayout(el, `${floatMargins.left}px`, `${floatMargins.right}px`);
+          } else if (floatGroupMember || !fullpage) {
+            // Preserve the measured author/UA result through restoration of
+            // L3 auto margins. This is deliberately a px snapshot for this
+            // measure cycle; the next cycle restores and re-measures it.
+            preserveFloatLayout(el, left, right);
+          }
+          continue;
+        }
 
         // [L4-C16] 百分比水平 margin 已经以包含块为基准，不能再叠加版心
         // base。此时 max-width 已按需解除，computed width/margin 就是书的
@@ -1231,35 +2454,74 @@ export class ChapterPaginator {
         // Explicit author margins, full-page classes, a box wider than the
         // reader measure, or authored full-width/breakout intent all remain
         // in the book's original layout.
-        const floatMargins = getReaderTopFloatContainmentMargins({
-          readerTop: el.classList.contains("reader-top"),
-          float: cs.float,
-          fullpage:
-            el.classList.contains("illus") ||
-            el.classList.contains("kuchie") ||
-            el.classList.contains("cover") ||
-            el.classList.contains("duokan-image-single") ||
-            el.classList.contains("duokan-image-fullscreen"),
-          parentWidth: parentW,
-          width,
-          contentWidth: TEXT_MEASURE.maxEm * this.settings.fontSizePx,
-          marginLeft: left,
-          marginRight: right,
-          authorFullWidthIntent: hasAuthorFullWidthIntent(doc, el),
-        });
-        if (floatMargins) {
+        // [L3/L4-C37] UA blockquote margins describe symmetric inner留白.
+        // Preserve that meaning by shrinking the effective max-width while
+        // leaving reader-top auto centering in charge after this transaction.
+        // This must stay after C-31 and before C-04; authored/unknown margins,
+        // floats, full-page elements and intrinsic-size paths never enter it.
+        const uaSymmetricMaxWidth =
+          !hadFitContent
+            ? getReaderTopUaSymmetricInsetMaxWidth({
+                readerTop: el.classList.contains("reader-top"),
+                authoredHorizontalMargin: authoredHorizontalMargins.get(el),
+                float: cs.float,
+                fullpage:
+                  el.classList.contains("illus") ||
+                  el.classList.contains("kuchie") ||
+                  el.classList.contains("cover") ||
+                  el.classList.contains("duokan-image-fullscreen"),
+                percentageMargin: percentage?.percentage,
+                parentWidth: parentW,
+                borderBoxWidth: width,
+                cssWidth: Number.parseFloat(cs.width),
+                boxSizing: cs.boxSizing,
+                marginLeft: left,
+                marginRight: right,
+              })
+            : null;
+        if (uaSymmetricMaxWidth !== null) {
           this.marginFixes.push({
             el,
             left: snapshotInlineStyleProperty(el.style, "margin-left"),
             right: snapshotInlineStyleProperty(el.style, "margin-right"),
+            maxWidth: snapshotInlineStyleProperty(el.style, "max-width"),
           });
           el.setAttribute("data-reader-margin-fixed", "1");
-          el.style.setProperty("margin-left", `${floatMargins.left}px`, "important");
-          el.style.setProperty("margin-right", `${floatMargins.right}px`, "important");
+          el.style.setProperty("max-width", `${uaSymmetricMaxWidth}px`, "important");
+          continue;
+        }
+
+        // [L3/L4-C40] Explicit positive symmetric author margins on a normal
+        // centered block are bilateral whitespace. Keep the restored reader
+        // auto margins instead of translating the left value into C-04's
+        // one-sided indentation. Fixed/unknown sizing intent stays conservative.
+        if (
+          shouldKeepCenteredAuthorMargins({
+            readerTop: el.classList.contains("reader-top"),
+            float: cs.float,
+            writingMode: cs.writingMode,
+            fullpage,
+            intrinsicSize: hadFitContent,
+            percentageMargin: percentage?.percentage,
+            authoredHorizontalMargin: authoredHorizontalMargins.get(el),
+            authoredSizingIntent: authoredSizingIntents.get(el),
+            textAlign: cs.textAlign,
+            marginLeft: left,
+            marginRight: right,
+          })
+        ) {
           continue;
         }
 
         if (!meaningful(left) && !meaningful(right)) continue;
+
+        // [L3/L4-C37] getComputedStyle exposes UA blockquote margins as px.
+        // They are not author indentation and must retain the restored L3
+        // reader-top auto centering instead of being reinterpreted by C-04.
+        // `undefined` intentionally retains the old compatibility path.
+        if (!shouldApplyBookMarginCompensation(authoredHorizontalMargins.get(el))) {
+          continue;
+        }
 
         const ml = parseFloat(left) || 0;
         const mr = parseFloat(right) || 0;
@@ -1391,7 +2653,7 @@ export class ChapterPaginator {
     if (!doc || !viewer || !doc.defaultView) return;
     const win = doc.defaultView;
     for (const el of Array.from(viewer.querySelectorAll("*")) as HTMLElement[]) {
-      if (el.closest(".illus, .kuchie, .cover, .duokan-image-single, .duokan-image-fullscreen")) {
+      if (el.closest(".illus, .kuchie, .cover, .duokan-image-fullscreen")) {
         continue;
       }
       const mw = win.getComputedStyle(el).maxWidth;
@@ -1405,6 +2667,17 @@ export class ChapterPaginator {
   private restoreFloatWidths(): void {
     for (const el of this.floatFixes) el.style.removeProperty("width");
     this.floatFixes = [];
+  }
+
+  private restoreFloatLayoutFixes(): void {
+    for (const fix of this.floatLayoutFixes) {
+      fix.el.removeAttribute("data-reader-float-layout-fixed");
+      restoreInlineStyleProperty(fix.el.style, "margin-left", fix.left);
+      restoreInlineStyleProperty(fix.el.style, "margin-right", fix.right);
+      restoreInlineStyleProperty(fix.el.style, "width", fix.width);
+      restoreInlineStyleProperty(fix.el.style, "max-width", fix.maxWidth);
+    }
+    this.floatLayoutFixes = [];
   }
 
   private restoreTrailingFloatFixes(): void {
@@ -1745,8 +3018,10 @@ export class ChapterPaginator {
         }
       }
       if (moved > 0) {
-        await this.measure();
+        this.textIndex = null;
+        if (!(await this.measure(loadSeq))) return false;
         if (this.disposed || loadSeq !== this.loadSeq) return false;
+        this.rebuildTextIndexForCurrentDoc();
         return this.recompute(useAnchor, loadSeq);
       }
     }
@@ -1763,8 +3038,9 @@ export class ChapterPaginator {
     if (viewer.scrollHeight > viewer.clientHeight + 1) {
       if (this.recomputeRetries < 2) {
         this.recomputeRetries++;
-        await this.measure();
+        if (!(await this.measure(loadSeq))) return false;
         if (this.disposed || loadSeq !== this.loadSeq) return false;
+        this.rebuildTextIndexForCurrentDoc();
         return this.recompute(useAnchor, loadSeq);
       }
     }
@@ -1793,18 +3069,30 @@ export class ChapterPaginator {
     }
     // 阅读位置保留：窗口缩放/设置变化用内容锚点定位；
     // 图片加载等内容变化保留当前页号（否则内容下移会把人拉到后几页）
-    const anchorCol = useAnchor ? this.resolveAnchorCol() : null;
-    const current =
-      anchorCol !== null
-        ? Math.min(anchorCol, pageCount - 1)
-        : Math.min(this.metrics.currentPage, pageCount - 1);
+    const resolvedAnchor = useAnchor ? this.resolveAnchorCol() : null;
+    const anchorCol = resolvedAnchor?.col ?? null;
+    const restored = resolveRestoredPage({
+      pageCount,
+      anchorCol,
+      fallbackPage: this.pendingFallbackPage,
+      currentPage: this.metrics.currentPage,
+    });
+    const current = restored.page;
     this.metrics = { pageCount, currentPage: current };
     // 关键：重排（图片加载/窗口缩放）后对齐页边界，否则显示半页偏移错位
     viewer.scrollLeft = (leadShift + current) * this.step;
+    // A legacy element anchor only chooses the column. Once there, observe
+    // the current page centre to upgrade it to the text anchor used by new
+    // progress writes; no layout rule is changed.
+    if (resolvedAnchor?.source === "legacy") this.captureAnchor();
     this.emit({ status: "ready", pageCount, currentPage: current, empty: false });
     // 粘性锚点：使用锚点恢复时不重新取样（否则恢复后页心可能是下一段，
     // 反复缩放会逐段漂移）；仅当无锚点（首次加载）时建立
     if (anchorCol === null) this.captureAnchor();
+    // A failed content/legacy anchor must consume the saved page only after it
+    // has really been applied. It cannot be overwritten by the fresh centre
+    // sample above before this point.
+    if (restored.consumeFallback) this.pendingFallbackPage = null;
   }
 
   /** 内容在列方向上的实际占用范围（内容坐标，视口无关）。 */
@@ -1825,64 +3113,268 @@ export class ChapterPaginator {
     return { minX, maxX };
   }
 
+  /** Rebuild only after a successful measure of the currently owned document. */
+  private rebuildTextIndexForCurrentDoc(): void {
+    if (!this.contentDoc || !this.viewer || this.disposed) {
+      this.textIndex = null;
+      return;
+    }
+    this.textIndex = buildVisibleTextIndex(this.contentDoc, this.viewer);
+  }
+
   /**
-   * 记录当前可见页中心的元素锚点（供重排后恢复阅读位置）。
-   * 以页面正中间那 1-2 行为锚：视线焦点通常在页中，缩放后这些行
-   * 仍应落在新页面的中部区域，保证阅读连续性。
+   * Observe the current page centre only. This method never inserts spacers or
+   * changes styles: pagination has already happened and remains natural from
+   * the chapter's first page.
    */
   private captureAnchor(): void {
     const doc = this.contentDoc;
     const viewer = this.viewer;
     if (!doc || !viewer || this.step <= 0 || viewer.clientWidth <= 0) return;
+    const index = this.textIndex ?? buildVisibleTextIndex(doc, viewer);
+    this.textIndex = index;
     const x = Math.min(viewer.clientWidth * 0.5, viewer.clientWidth - 2);
-    const padTop = parseFloat(viewer.style.paddingTop || "0") || 0;
-    // 页中心取样，向上就近回退直到页顶；仍未命中则取页顶元素
+    const mid = Math.max(2, Math.min(viewer.clientHeight - 2, viewer.clientHeight * 0.5));
+    const samples = [mid, mid - 40, mid + 40, mid - 80, mid + 80]
+      .filter((y) => y >= 2 && y <= viewer.clientHeight - 2);
+    let textNode: Text | null = null;
+    let rawOffset = 0;
+    for (const y of samples) {
+      const modern = (doc as Document & {
+        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+        caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      }).caretPositionFromPoint?.(x, y);
+      if (modern?.offsetNode.nodeType === 3) {
+        textNode = modern.offsetNode as Text;
+        rawOffset = modern.offset;
+        break;
+      }
+      const range = (doc as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null })
+        .caretRangeFromPoint?.(x, y);
+      if (range?.startContainer.nodeType === 3) {
+        textNode = range.startContainer as Text;
+        rawOffset = range.startOffset;
+        break;
+      }
+    }
+    const textOffset = textNode ? index.offsetForNode(textNode, rawOffset) : null;
+    // Keep legacy data only as a compatibility fallback for images and old
+    // engines without a caret API. It is never used to count text.
     let el: Element | null = null;
-    let yy = viewer.clientHeight / 2;
-    while (yy > 4 && !el) {
-      const hit = doc.elementFromPoint(x, Math.max(2, yy));
+    for (const y of samples) {
+      const hit = doc.elementFromPoint(x, y);
       if (hit && hit !== viewer && hit !== doc.body && hit !== doc.documentElement) {
         el = hit;
-      }
-      yy -= 40;
-    }
-    if (!el) {
-      const hit = doc.elementFromPoint(x, Math.min(padTop + 4, viewer.clientHeight - 2));
-      if (hit && hit !== viewer && hit !== doc.body && hit !== doc.documentElement) {
-        el = hit;
+        break;
       }
     }
-    if (!el) return;
     const all = Array.from(viewer.querySelectorAll("*"));
-    const idx = all.indexOf(el as HTMLElement);
-    if (idx < 0) return;
-    // 可见点在元素总宽度中的横向比例（跨列长段落按比例映射，
-    // 字号变化后段落重排，比例仍近似对应同一处内容）
-    const rect = (el as HTMLElement).getBoundingClientRect();
-    const ratio =
-      rect.width > 0 ? Math.min(1, Math.max(0, (x - rect.left) / rect.width)) : 0;
-    // 字数位置：叶子文本累计（父容器不重复计数），供内容进度推算
-    let charsRead = 0;
-    for (let i = 0; i < idx; i++) charsRead += leafTextLen(all[i] as HTMLElement);
-    charsRead += ratio * leafTextLen(el as HTMLElement);
-    const totalChars = (viewer.textContent ?? "").replace(/\s/g, "").length;
-    this.anchor = { index: idx, ratio, charsRead, totalChars };
+    const idx = el ? all.indexOf(el as HTMLElement) : -1;
+    const rect = el ? (el as HTMLElement).getBoundingClientRect() : null;
+    const ratio = rect && rect.width > 0 ? Math.min(1, Math.max(0, (x - rect.left) / rect.width)) : 0;
+    this.anchor = {
+      index: idx,
+      ratio,
+      charsRead: textOffset ?? 0,
+      totalChars: index.totalChars,
+      textOffset,
+      textSnippet: textOffset === null ? null : index.snippetAt(textOffset),
+    };
     this.anchorPath = this._currentPath;
   }
 
-  /** 锚点元素当前所在列（同章且锚点存在时返回列号，否则 null）。 */
-  private resolveAnchorCol(): number | null {
+  /** Resolve a text Range to its current column after the chapter is laid out. */
+  private resolveTextAnchorCol(index: VisibleTextIndex, textOffset: number): number | null {
     const doc = this.contentDoc;
     const viewer = this.viewer;
-    if (!doc || !viewer || !this.anchor || this.step <= 0) return null;
-    if (this.anchorPath !== this._currentPath) return null;
+    if (!doc || !viewer || this.step <= 0) return null;
+    const start = index.positionForOffset(textOffset);
+    const end = index.positionForOffset(Math.min(index.totalChars, textOffset + 1));
+    if (!start || !end) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(start.node, start.rawOffset);
+      range.setEnd(end.node, end.rawOffset);
+      const rect = Array.from(range.getClientRects()).find((candidate) => candidate.width > 0 || candidate.height > 0);
+      if (!rect) return null;
+      return Math.max(0, Math.floor((rect.left + viewer.scrollLeft) / this.step));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Text anchor wins; an invalid legacy index is invalid rather than clamped. */
+  private resolveAnchorCol(): ResolvedAnchorColumn | null {
+    const viewer = this.viewer;
+    if (!viewer || !this.anchor || this.step <= 0 || this.anchorPath !== this._currentPath) return null;
+    const index = this.textIndex;
+    if (this.anchor.textOffset !== null) {
+      if (index) {
+        const offset = resolveTextAnchorOffset(index, this.anchor);
+        if (offset !== null) {
+          const col = this.resolveTextAnchorCol(index, offset);
+          if (col !== null) {
+            this.anchor.textOffset = offset;
+            this.anchor.textSnippet = index.snippetAt(offset);
+            this.anchor.charsRead = offset;
+            this.anchor.totalChars = index.totalChars;
+            return { col, source: "text" };
+          }
+        }
+      }
+      // A stale/ambiguous text anchor must not remain sticky after legacy
+      // fallback succeeds. It would otherwise keep preventing the upgrade.
+      this.anchor.textOffset = null;
+      this.anchor.textSnippet = null;
+      this.anchor.charsRead = 0;
+    }
     const all = Array.from(viewer.querySelectorAll("*"));
-    const el = all[Math.min(this.anchor.index, all.length - 1)] as HTMLElement | undefined;
-    if (!el) return null;
+    if (!Number.isSafeInteger(this.anchor.index) || this.anchor.index < 0 || this.anchor.index >= all.length) return null;
+    const el = all[this.anchor.index] as HTMLElement;
     const rect = el.getBoundingClientRect();
-    // 元素首片段（内容坐标）+ 按比例映射到新布局宽度 → 目标列
     const absX = rect.left + viewer.scrollLeft + this.anchor.ratio * rect.width;
-    return Math.max(0, Math.floor(absX / this.step));
+    return { col: Math.max(0, Math.floor(absX / this.step)), source: "legacy" };
+  }
+
+  /** Commit a page without treating the center sample as a layout input. */
+  private commitWithinChapterPage(
+    page: number,
+    candidate: ReadingAnchor | null
+  ): void {
+    const viewer = this.viewer;
+    if (!viewer) return;
+    this.metrics.currentPage = page;
+    viewer.scrollLeft = page * this.step;
+    if (candidate) {
+      this.anchor = candidate;
+      this.anchorPath = this._currentPath;
+    } else {
+      this.anchor = null;
+      this.anchorPath = undefined;
+    }
+    // Commit the page before the read-only center observation. If caret is
+    // unavailable, preserve the successful text/legacy candidate.
+    const preserved = candidate ? { ...candidate } : null;
+    this.captureAnchor();
+    if (preserved && (!this.anchor || this.anchor.textOffset === null)) {
+      this.anchor = preserved;
+      this.anchorPath = this._currentPath;
+    }
+    this.emit({
+      status: "ready",
+      pageCount: this.metrics.pageCount,
+      currentPage: page,
+      empty: false,
+    });
+  }
+
+  /** Read-only fragment preflight shared by the iframe click path and commit. */
+  private getWithinChapterFragmentPage(fragmentValue: string): { hash: string; page: number } | null {
+    const viewer = this.viewer;
+    const doc = this.contentDoc;
+    if (!viewer || !doc || this.step <= 0 || this.lastState.status !== "ready") return null;
+    const encoded = fragmentValue.startsWith("#") ? fragmentValue.slice(1) : fragmentValue;
+    if (encoded.length === 0) return { hash: "", page: 0 };
+    const fragment = getFragmentNavigation(`#${encoded}`);
+    if (!fragment) return null;
+    const target = doc.getElementById(fragment.anchor);
+    if (!target) return null;
+    const rect = (target as HTMLElement).getBoundingClientRect();
+    const page = Math.floor((rect.left + viewer.scrollLeft) / this.step);
+    if (!Number.isFinite(page) || page < 0 || page >= this.metrics.pageCount) return null;
+    return { hash: fragment.hash, page };
+  }
+
+  /**
+   * Navigate inside the currently laid-out chapter. This is intentionally a
+   * synchronous, no-measure path: failed candidates are evaluated on a local
+   * anchor copy and leave the current page/anchor/hash untouched.
+   */
+  navigateWithinCurrentChapter(options: WithinChapterNavigationOptions = {}): boolean {
+    const viewer = this.viewer;
+    const doc = this.contentDoc;
+    if (
+      this.disposed ||
+      !this._currentPath ||
+      !doc ||
+      !viewer ||
+      this.step <= 0 ||
+      this.metrics.pageCount <= 0 ||
+      this.lastState.status !== "ready"
+    ) {
+      return false;
+    }
+
+    if (options.fragment !== undefined) {
+      const resolved = this.getWithinChapterFragmentPage(options.fragment);
+      if (!resolved) return false;
+      syncFragmentHash(this.iframe.contentWindow, resolved.hash);
+      this.commitWithinChapterPage(resolved.page, null);
+      return true;
+    }
+
+    if (options.toStart) {
+      syncFragmentHash(this.iframe.contentWindow, "");
+      this.commitWithinChapterPage(0, null);
+      return true;
+    }
+
+    let fallback: number | null = null;
+    if (options.fallbackPage !== undefined && options.fallbackPage !== null) {
+      if (!Number.isSafeInteger(options.fallbackPage) || options.fallbackPage < 0) return false;
+      fallback = Math.min(options.fallbackPage, this.metrics.pageCount - 1);
+    }
+
+    let candidate: ReadingAnchor | null = null;
+    if (options.readingAnchor) {
+      const text = sanitizePersistedTextAnchor(options.readingAnchor);
+      candidate = {
+        index:
+          Number.isSafeInteger(options.readingAnchor.index) && options.readingAnchor.index >= 0
+            ? options.readingAnchor.index
+            : -1,
+        ratio:
+          Number.isFinite(options.readingAnchor.ratio) &&
+          options.readingAnchor.ratio >= 0 &&
+          options.readingAnchor.ratio <= 1
+            ? options.readingAnchor.ratio
+            : 0,
+        charsRead: text.textOffset ?? 0,
+        totalChars: 0,
+        textOffset: text.textOffset,
+        textSnippet: text.textSnippet,
+      };
+      // Resolve on a temporary candidate. resolveAnchorCol may clear a stale
+      // text anchor while attempting legacy fallback; the live anchor is not
+      // touched until the result is known to be usable.
+      const previousAnchor = this.anchor;
+      const previousPath = this.anchorPath;
+      let resolved: ResolvedAnchorColumn | null = null;
+      let resolvedCandidate: ReadingAnchor | null = null;
+      let resolveFailed = false;
+      try {
+        this.anchor = { ...candidate };
+        this.anchorPath = this._currentPath;
+        resolved = this.resolveAnchorCol();
+        resolvedCandidate = this.anchor ? { ...this.anchor } : null;
+      } catch {
+        resolveFailed = true;
+      } finally {
+        this.anchor = previousAnchor;
+        this.anchorPath = previousPath;
+      }
+      if (resolveFailed) return false;
+      if (resolved && resolvedCandidate && resolved.col >= 0 && resolved.col < this.metrics.pageCount) {
+        syncFragmentHash(this.iframe.contentWindow, "");
+        this.commitWithinChapterPage(resolved.col, resolvedCandidate);
+        return true;
+      }
+      candidate = null;
+    }
+    if (fallback === null) return false;
+    syncFragmentHash(this.iframe.contentWindow, "");
+    this.commitWithinChapterPage(fallback, null);
+    return true;
   }
 
   /** 翻到第 i 页（自动夹紧）。 */
@@ -1916,6 +3408,8 @@ export class ChapterPaginator {
     ratio: number;
     charsRead: number;
     totalChars: number;
+    textOffset: number | null;
+    textSnippet: string | null;
   } | null {
     if (!this.anchor || !this.anchorPath) return null;
     return {
@@ -1924,14 +3418,22 @@ export class ChapterPaginator {
       ratio: this.anchor.ratio,
       charsRead: this.anchor.charsRead,
       totalChars: this.anchor.totalChars,
+      textOffset: this.anchor.textOffset,
+      textSnippet: this.anchor.textSnippet,
     };
   }
 
   /** 当前锚点元素的行文本（书签列表展示用）。 */
   getAnchorText(): string | null {
     if (!this.contentDoc || !this.viewer || !this.anchor) return null;
+    if (this.textIndex && this.anchor.textOffset !== null) {
+      const pos = this.textIndex.positionForOffset(this.anchor.textOffset);
+      const text = pos?.node.parentElement?.textContent?.replace(/\s+/g, " ").trim();
+      if (text) return text.slice(0, 80);
+    }
     const all = Array.from(this.viewer.querySelectorAll("*"));
-    const el = all[Math.min(this.anchor.index, all.length - 1)] as HTMLElement | undefined;
+    if (!Number.isSafeInteger(this.anchor.index) || this.anchor.index < 0 || this.anchor.index >= all.length) return null;
+    const el = all[this.anchor.index] as HTMLElement | undefined;
     if (!el) return null;
     const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
     return text ? text.slice(0, 80) : null;
@@ -1940,16 +3442,22 @@ export class ChapterPaginator {
   /** 恢复阅读锚点（打开书时定位到上次阅读处）。 */
   setReadingAnchor(
     a:
-      | { path: string; index: number; ratio: number; charsRead?: number; totalChars?: number }
+      | ({ path: string; index: number; ratio: number; charsRead?: number; totalChars?: number } & Partial<TextAnchorData>)
       | null
       | undefined
   ): void {
     if (a && a.path) {
+      const text = sanitizePersistedTextAnchor(a);
       this.anchor = {
-        index: a.index,
-        ratio: a.ratio,
-        charsRead: a.charsRead ?? 0,
-        totalChars: a.totalChars ?? 0,
+        index: Number.isSafeInteger(a.index) && a.index >= 0 ? a.index : -1,
+        ratio: Number.isFinite(a.ratio) && a.ratio >= 0 && a.ratio <= 1 ? a.ratio : 0,
+        charsRead: text.textOffset ?? 0,
+        totalChars:
+          typeof a.totalChars === "number" && Number.isSafeInteger(a.totalChars) && a.totalChars >= 0
+            ? a.totalChars
+            : 0,
+        textOffset: text.textOffset,
+        textSnippet: text.textSnippet,
       };
       this.anchorPath = a.path;
     } else {
@@ -1971,8 +3479,13 @@ export class ChapterPaginator {
     this.settings = settings;
     const path = this.currentPath;
     if (!path) return;
+    // Capture once, synchronously, before any load/cleanup can detach the old
+    // document.  Pass a value copy so the new load never observes the mutable
+    // anchor object while an older reload is being torn down.
     this.captureAnchor();
-    await this.load(path, { anchor });
+    const readingAnchor = this.anchor && this.anchorPath === path ? { ...this.anchor } : null;
+    const fallbackPage = this.metrics.currentPage;
+    await this.load(path, { anchor, readingAnchor, fallbackPage });
   }
 
   private get currentPath(): string {
@@ -2004,9 +3517,10 @@ export class ChapterPaginator {
     }
     const seq = ++this.reflowSeq;
     const loadSeq = this.loadSeq;
-    void this.measure().then(() => {
+    void this.measure(loadSeq).then((measured) => {
       // 过期测量（更早发起、更晚完成/切章后）直接丢弃，防布局/位置被覆写
-      if (!this.disposed && seq === this.reflowSeq && loadSeq === this.loadSeq) {
+      if (measured && !this.disposed && seq === this.reflowSeq && loadSeq === this.loadSeq) {
+        this.rebuildTextIndexForCurrentDoc();
         void this.recompute(true, loadSeq);
       }
     });
@@ -2087,12 +3601,30 @@ export class ChapterPaginator {
         syncFragmentHash(this.iframe.contentWindow, fragment.hash);
         this.jumpToAnchor(fragment.anchor);
         this.onInternalNavigationSettled?.();
+      } else if (href === "#" && this.lastState.status === "ready") {
+        // An empty fragment is an explicit return to the natural chapter
+        // start; clear the old :target state without creating a fake target.
+        if (this.navigateWithinCurrentChapter({ fragment: "" })) {
+          this.onInternalNavigationSettled?.();
+        }
       }
       return;
     }
     const { path, anchor } = splitHref(href);
     const resolved = resolvePath(this._currentPath, path);
     const destination = anchor ? `${resolved}#${anchor}` : resolved;
+    if (resolved === this._currentPath) {
+      // Same-chapter links never leave the iframe. Preflight before notifying
+      // App so an invalid fragment cannot pollute navigation history.
+      const fragmentPage = anchor ? this.getWithinChapterFragmentPage(anchor) : null;
+      if (anchor ? !fragmentPage : this.lastState.status !== "ready") return;
+      this.onBeforeInternalNavigate?.(destination);
+      const navigated = this.navigateWithinCurrentChapter(
+        anchor ? { fragment: anchor } : { toStart: true }
+      );
+      if (navigated) this.onInternalNavigationSettled?.();
+      return;
+    }
     this.onBeforeInternalNavigate?.(destination);
     this.onNavigate?.(destination);
   }
@@ -2232,9 +3764,11 @@ export class ChapterPaginator {
   }
 
   private cleanupDoc(): void {
+    this.abortMeasureWaits();
     this.lastFootnoteEl = null;
     this.footnotePinned = false;
     this.restoreInlineBoxFixes();
+    this.restoreFloatLayoutFixes();
     this.restoreTrailingFloatFixes();
     this.contentDoc?.removeEventListener("load", this.imgHandler, true);
     this.contentDoc?.removeEventListener("click", this.linkHandler, true);
@@ -2245,6 +3779,11 @@ export class ChapterPaginator {
     this.contentDoc?.removeEventListener("mouseout", this.footnoteHoverOutHandler, true);
     this.contentDoc = null;
     this.viewer = null;
+    this.textIndex = null;
+    this.pendingFallbackPage = null;
+    this.chapterCssUrls.revokeAll();
+    for (const owned of this.pendingCssUrls) owned.revokeAll();
+    this.pendingCssUrls.clear();
     if (this.blobUrl) {
       URL.revokeObjectURL(this.blobUrl);
       this.blobUrl = undefined;
@@ -2254,11 +3793,17 @@ export class ChapterPaginator {
   dispose(): void {
     this.disposed = true;
     this.loadSeq++;
+    this.abortMeasureWaits();
     window.clearTimeout(this.reflowTimer);
     this.displayGate.dispose();
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
     this.iframe.src = "about:blank";
+  }
+
+  private abortMeasureWaits(): void {
+    for (const controller of this.measureControllers) controller.abort();
+    this.measureControllers.clear();
   }
 
   private emit(s: ChapterState): void {

@@ -1,0 +1,129 @@
+import { parseHTML } from "linkedom";
+import { describe, expect, it, vi } from "vitest";
+import type { Book } from "../core/types";
+import { createChapterCountJob, type IdleScheduler } from "./chapterCountJob";
+
+function book(): Book {
+  return {
+    version: 3,
+    opfPath: "OEBPS/content.opf",
+    metadata: { title: "test", identifier: "test", language: "zh" },
+    manifest: new Map([
+      ["a", { id: "a", href: "a.xhtml", mediaType: "application/xhtml+xml", properties: [] }],
+      ["b", { id: "b", href: "b.xhtml", mediaType: "application/xhtml+xml", properties: [] }],
+    ]),
+    spine: [
+      { idref: "a", linear: true },
+      { idref: "b", linear: true },
+      { idref: "missing", linear: false },
+    ],
+    guide: [],
+    toc: [],
+    resources: new Map(),
+    fixedLayout: false,
+    issues: [],
+    drmProtected: false,
+  };
+}
+
+function scheduler(): { scheduler: IdleScheduler; runNext(): void; size(): number } {
+  let next = 0;
+  const pending = new Map<number, () => void>();
+  return {
+    scheduler: {
+      request(callback) {
+        const id = ++next;
+        pending.set(id, callback);
+        return id;
+      },
+      cancel(id) {
+        pending.delete(id);
+      },
+    },
+    runNext() {
+      const first = pending.keys().next().value as number | undefined;
+      if (first === undefined) throw new Error("no idle callback");
+      const callback = pending.get(first)!;
+      pending.delete(first);
+      callback();
+    },
+    size: () => pending.size,
+  };
+}
+
+describe("incremental chapter count job", () => {
+  it("does one chapter per slice and excludes structural hidden/footnote text", () => {
+    const clock = scheduler();
+    const current = vi.fn(() => true);
+    const counts: Array<[number, number]> = [];
+    const b = book();
+    const texts = new Map([
+      ["OEBPS/a.xhtml", '<p>甲😀乙</p><p hidden>隐藏</p><script>bad</script><aside epub:type="footnote">脚注</aside>'],
+      ["OEBPS/b.xhtml", "第二章"],
+    ]);
+    createChapterCountJob({
+      book: b,
+      server: { textFor: (path) => texts.get(path) },
+      generation: 4,
+      scheduler: clock.scheduler,
+      isCurrent: current,
+      parse: (text) => parseHTML(`<html><body>${text}</body></html>`).document as unknown as Document,
+      onCount: (index, value) => counts.push([index, value]),
+    });
+    expect(clock.size()).toBe(1);
+    clock.runNext();
+    expect(counts).toEqual([[0, 3]]);
+    expect(clock.size()).toBe(1);
+    clock.runNext();
+    expect(counts).toEqual([[0, 3], [1, 3]]);
+    expect(clock.size()).toBe(0);
+  });
+
+  it("completes missing resources as estimated zero and aborts stale A→B work", () => {
+    const clock = scheduler();
+    const counts: Array<[number, number]> = [];
+    let live = true;
+    const job = createChapterCountJob({
+      book: book(),
+      server: { textFor: () => undefined },
+      generation: 9,
+      scheduler: clock.scheduler,
+      isCurrent: () => live,
+      onCount: (index, value) => counts.push([index, value]),
+    });
+    job.cancel();
+    expect(clock.size()).toBe(0);
+    expect(counts).toEqual([]);
+
+    const second = createChapterCountJob({
+      book: book(),
+      server: { textFor: () => undefined },
+      generation: 10,
+      scheduler: clock.scheduler,
+      isCurrent: () => live,
+      onCount: (index, value) => counts.push([index, value]),
+    });
+    live = false;
+    clock.runNext();
+    expect(counts).toEqual([]);
+    second.cancel();
+  });
+
+  it("turns parser failures into estimated zero plus a diagnostic issue", () => {
+    const clock = scheduler();
+    const issues: string[] = [];
+    const counts: Array<[number, number]> = [];
+    createChapterCountJob({
+      book: book(),
+      server: { textFor: () => "<broken>" },
+      generation: 1,
+      scheduler: clock.scheduler,
+      parse: () => { throw new Error("bad html"); },
+      onCount: (index, value) => counts.push([index, value]),
+      onIssue: (issue) => issues.push(issue),
+    });
+    clock.runNext();
+    expect(counts).toEqual([[0, 0]]);
+    expect(issues[0]).toContain("chapter 0");
+  });
+});

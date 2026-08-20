@@ -4,7 +4,12 @@ export const READER_HISTORY_LIMIT = 3;
 export interface ReaderNavigationPosition {
   spineIndex: number;
   page: number;
-  anchor: { index: number; ratio: number } | null;
+  anchor: {
+    index: number;
+    ratio: number;
+    anchorTextOffset?: number | null;
+    anchorTextSnippet?: string | null;
+  } | null;
 }
 
 export interface ReaderNavigationHistory {

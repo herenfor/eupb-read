@@ -32,13 +32,80 @@ function getText(
   return f ? bytesToText(f.data) : undefined;
 }
 
+/** Manifest href 可以带锚点/查询串；资源 ZIP 路径不能带它们。 */
+function manifestResourcePath(opfPath: string, href: string): string {
+  const suffix = href.search(/[?#]/);
+  return resolvePath(opfPath, suffix < 0 ? href : href.slice(0, suffix));
+}
+
+function inferredCoverMediaType(path: string): string | undefined {
+  const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
+  switch (extension) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "webp":
+      return "image/webp";
+    case "avif":
+      return "image/avif";
+    case "gif":
+      return "image/gif";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return undefined;
+  }
+}
+
+function isSupportedCoverCandidate(item: ManifestItem, path: string): boolean {
+  return item.mediaType.toLowerCase().startsWith("image/") || Boolean(inferredCoverMediaType(path));
+}
+
+function hasCoverFilename(path: string): boolean {
+  const base = path.split("/").pop() ?? "";
+  const stem = base.replace(/\.[^.]+$/, "");
+  return stem.toLowerCase() === "cover";
+}
+
+/**
+ * 与桌面 Rust 后端保持相同候选契约。候选按 OPF manifest 源顺序检查，
+ * 但只有实际存在、并且可作为图片处理的资源才能成为封面。
+ */
+function selectCoverHref(
+  manifest: Map<string, ManifestItem>,
+  metaPairs: Array<{ name: string; content: string }>,
+  opfPath: string,
+  resources: Map<string, Resource>
+): string | undefined {
+  const items = [...manifest.values()];
+  const candidates: ManifestItem[] = [];
+  candidates.push(...items.filter((item) => item.properties.includes("cover-image")));
+  const coverMeta = metaPairs.find((meta) => meta.name === "cover");
+  if (coverMeta?.content) {
+    const item = manifest.get(coverMeta.content);
+    if (item) candidates.push(item);
+  }
+  candidates.push(
+    ...items.filter((item) => hasCoverFilename(manifestResourcePath(opfPath, item.href)))
+  );
+
+  for (const item of candidates) {
+    const path = manifestResourcePath(opfPath, item.href);
+    if (!resources.has(path) || !isSupportedCoverCandidate(item, path)) continue;
+    return path;
+  }
+  return undefined;
+}
+
 /**
  * 解析目录 href 并标记"无法使用"的条目：
  * - 空 / javascript:/mailto:/http(s): 等外部协议 → disabled
- * - 纯 # 锚点（无目标文档）→ disabled
+ * - 纯 # 锚点：仅当当前 nav/NCX 基准文档在 spine 中时绑定为同文档目标，否则 disabled
  * - 目标不在 spine 阅读流中 → disabled（UI 置灰提示）
  */
-function resolveTocHrefs(
+export function resolveTocHrefs(
   nodes: TocNode[],
   basePath: string,
   issues: BookIssue[],
@@ -46,10 +113,21 @@ function resolveTocHrefs(
   canNavigate: (resolvedHref: string) => boolean
 ): TocNode[] {
   return nodes.map((n) => {
-    let href = n.href;
+    const rawHref = (n.href ?? "").trim();
+    let href = rawHref;
     let disabled = false;
-    const usable = isUsableHref(href);
-    if (!usable || isFragmentOnly(href)) {
+    const fragmentOnly = isFragmentOnly(rawHref);
+    const usable = isUsableHref(rawHref);
+    if (fragmentOnly) {
+      // nav/NCX 中允许用 #id 指向目录文档自身；只有该文档本身位于
+      // spine 时才有稳定的章节目标，避免把无上下文的 # 全局放行。
+      if (canNavigate(basePath)) {
+        const fragment = rawHref.slice(1);
+        href = fragment ? `${basePath}#${fragment}` : basePath;
+      } else {
+        disabled = true;
+      }
+    } else if (!usable) {
       disabled = true;
     } else {
       href = resolvePath(basePath, href);
@@ -237,7 +315,7 @@ export async function loadBook(bytes: Uint8Array, options: BookOptions = {}): Pr
   const resources = new Map<string, Resource>();
   for (const item of parsed.manifest.values()) {
     // 基准是 OPF 文件本身（其所在目录为相对引用起点）
-    const path = resolvePath(opfPath, item.href);
+    const path = manifestResourcePath(opfPath, item.href);
     if (!path) {
       issues.push({
         kind: "book_error",
@@ -265,32 +343,7 @@ export async function loadBook(bytes: Uint8Array, options: BookOptions = {}): Pr
   }
 
   // ---- 封面 ----
-  let coverHref: string | undefined;
-  for (const item of parsed.manifest.values()) {
-    if (item.properties.includes("cover-image")) {
-      coverHref = resolvePath(opfPath, item.href);
-      break;
-    }
-  }
-  if (!coverHref) {
-    const coverMeta = parsed.metaPairs.find((m) => m.name === "cover");
-    if (coverMeta?.content) {
-      const item = parsed.manifest.get(coverMeta.content);
-      if (item) coverHref = resolvePath(opfPath, item.href);
-    }
-  }
-  // 未声明封面时回退：使用名称为 cover 的图片（cover.jpg/png/webp 等）
-  if (!coverHref) {
-    for (const [path, res] of resources) {
-      if (!res.mediaType.startsWith("image/")) continue;
-      const base = path.split("/").pop() ?? "";
-      const stem = base.replace(/\.[^.]+$/, "").toLowerCase();
-      if (stem === "cover") {
-        coverHref = path;
-        break;
-      }
-    }
-  }
+  const coverHref = selectCoverHref(parsed.manifest, parsed.metaPairs, opfPath, resources);
 
   // ---- 加密 / 字体混淆 / DRM ----
   const { obfuscated, drm } = await parseEncryption(files, issues);

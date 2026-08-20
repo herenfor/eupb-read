@@ -46,13 +46,13 @@ scripts/      构建/自检/测试工具
 ```bash
 pnpm install
 pnpm dev          # 浏览器开发模式（localhost:5173）
-pnpm test         # 单元测试（当前 228 项）
+pnpm test         # 单元测试（当前 319 项）
 pnpm build        # TypeScript 检查 + 生产构建
 pnpm tauri dev    # 桌面窗口调试（需要系统 Tauri 依赖）
 pnpm tauri build  # 桌面打包
 ```
 
-Windows 一键打包见 `scripts/build-windows.ps1`；0.1.7 的 WSL→Windows 安全同步与测试版验收见 `docs/RELEASE_0.1.7.md`。
+Windows 一键打包见 `scripts/build-windows.ps1`；0.1.8 的 WSL→Windows 安全同步与测试版验收见 `docs/RELEASE_0.1.8.md`。
 
 ## 渲染分层规范
 
@@ -106,7 +106,7 @@ width: X% → width: min(X%, X/100 × 40rem)
 
 ### 单元测试
 
-当前 `pnpm test` 基线为 23 个测试文件、228 项；另有 Rust 10 项测试。覆盖解析内核、消毒与 CSS 改写、脚注识别、链接书库/存档/缩略图、桌面单实例恢复顺序、阅读历史状态机、书架纯函数、怪书容错及分页交互回归等。
+当前 `pnpm test` 基线为 35 个测试文件、319 项；另有 Rust 13 项测试。覆盖解析内核、消毒与 CSS 改写、脚注识别、链接书库/存档/缩略图、桌面单实例恢复顺序、阅读历史状态机、书架纯函数、怪书容错及分页交互回归等。
 
 ### 端到端回归
 

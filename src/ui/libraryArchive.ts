@@ -6,6 +6,8 @@
  * DeviceBinding and must never cross this boundary.
  */
 
+import { sanitizePersistedTextAnchor } from "../render/textAnchor";
+
 export const LIBRARY_ARCHIVE_VERSION = 1 as const;
 
 export type JsonValue =
@@ -27,6 +29,8 @@ export interface ArchiveBookmark {
   page: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  anchorTextOffset: number | null;
+  anchorTextSnippet: string | null;
   text: string;
   createdAtMs: number;
 }
@@ -44,6 +48,8 @@ export interface LibraryRecord {
   progressPct: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  anchorTextOffset: number | null;
+  anchorTextSnippet: string | null;
   isNew: boolean;
   bookmarks: ArchiveBookmark[];
 }
@@ -155,10 +161,18 @@ function bookmarkValue(value: unknown, path: string, errors: ArchiveIssue[]): Ar
   const anchorIndex = value.anchorIndex === null ? null : nonNegative(value.anchorIndex, `${path}.anchorIndex`, errors, true);
   const anchorRatio = value.anchorRatio === null ? null : finiteNumber(value.anchorRatio, `${path}.anchorRatio`, errors);
   if (anchorRatio !== null && (anchorRatio < 0 || anchorRatio > 1)) issue(errors, `${path}.anchorRatio`, "invalid-range", "must be between 0 and 1");
+  const textAnchor = sanitizePersistedTextAnchor({
+    textOffset: value.anchorTextOffset,
+    textSnippet: value.anchorTextSnippet,
+  });
+  const invalidTextAnchor =
+    (value.anchorTextOffset !== undefined && value.anchorTextOffset !== null && textAnchor.textOffset === null) ||
+    (value.anchorTextSnippet !== undefined && value.anchorTextSnippet !== null && textAnchor.textSnippet === null);
+  if (invalidTextAnchor) issue(errors, `${path}.anchorTextOffset`, "invalid-anchor-text", "text anchor must be a bounded non-whitespace code-point snippet");
   const text = stringValue(value.text, `${path}.text`, errors);
   const createdAtMs = nonNegative(value.createdAtMs, `${path}.createdAtMs`, errors);
-  if (id === null || spineIndex === null || page === null || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || text === null || createdAtMs === null) return null;
-  return { id, spineIndex, page, anchorIndex, anchorRatio, text, createdAtMs };
+  if (id === null || spineIndex === null || page === null || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || invalidTextAnchor || text === null || createdAtMs === null) return null;
+  return { id, spineIndex, page, anchorIndex, anchorRatio, anchorTextOffset: textAnchor.textOffset, anchorTextSnippet: textAnchor.textSnippet, text, createdAtMs };
 }
 
 function recordValue(value: unknown, hash: string, path: string, errors: ArchiveIssue[]): LibraryRecord | null {
@@ -179,6 +193,14 @@ function recordValue(value: unknown, hash: string, path: string, errors: Archive
   const anchorIndex = value.anchorIndex === null ? null : nonNegative(value.anchorIndex, `${path}.anchorIndex`, errors, true);
   const anchorRatio = value.anchorRatio === null ? null : finiteNumber(value.anchorRatio, `${path}.anchorRatio`, errors);
   if (anchorRatio !== null && (anchorRatio < 0 || anchorRatio > 1)) issue(errors, `${path}.anchorRatio`, "invalid-range", "must be between 0 and 1");
+  const textAnchor = sanitizePersistedTextAnchor({
+    textOffset: value.anchorTextOffset,
+    textSnippet: value.anchorTextSnippet,
+  });
+  const invalidTextAnchor =
+    (value.anchorTextOffset !== undefined && value.anchorTextOffset !== null && textAnchor.textOffset === null) ||
+    (value.anchorTextSnippet !== undefined && value.anchorTextSnippet !== null && textAnchor.textSnippet === null);
+  if (invalidTextAnchor) issue(errors, `${path}.anchorTextOffset`, "invalid-anchor-text", "text anchor must be a bounded non-whitespace code-point snippet");
   if (typeof value.isNew !== "boolean") issue(errors, `${path}.isNew`, "invalid-boolean", "expected a boolean");
   const bookmarks: ArchiveBookmark[] = [];
   if (!Array.isArray(value.bookmarks)) {
@@ -189,8 +211,8 @@ function recordValue(value: unknown, hash: string, path: string, errors: Archive
       if (bookmark) bookmarks.push(bookmark);
     });
   }
-  if (title === null || creator === null || fileName === null || addedAtMs === null || lastReadAtMs === null || spineIndex === null || page === null || progressPct === null || progressPct < 0 || progressPct > 100 || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || typeof value.isNew !== "boolean") return null;
-  return { contentHash: hash, title, creator, fileName, addedAtMs, lastReadAtMs, spineIndex, page, progressPct, anchorIndex, anchorRatio, isNew: value.isNew, bookmarks };
+  if (title === null || creator === null || fileName === null || addedAtMs === null || lastReadAtMs === null || spineIndex === null || page === null || progressPct === null || progressPct < 0 || progressPct > 100 || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || invalidTextAnchor || typeof value.isNew !== "boolean") return null;
+  return { contentHash: hash, title, creator, fileName, addedAtMs, lastReadAtMs, spineIndex, page, progressPct, anchorIndex, anchorRatio, anchorTextOffset: textAnchor.textOffset, anchorTextSnippet: textAnchor.textSnippet, isNew: value.isNew, bookmarks };
 }
 
 const SETTING_KEYS = new Set([

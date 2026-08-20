@@ -13,14 +13,14 @@ AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完
 
 ## 当前基线
 
-- 当前隔离副本版本：`0.1.7` 测试发布候选，准备由用户同步到 Windows 主机编译分发。
+- 当前隔离副本版本：`0.1.8` 测试发布候选，准备由用户同步到 Windows 主机编译分发。
 - 已发布版本：`0.1.5`（已在 Windows 编译、打包并分发）
 - 0.1.5 发布提交：`4bb9c7b2e50ef3a13f2cc8cd06d91c25486911b7`
 - 当前源仓比较基线：`e8aabcdeb03543402338aee00fb2e33d52e39841`（`v0.1.6`，`origin/main`）。
 - 基线提交说明：`fix: use u64 for shelf timestamps (Tauri IPC rejects u128)`。
 - 排除本地测试产物后，隔离副本代码与该源仓提交一致；当前文档收尾差异见 `SOURCE_DELTA.md`。
-- 当前隔离副本单元测试基线：23 个测试文件、228 个用例；Rust 测试 10 个。
-- `package.json`、Tauri 配置、Cargo 清单和 Cargo 锁文件中的本项目版本均为 `0.1.7`。
+- 当前隔离副本单元测试基线：35 个测试文件、319 个用例；Rust 测试 13 个。
+- `package.json`、Tauri 配置、Cargo 清单和 Cargo 锁文件中的本项目版本均为 `0.1.8`。
 - 渲染规划：`docs/PRELOAD_PLAN.md` 的 P0 首帧显示门已实现；P1 相邻章预加载与 P2 动画仍只是后续预留，不要视为已实现。
 - 当前待审 B-029：CSS 注释边界保护已接入 `cssRewrite`、sanitize 和 paginator；递归 `@import` 共享保护 context，且已完成 sanitize 外链 CSS 的 Chromium 端到端验证；普通测试书回归与 Windows WebView2 仍按发布流程确认，详见 `docs/tasks/active/css-comment-boundaries.md`。
 - 当前待审 B-030：末尾递归媒体-only float 的跨列补偿已接入 paginator；使用首列碎片 top + `scrollHeight` 推算未分片底部，并对候选及后代视觉 rect 做列边界/碰撞事务门控，详见 `docs/tasks/active/trailing-media-float-overflow.md`。title.xhtml whole-page wrapper 仍仅为诊断，未修改。
@@ -29,6 +29,8 @@ AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完
 - 当前待审 B-033：阅读跳转历史改为最多 3 条 back/forward 双栈；App 使用初始保存位置基线与 paginator display-ready/同章 settled 门控，首次及连续 fragment 跳转都不再漏记，anchor 优先于页码恢复，转场期间不写旧 ready 进度，实际页状态而非仅整数百分比触发保存，详见 `docs/tasks/active/reader-navigation-history-forward.md`。
 - 当前待审 B-034：目录顶层无作者水平 margin 的 left/right float 在宽视口回到居中的 40rem 版心边缘；全页/全宽意图、作者 margin 和过宽盒保守跳过，640px 窄容器保持自然布局，详见 `docs/tasks/active/toc-top-float-containment.md`。
 - 当前待审 B-035：多看图片脚注富 HTML 复制到宿主弹层后，定向隐藏 `.duokan-footnote-content` 生成的注释 marker 并清零左 padding；普通作者列表保持编号，详见 `docs/tasks/active/footnote-rich-content-marker.md`。
+- 当前待审 B-048：桌面链接导入与浏览器预览已统一 `cover-image → meta cover → cover.*` 封面候选契约；发布版漏封面来自 Rust 原生 OPF 解析而非 WebView2/WebP 解码。候选仅查询已打开 ZIP 中央目录，不解压、不扫描整书；全量 Vitest 34/315、Rust 13/13、TypeScript/Vite 均通过，详见 `docs/tasks/active/cover-fallback-contract.md`。
+- 当前待审 B-049：设置详细数值步进按可见默认值使用纯数值有序档位；最小/最大边界继续点击返回原 settings identity，不触发无效阅读器重载；全量 Vitest 35/319、TypeScript/Vite 与 WSL Chromium 真实点击/reload 计数均通过，详见 `docs/tasks/active/settings-stepper-bounds.md`。
 
 当前未同步变化以 `docs/SOURCE_DELTA.md` 为准，不要仅根据本节判断。
 
@@ -101,4 +103,4 @@ EPUB bytes
 - 渲染冲突台账：`rendering-layers.md`
 - 开发与发布说明：`HANDOFF.md`
 - 任务模板：`tasks/TEMPLATE.md`
-- 当前版本收尾记录：`RELEASE_0.1.7.md` 与 `tasks/active/version-0.1.7-release-candidate.md`；Windows 安装包状态仍待用户确认。
+- 当前版本收尾记录：`RELEASE_0.1.8.md` 与 `tasks/active/version-0.1.8-release-candidate.md`；Windows 安装包状态仍待用户确认。

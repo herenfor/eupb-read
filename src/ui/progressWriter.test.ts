@@ -10,6 +10,8 @@ function patch(page: number): ShelfProgressPatch {
     progressPct: page,
     anchorIndex: page,
     anchorRatio: 0.5,
+    anchorTextOffset: page * 10,
+    anchorTextSnippet: "正文",
   };
 }
 

@@ -83,7 +83,7 @@ b { background: url(data:image/png;base64,AAA=) }`;
     expect(out).not.toContain("min(");
   });
 
-  it("全页图块 / img / body 选择器的 width:% 不换算", () => {
+  it("明确全页图块 / img / body 选择器的 width:% 不换算，普通 duokan single 遵从正文宽度规则", () => {
     const css = `.illus { width: 100%; }
 img { width: 100%; height: auto; }
 body { width: 90%; }
@@ -92,7 +92,14 @@ body { width: 90%; }
     expect(out).toContain(".illus { width: 100%; }");
     expect(out).toContain("img { width: 100%; height: auto; }");
     expect(out).toContain("body { width: 90%; }");
+    // duokan-image-single 既可承载正文图与图注，不能再仅凭类名跳过版心宽度。
     expect(out).toContain(".duokan-image-single img { width: 100%; }");
+  });
+
+  it("普通 duokan-image-single 容器的直接 width:% 进入通用版心改写", () => {
+    const css = `.duokan-image-single { width: 100%; margin: 1em 0; }`;
+    const out = rewriteCssUrls(css, "OEBPS/Styles/main.css", urlFor);
+    expect(out).toContain(".duokan-image-single { width: min(100%, 40rem);");
   });
 
   it("嵌套选择器（含后代组合器）的 width:% 不换算（相对限宽父容器）", () => {

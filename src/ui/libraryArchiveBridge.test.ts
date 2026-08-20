@@ -52,7 +52,46 @@ describe("library archive bridge", () => {
     expect(json).not.toContain("coverMime");
     expect(json).not.toContain("customFonts");
     expect(archive.records[hashA].fileName).toBe("book.epub");
+    expect(archive.records[hashA].anchorTextOffset).toBeNull();
+    expect(archive.records[hashA].anchorTextSnippet).toBeNull();
     expect(archive.settings).toEqual({ fontSizePx: 18, theme: "dark", uiScale: 1.1 });
+  });
+
+  it("round-trips text anchors through the portable bridge", () => {
+    const archive = buildLibraryArchive([
+      entry(hashA, { anchorTextOffset: 7, anchorTextSnippet: "😀正文" }),
+    ]);
+    const projected = projectArchiveToBrowserShelf([], archive);
+    expect(projected[0]).toMatchObject({
+      anchorTextOffset: 7,
+      anchorTextSnippet: "😀正文",
+    });
+  });
+
+  it("keeps a text-only bookmark portable without serializing the internal legacy sentinel", () => {
+    const archive = buildLibraryArchive([
+      entry(hashA, {
+        bookmarks: [{
+          id: "b",
+          spineIndex: 1,
+          page: 2,
+          anchorIndex: null,
+          anchorRatio: null,
+          anchorTextOffset: 42,
+          anchorTextSnippet: "正文",
+          text: "正文",
+          createdAtMs: 1,
+        }],
+      }),
+    ]);
+    const bookmark = archive.records[hashA].bookmarks[0];
+    expect(bookmark).toMatchObject({
+      anchorIndex: null,
+      anchorRatio: null,
+      anchorTextOffset: 42,
+      anchorTextSnippet: "正文",
+    });
+    expect(archiveRecordsForBackend(archive)[0].bookmarks[0]).toMatchObject(bookmark);
   });
 
   it("returns a backend array without the keyed records wrapper", () => {

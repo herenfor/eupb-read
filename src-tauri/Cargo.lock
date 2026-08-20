@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "epub-reader"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "quick-xml",
  "serde",

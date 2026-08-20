@@ -19,7 +19,7 @@
 
 ## 当前未同步变化
 
-状态：**真实源仓仍以 `v0.1.6` 为比较基线；隔离副本已整理为 `0.1.7` 测试发布候选，包含 B-023～B-035、链接书库重构、桌面单实例和对应文档，等待用户同步到 Windows 主机编译分发并完成实机验收。**
+状态：**真实源仓仍以 `v0.1.6` 为比较基线；隔离副本已整理为 `0.1.8` 测试发布候选，包含 B-023～B-049、链接书库重构、桌面单实例和对应文档，当前全量 Vitest 基线为 319/319、Rust 为 13/13，等待用户同步到 Windows 主机编译分发并完成实机验收。**
 
 | 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
 |---|---|---|---|---|
@@ -67,9 +67,9 @@
 | `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 将隔离副本四处构建版本统一提升为 0.1.7 测试发布候选；Cargo.lock 只修改 epub-reader 根包 | 版本一致性、Cargo metadata、全量前端/Rust 复验 | 是 |
 | `docs/RELEASE_0.1.7.md`、`docs/tasks/active/version-0.1.7-release-candidate.md`、`docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/tasks/active/README.md`、相关活动任务 | 新增/更新 | 建立 0.1.7 当前入口、Windows 安全同步/构建命令、排除项与发布包验收矩阵；0.1.6 任务冻结为历史入口 | 文档、命令和路径核对 | 是 |
 
-当前 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 Cargo 锁文件中的本项目版本均为 `0.1.7`。
+0.1.7 候选收口时，`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 和 Cargo 锁文件中的本项目版本曾统一为 `0.1.7`；当前版本以本文件顶部状态和 0.1.8 收口段为准。
 
-0.1.7 发布候选复验：前端 Vitest 23 文件 228/228、Vite production build、Rust 10/10、`cargo fmt --check` 与 `cargo check --locked` 均通过；`cargo metadata --locked --no-deps` 识别 `epub-reader@0.1.7`。Windows NSIS/免安装包仍待用户在主机编译。
+0.1.7 发布候选当时的复验：前端 Vitest 23 文件 228/228、Vite production build、Rust 10/10、`cargo fmt --check` 与 `cargo check --locked` 均通过；`cargo metadata --locked --no-deps` 识别 `epub-reader@0.1.7`。该段仅保留阶段历史，当前 Windows 发布入口为 0.1.8。
 
 交接复验：Vitest 16 个文件 174/174、TypeScript、Vite 生产构建、`cargo check`、Rust 2/2 单测及 `cargo fmt --check` 均通过。B-023 验证：Vitest 16 个文件 177/177，真实 Chromium 双视口目录为 1/1 页。B-024 本轮验证：Vitest 16 个文件 179/179、`tsc --noEmit`、Vite 生产构建通过；侦探少年目录在 1280×800 与 900×650 均为 1/1 页，`Contents` 左缘恢复到 0.1.3 的 344px/154px；C-18 简介灰框宽屏、窄屏与 20px 字号仍逐列居中；B-023 的 70% margin 目录仍为 1/1 页。B-025 本轮验证：全量 Vitest 16 个文件 184/184、`tsc --noEmit`、Vite 生产构建通过；目标书 1280×800 色块右缘回到 960px 且 1/1，900×650 当前列右缘回到 770px、状态 1/2，键盘下一页可达 2/2，resize 后 per-measure 标记恢复并再次写回，最后“后记”不再落入不可达残片；B-023 与 B-024 均无回归。B-026 本轮验证：全量 Vitest 16 个文件 185/185、`tsc --noEmit`、Vite 生产构建通过；目标书跨章 iframe 链接和选择器书同章 fragment 均启用历史，撤销后恢复原位置且单次操作无重复历史。本轮未修改 Rust/Tauri，因此未重复运行 cargo。此前真实 Chromium 已验证导入判重与进度、全选、自定义字体/CSS、书签。Windows WebView2/NSIS 是否已重新编译、打包和分发仍待用户确认。
 
@@ -90,6 +90,89 @@ B-033 当前收尾：阅读历史/paginator/progress writer 定向 31/31，全�
 B-034 当前收尾：paginator 定向 28/28、全量 Vitest 22 文件 226/226、`tsc --noEmit` 与 Vite build 通过；新纯门控仅允许无作者水平 margin、宽度不超过 40rem 的 viewer 直接 `reader-top` float 进入，写回随 `marginFixes` 恢复。目标书 1280/900 已收回版心且保持 1/1，640 保持自然两页；玩具堂、赤月、すめらぎ相邻实书无回归。Windows WebView2 人工确认待用户执行。
 
 B-035 当前收尾：脚注宿主 CSS 契约定向 2/2、脚注/样式/消毒/分页定向 91/91；全量 Vitest 23 文件 228/228，`tsc --noEmit` 与 Vite build 通过。目标书后记两个图片脚注已在 WSL Chromium 实际点击验证：生成 marker 隐藏、padding 为 0，图片与内容左缘一致；普通脚注列表保护回归通过。Windows WebView2 仍待人工确认。
+
+## 本轮新增未同步变化（B-036、B-037）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/blobOwnership.ts`、`src/render/paginator.ts` | 新增/更新 | 按 sanitize/load 局部集合登记外链 CSS Blob URL；成功提交 iframe 后转为当前章节所有权，过期、异常、换章和 dispose 幂等撤销；`measure` 在异步边界核对 loadSeq、document/viewer 身份 | 生命周期定向 4/4、paginator 定向回归与 tsc；全量 Vitest/build 待收尾 | 是 |
+| `src/ui/ReaderView.tsx`、`src/App.tsx` | 更新 | ReaderView cleanup 先 dispose paginator 再 revoke ResourceServer；返回书架 flush 后切视图，React 提交卸载后清空书籍会话状态 | 代码核对；React StrictMode/Windows WebView2 待人工确认 | 是 |
+| `src/render/*lifecycle.test.ts`、`src/render/blobOwnership.test.ts`、`src/render/resources.test.ts` | 新增/更新 | 覆盖 CSS URL 成功换章、失败、过期、dispose、VisibilityGate 代次、共享 URL revokeAll 与幂等 | 定向 40/40；全量 Vitest 25 文件 236/236 | 是 |
+| `docs/tasks/active/reader-session-lifecycle-and-blob-ownership.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md` | 新增/更新 | 登记 B-036 生命周期、所有权边界、页面中心仅观察锚点契约与验证边界 | 文档结构核对；全量 Vitest/tsc/Vite 通过 | 是 |
+| `src/render/textAnchor.ts`、`src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx`、`src/ui/readingProgress.ts` | 新增/更新 | B-037：页面中心仅 caret 采样；当前章节自然布局后用 code-point 文本 offset/snippet→Range 列恢复，legacy/page 兜底，首列不受锚点影响；当前章分子消除父子重复计数并修正 linear=no | 定向 70/70、全量 Vitest 27 文件 250/250、tsc/Vite；WSL Chromium 视口、重开与连续字号矩阵通过，Windows WebView2 待人工确认 | 是 |
+| `src/ui/shelf.ts`、`readerNavigationHistory.ts`、`storage.ts`、`libraryArchive*.ts`、对应测试、`src-tauri/src/linked_library.rs` | 新增/更新 | B-037：Shelf/书签/历史/浏览器存储/portable v1/Rust IPC 统一 optional `anchorTextOffset`/`anchorTextSnippet`；旧缺字段归一 null，文本-only sentinel 不跨 Rust usize 边界，snippet/数值严格校验 | archive/history/shelf/Rust round-trip 回归；Rust 11/11、fmt/check 通过 | 是 |
+| `docs/tasks/active/text-content-anchor-and-progress.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-037/C-33 的自然分页、数据兼容、恢复优先级和 Chromium/WebView2 边界 | 文档与接口核对；自动化及 WSL Chromium 结果同上 | 是 |
+
+## B-038 同章导航不重载
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts`、`src/render/paginator.test.ts` | 更新 | 新增当前已完成章节的同步 direct 导航：fragment/章首 hash 处理、text→legacy→page 恢复、异常事务回滚；成功不触发 load/sanitize/measure/recompute，失败保持当前页/anchor/hash | 定向 paginator/lifecycle 40/40；全量 Vitest 28 文件 258/258、tsc、Vite build | 是 |
+| `src/ui/ReaderView.tsx`、`src/App.tsx` | 更新 | ReaderHandle 暴露同章原子入口；App 对 TOC/书签/history 做 ready 同章 direct 与跨章/未 ready reload 分流，历史仅在 direct 成功后提交 | 定向 history/progress/helper；全量 Vitest 258/258、tsc、Vite build | 是 |
+| `src/ui/sameChapterNavigation.ts`、`src/ui/sameChapterNavigation.test.ts` | 新增 | 纯 helper 覆盖 direct/reload 判定、direct 失败不提交历史、back/forward 成功后采用 transition，不引入 React 测试依赖 | helper 3/3；全量 Vitest 28 文件 258/258 | 是 |
+| `docs/tasks/active/same-chapter-navigation.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-038、C-33 的同章 direct/失败事务/跨章重载契约和非目标范围 | 文档链接/差异自检；全量 Vitest 258/258、tsc、Vite build | 是 |
+
+## B-039 增量章节字数统计与进度 baseline 保护
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/chapterCounts.ts`、`src/ui/chapterCounts.test.ts` | 新增 | generation-bearing unknown/estimated/measured collection；measured 优先、linear=no 排除、code-point safe count、complete/approximate summary、`resolveProgressPct` baseline 保护 | 定向及全量 Vitest 269/269、tsc、Vite build | 是 |
+| `src/ui/chapterCountJob.ts`、`src/ui/chapterCountJob.test.ts` | 新增 | 可注入 requestIdleCallback/setTimeout 的可取消 job；每 slice 最多处理一章；结构排除 script/style、hidden、aria-hidden、明确脚注；缺资源/parser 失败 estimated 0 并留诊断；generation/book/server 防 stale callback | idle abort、A→B stale、一次一章、缺资源/parser 回归；定向及全量通过 | 是 |
+| `src/render/textAnchor.ts` | 更新 | 导出纯结构排除判据，供 measured visible index 与 provisional count 复用；computed CSS hidden 仍只由 measured 路径处理 | textAnchor 4/4；全量 269/269 | 是 |
+| `src/App.tsx` | 更新 | 删除打开书籍时整书同步 chapterChars 扫描；接入 counts ref/state、当前 ready anchor.totalChars measured、idle job、session generation、取消和 baseline progress；未 complete 沿用 baseline，complete 后更新 | 相关定向 69/69；全量 269/269、tsc、Vite build | 是 |
+| `src/render/asyncWait.ts`、`src/render/asyncWait.test.ts`、`src/render/paginator.ts` | 新增/更新 | fonts 与 iframe defaultView double-rAF 可取消等待；先完成者清 timer，load/cleanup/dispose abort 旧 controller/rAF，最终保留 loadSeq/doc/viewer 校验 | 定向及全量 269/269、tsc、Vite build | 是 |
+| `src/render/resources.ts`、`src/render/resources.test.ts` | 更新 | 新增默认 4 MiB/32 项 text LRU，按 text.length×2 估算，单条超限不缓存，decoder/stats 可测；revokeAll 清 entries/bytes，URL cache 契约不变 | LRU hit/淘汰/超大/revoke 回归；全量 269/269 | 是 |
+| `docs/tasks/active/incremental-chapter-counts-and-progress.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-039、provisional 不参与布局、未访问 CSS hidden 只能估算、baseline/取消/LRU 边界与非目标（CSS cache/预加载/流式 ZIP/Rust） | 文档链接/术语自检；Vitest 31 文件 269/269、tsc、Vite build | 是 |
+
+## B-040 快速设置重载与锚点 snapshot
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/settingsReload.ts`、`src/ui/settingsReload.test.ts` | 新增 | 可取消 150ms debounce；连续设置只执行最后 task，章节切换可取消 pending timer | debounce/取消 2/2 | 是 |
+| `src/ui/ReaderView.tsx` | 更新 | settings/userFonts identity 变化合并为最后一次 reload；章节、book/server cleanup 与 dispose 取消 timer；切章记录最新 settings，避免额外 reload | 与 paginator lifecycle 定向回归、tsc | 是 |
+| `src/render/paginator.ts`、`src/render/paginator.settings.test.ts` | 更新/新增 | `reloadWithSettings` 在 await/load 前一次性复制 `ReadingAnchor` 与 current page，向 `load` 传 snapshot 和 fallback；无 document 时保留既有 anchor | B-040 定向 44/44；B036 stale gate/Blob 回归保持；Chromium 测试书 900×650 快速双字号+仍第 2/3 页且旧 snippet 可见 | 是 |
+| `docs/tasks/active/reader-settings-reload-debounce.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-040，记录设置合并、anchor snapshot、过期 reload 防护与非目标范围，并登记 Chromium 矩阵结论 | 链接/术语自检；全量 Vitest 33 文件 273/273、tsc、Vite build | 是 |
+
+## B-041 多看普通图文容器误判为全页图
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/sanitize.ts`、`src/render/cssRewrite.ts`、`src/render/paginator.ts` | 更新 | `.duokan-image-single` 不再仅因类名获得全页图语义：恢复普通图文/图注的作者布局与通用 width 规则；明确 fullscreen 类、纯单图和 B-013 SVG 的页面级全页路径保持 | 新回归旧实现 2 项失败；定向 Vitest 3 文件 114/114、目标 EPUB Chromium 1280×800 已复核普通图文与图注无越界；整组全量 Vitest 34 文件 304 测试、`tsc --noEmit`、`pnpm build`（95 modules）通过 | 是 |
+| `src/render/sanitize.test.ts`、`src/render/cssRewrite.test.ts` | 更新 | 增加普通 single 图文容器、显式 fullscreen 与页面级纯图/SVG 边界回归 | 同上 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 建立 B-041～B-044 统一任务，记录 B-041 根因、C-34 冲突台账、验证和后续三项的未处理边界；收尾时统一四项自动化/WSL Chromium 状态 | 文档与代码/测试术语核对；整组全量 34 文件 304 测试、tsc、build 通过 | 是 |
+
+## B-042 连续百分比 float 组级版心门控
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts` | 更新 | C-31 现在识别连续直接 sibling 的同向百分比 float 栅格；只对总和 99..101 且至少两项的明确作者组跳过逐项版心 inset；现代 Typed OM 的明确 px 直接否决，旧 CSSOM 只处理简单可判定级联，reader overrides/复杂选择器/未知条件/不可读源保守不豁免 | 旧实现新增回归 36/5（5 项失败）；级联边界补测后 paginator 48/48；目标 EPUB 1280×800/900×650 前五个 opacity float 均同一行、无 margin 写回；整组全量 34 文件 304 测试、tsc、build 通过 | 是 |
+| `src/render/paginator.test.ts` | 更新 | 覆盖 20×5、50×2、33.333×3 容差、单 float/20×2、不满整行、混合 px/%、方向/普通块/clear 断组、Typed OM px/无值、inline important/stylesheet 覆盖、reader overrides、复杂伪类、未知 CSSOM 和最终级联 | 定向 paginator 48/48 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 更新 | 登记 B-042/C-35 的组级门控边界、Typed OM 优先级、旧 CSSOM 保守风险、reader userCss 不可区分边界、B-034 回归约束；补写 1280×800/900×650 前五个 opacity float 的同一行 Chromium 证据 | 文档/代码术语核对；目标 EPUB Chromium、全量 34 文件 304 测试、tsc、build 已完成；Windows WebView2 待用户 | 是 |
+
+## B-043 EPUB 3 NAV fragment 与多级目录
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/core/nav.ts`、`src/core/nav.test.ts` | 更新 | EPUB 3 `epub:type` 增加命名空间/属性回退；最近列表搜索在嵌套 li 边界剪枝，父项只读取自己的链接/文字，混合 `ol/ul` 保持文档顺序 | 旧实现父 li 回归失败；修复后 NAV 12/12（含 XML 直接嵌套 li） | 是 |
+| `src/core/book.ts`、`src/test/book.test.ts` | 更新 | 导出 `resolveTocHrefs`；仅在 nav/NCX 基准文档属于 spine 时绑定 `#`/`#id`，无上下文 fragment/外部/空 href 仍禁用 | book 14/14 | 是 |
+| `src/ui/TocPanel.tsx`、`src/ui/TocPanel.helpers.test.ts`、`src/App.tsx` | 更新/新增 | 目录递归统计为“项”；按 fragment 精确、章首、同路径顺序返回唯一节点引用，App 传递当前 path+anchor，避免同 XHTML 多项同时高亮 | Toc helper 3/3、TypeScript 通过 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 更新 | 登记 B-043/C-36、验证边界和 NAV 原本已被正确识别的结论 | 目标 EPUB 1280×800 Chromium：`.toc-count`=`334 项`、`.toc-item`=334，缩进 8/22/36px；正确 `12.4.1`、错误 NCX `14.1`=0；根目录无 disabled、点击后 iframe 有 `nav#toc`、12.4.1 唯一高亮并到 Chapter12-4 第 2/21 页；`iframe :target` 不作为本项断言；整组全量 34 文件 304 测试、tsc、build 通过 | 是 |
+
+## B-044 UA 默认 margin 来源门控
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts` | 更新 | 新增当前生效 inline/CSSOM 的水平 margin 来源判断；L3 auto margin 临时移除后，明确 UA-only computed margin 跳过 C-04，作者/用户与未知来源保持原路径；涵盖 physical/logical/shorthand，customCss 仍可生效。仅 non-percentage、nonzero/unknown computed margin 的 C-04 候选扫描样式表，零/auto 直接子及 C-16 百分比路径不产生 O(children×rules) 新开销 | 新 B-044 回归在旧实现 4 项失败；修复后 paginator 54/54。目标 EPUB 8.6.5 Chromium：1280×800 两个 blockquote 均 width640/margin312/312、无 fixed，三段严格在每列 40rem；900×650 均 width640/margin122/122、无 fixed，后代无越块。B-023/B-024/Sumeragi 实书回归保持；整组全量 34 文件 304 测试、tsc、build 通过 | 是 |
+| `src/render/paginator.test.ts` | 更新 | 覆盖 inline 注释、shorthand/logical、匹配/不匹配规则、当前 media/supports、未知 grouping/不可读 CSSOM、reader customCss、false/true/unknown 补偿门、zero/auto 与 C-16 百分比不扫描边界 | paginator 54/54 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 更新 | 登记 B-044/C-37、UA blockquote 40px 根因、保守边界、验证状态与不按标签特判的约束 | 文档与实现术语核对；目标 EPUB Chromium、相邻实书回归、全量 34 文件 304 测试、tsc、build 已完成；Windows WebView2 待用户 | 是 |
+
+## B-045 UA 对称 margin 语义保留
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts` | 更新 | B-044 来源门控之后，新增 `getReaderTopUaSymmetricInsetMaxWidth()`：仅 reader-top、明确 UA-only、非 float/fullpage/百分比且 computed 左右 margin 有限非零对称时，将 border-box 减去双侧 inset 并按 box-sizing 写入临时 max-width；L3 auto margin 继续负责居中，写回纳入现有 marginFixes 恢复 | 新回归旧实现 1 项失败；修复后 paginator 55/55。目标 EPUB Chromium 1280×800 两个 blockquote width/max-width 560px、margin 352/352，每个 fragment 宽 560 且逐列居中；900×650 width 560、margin 162/162、无后代越界 | 是 |
+| `src/render/paginator.test.ts` | 更新 | 覆盖 640+40/40→560、窄视口包含块限制、作者 margin、非对称、float、fullpage、百分比、非 reader-top、零 margin 不触发 | paginator 55/55；全量 Vitest 34 文件 305/305 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md` | 更新 | 单列 B-045/C-38，明确 B-044 只消除右移却吞掉 UA 双侧语义；记录 C-38 的层级、生命周期和非目标边界 | B-041 3.1 图文容器、B-042 opacity float、B-043 12.4.1 NAV、B-023 赤月、B-024 玩具堂、Sumeragi WSL Chromium 回归；全量 Vitest 305/305、tsc、pnpm build（95 modules）通过；Windows WebView2 待用户 | 是 |
 
 ## 不属于同步变化
 
@@ -133,6 +216,44 @@ B-035 当前收尾：脚注宿主 CSS 契约定向 2/2、脚注/样式/消毒/�
 - **2026-08-17 公开仓库准备**：提交 `09a995811a5adf7d9e8c8d765791ff2d45cf9883`，增加 MIT License 并泛化本机路径。
 - **2026-08-18 `0.1.6` 功能提交**：提交 `d934588b6518dca819e72d2f129a68225cba6592`，同步书签、自定义字体/CSS、阅读历史返回、封面回退、B-022 和 0.1.6 版本元数据。
 - **2026-08-18 `0.1.6` IPC 修复**：提交 `e8aabcdeb03543402338aee00fb2e33d52e39841`，把 Tauri 不支持的 `u128` 书架时间参数改为 `u64`；`main`、`origin/main`、`v0.1.6` 均指向该提交。
+
+## B-046/C-31/C-39：顶层浮动布局单元与完整百分比组版心限宽
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts`、`src/render/paginator.test.ts` | 更新 | 所有顶层 left/right float 先进入 C-31 防火墙，安全单项按40rem投影并保留作者 margin，复杂单项保持原布局且不进入 C-04/C-18；新增独立 `floatLayoutFixes` 生命周期；安全完整百分比组按 40rem 版心写入本轮 px width/首项 inset，几何验收失败整组恢复；覆盖复杂回退、优先级恢复和 C-08 隔离 | paginator 62/62；全量 Vitest 34 文件 312/312；`tsc --noEmit`、`pnpm build`（95 modules） | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/MODULE_CONTRACTS.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-046/C-39、两阶段 float 方案、无 DOM wrapper、复杂组保守回退、生命周期/防火墙契约及 Chromium 实测 | 3.4.4 1280/900、字号 16→20→16、金木犀双视口及相邻书 smoke 通过；Windows WebView2 待用户 | 是 |
+
+## B-047/C-40：显式对称居中作者 margin 的通用门控
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts` | 更新 | 新增 `hasAuthoredSizingIntent` 与 `shouldKeepCenteredAuthorMargins`；在 C-31/C-16/C-18/C-38 后、C-04 前，仅对作者来源明确、无 sizing intent 的对称 `text-align:center` 普通顶层盒保留自然居中；固定/unknown/非对称/percentage/float/fit/fullpage 保守走原路径；reader 内建 `max-width:40rem` 不算作者 sizing | paginator 64/64；目标目录 1280/900 与字号 16→20→16 Chromium 同轴；B-024/B-045/C-18/B-023/B-046/金木犀回归 | 是 |
+| `src/render/paginator.test.ts` | 更新 | 增加 C-40 门控与 sizing provenance 回归：center/left、固定/min/max、percentage/negative/zero/auto/unknown、float、fit/fullpage、不可读 CSSOM、reader default/custom CSS 与重排生命周期 | 定向 64/64；全量 Vitest 34 文件、314/314 | 是 |
+| `docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/MODULE_CONTRACTS.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-047/C-40 根因、C-04 边界、来源保守策略、B-024 对比、Chromium/全量验证与 Windows 待确认项 | `tsc --noEmit`、`pnpm build`（95 modules）通过；无 Rust 改动，临时脚本已清理 | 是 |
+
+## B-048/C-41：链接书库 `cover.webp` 封面候选统一
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `src-tauri/src/linked_library.rs` | 更新 | Rust 原生链接导入保留有序 manifest，统一 EPUB3 `cover-image`、EPUB2 meta 和精确 `cover.*` href fallback；候选去 query/fragment、URL 解码/规范化、验证图片类型与 ZIP 条目存在，删除 `id.contains("cover")` 模糊匹配 | Rust 13/13、`rustfmt --check`、`cargo check --quiet` 通过；仅 `ZipArchive::by_name` 查询中央目录，不解压/解码/全 ZIP 扫描/额外哈希 | 是 |
+| `src/core/book.ts`、`src/test/weirdBooks.test.ts` | 更新 | 浏览器预览使用同一候选顺序和有效性边界；manifest 资源路径去 query/fragment，新增失效标准声明继续回退 URL 编码 `Cover.WEBP` 的合成 EPUB 回归 | 新回归旧实现失败；全量 Vitest 34 文件、315/315，`tsc --noEmit`、`pnpm build`（95 modules）通过 | 是 |
+| `docs/tasks/active/cover-fallback-contract.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/version-0.1.7-release-candidate.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-048/C-41：发行版差异来自 Rust 原生链接导入而非 WebView2/WebP 解码；低成本 O(manifest + 少量 by_name) 路径、旧库不迁移、重复导入刷新 binding 且保留进度 | 文档/契约核对；未启动 Chromium/Vite，Windows 发布包真实 `cover.webp` 导入待用户确认 | 是 |
+
+## B-049：设置数值步进边界与阅读器重载
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `src/ui/settingsStepper.ts`、`src/ui/settingsStepper.test.ts` | 新增 | 纯数值有序步进按可见默认值处理 `undefined` 自动档；方向减/加分别取最近较小/较大值，超界 clamp；自动档若候选等于可见默认值则保持 `undefined` | 新回归旧实现 3 项失败；修复后设置步进 4/4 | 是 |
+| `src/App.tsx` | 更新 | 行高、字重、字间距、字符间距改用纯数值档位；真实变化返回新 settings identity，边界 no-op 返回原对象；字号和 direct slider change 同步 clamp/避免无效更新，沿用 B-040 的 150ms reload debounce | 相关定向 7/7；全量 Vitest 35 文件、319/319；`tsc --noEmit`、`pnpm build`（96 modules） | 是 |
+| `docs/tasks/active/settings-stepper-bounds.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-049 根因、自动档可见默认值、identity/reload no-op 契约和验证边界；rendering-layers 无变化 | 文档与实现术语核对；WSL Chromium 真实点击确认有效步进各新增一次 iframe load，行高上下界与字间距下界额外点击均保持值和 load 计数；Vite/Chromium 已停止，5173/5174 未监听 | 是 |
+
+## 0.1.8 测试发布候选收口
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 四处产品版本统一提升为 0.1.8；Cargo.lock 仅修改 `epub-reader` 根包，不改同版本依赖 | 四处版本一致；Cargo metadata 识别 `epub-reader@0.1.8`；Rust 13/13、fmt/check 通过 | 是 |
+| `docs/RELEASE_0.1.8.md`、`docs/tasks/active/version-0.1.8-release-candidate.md`、`docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 建立 0.1.8 当前发布入口、WSL→Windows 备份式干净同步命令、排除项、构建产物路径和 WebView2 验收矩阵；0.1.7 文件保留为阶段历史 | 文档路径/命令核对；Vitest 35 文件 319/319、tsc、Vite build（96 modules）通过 | 是 |
 
 ## 推荐比较命令
 

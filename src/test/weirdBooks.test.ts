@@ -401,6 +401,29 @@ describe("怪书：封面与 guide", () => {
     expect(book.guide.length).toBe(1);
     expect(book.guide[0].type).toBe("cover");
   });
+
+  it("无效的标准封面声明会继续回退到 URL 编码的 cover.webp", async () => {
+    const bytes = rawEpub({
+      opf: `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+          <dc:identifier id="uid">urn:uuid:x</dc:identifier>
+          <dc:title>t</dc:title><dc:language>zh</dc:language>
+        </metadata>
+        <manifest>
+          <item id="missing-cover" href="missing.jpg" media-type="image/jpeg" properties="cover-image"/>
+          <item id="image001" href="Images/Cover%2EWEBP?cache=1#preview" media-type="text/plain"/>
+          <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+        </manifest>
+        <spine><itemref idref="c1"/></spine>
+      </package>`,
+      extra: {
+        "OEBPS/Images/Cover.WEBP": new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+        "OEBPS/ch1.xhtml": strToU8(CH),
+      },
+    });
+    const book = await loadBook(bytes);
+    expect(book.coverHref).toBe("OEBPS/Images/Cover.WEBP");
+  });
 });
 
 describe("怪书：危险内容消毒", () => {

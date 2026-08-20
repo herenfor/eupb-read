@@ -573,3 +573,207 @@ CSS 规则的逐项冲突编号仍以 `rendering-layers.md` 为准；本文记�
 - 验证：脚注 CSS 契约 2/2；定向脚注/样式/消毒/分页 91/91；全量 Vitest 23 个文件 228/228；`tsc --noEmit`、Vite production build 通过。WSL Chromium 实际点击目标书两个图片脚注：`019`/`020` 的 computed `list-style-type:none`、padding `0px`，图片、列表项和弹层内容左缘一致；Windows WebView2 待人工确认。
 - 剩余风险：宿主 CSS 仅覆盖带 `.duokan-footnote-content` 类的多看列表；其他厂商使用不同 class 且同样依赖 iframe 内 `list-style:none` 的结构，需以后续样本按同一原则扩展。
 - 关联：`rendering-layers.md` C-32、`docs/tasks/active/footnote-rich-content-marker.md`、脚注解析与 UI 弹层契约。
+
+## B-036：阅读会话与章节 CSS Blob URL 生命周期
+
+- 状态：代码与自动化回归完成，待用户审核
+- 发现日期：2026-08-20
+- 现象：章节消毒为外链 CSS 创建的 Blob URL 没有明确的本次加载所有权；换章、消毒失败或旧章节异步任务过期时可能遗留 URL。返回书架时 ReaderView 也没有在 paginator 销毁后统一结束 ResourceServer 会话。
+- 触发条件或样本：连续换章、快速覆盖 `loadSeq`、sanitize 抛错、ReaderView dispose 或返回书架；不要求特定 EPUB。
+- 根因：`sanitizeChapter` 的 `makeUrl` 只负责创建 URL，分页器没有登记局部集合；书籍共享图片/字体 URL 与章节 CSS URL 的生命周期未分层。`measure()` 在字体等待和双 rAF 后也缺少 document/viewer 身份校验。
+- 约束：普通换章不得 revoke 整本书共享资源；必须先 dispose paginator 再撤销 ResourceServer；失败/过期/dispose 清理必须幂等；保持 VisibilityGate、B-002 代次与最多两次自愈。
+- 选择的修复：新增 `OwnedBlobUrls` 管理每次 sanitize/load 的 CSS URL 集合，成功提交 iframe 后转为当前章节所有权，换章/失败/过期/dispose 统一 `revokeAll()`。ReaderView cleanup 先 `p.dispose()` 再 `server.revokeAll()`；App 返回书架先 flush 并切换视图，React 卸载后会话 effect 清空 book/server/bookKey/章节状态。`measure(expectedLoadSeq)` 在字体、双 rAF 后及兼容补偿前后检查 loadSeq、disposed、contentDoc 和 viewer 身份。
+- 为什么这样修：局部集合能区分 sanitize 产生的 CSS URL 与 ResourceServer 共享图片/字体 URL，所有退出路径可重复调用而不会双撤销；React cleanup 是 iframe 资源所有权的自然终点，避免在 paginator 仍使用资源时提前 revoke。
+- 未采用方案：不在普通换章调用 `ResourceServer.revokeAll()`；不依赖 Blob URL GC；不把页面中心位置引入布局；不做预加载、缓存、分页算法或进度 schema 改动。
+- 修改文件：`src/render/blobOwnership.ts`、`src/render/blobOwnership.test.ts`、`src/render/resources.test.ts`、`src/render/paginator.ts`、`src/render/paginator.test.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx`、`docs/tasks/active/reader-session-lifecycle-and-blob-ownership.md`、`docs/MODULE_CONTRACTS.md`、`docs/SOURCE_DELTA.md`。
+- 验证：先写的 token 回归在旧实现以 `isChapterMeasurementCurrent is not a function` 失败；新增 paginator 生命周期回归覆盖成功换章、sanitize 抛错、loadSeq 过期、dispose、VisibilityGate 代次及 ResourceServer 不被章节切换撤销。定向 40/40；全量 Vitest 25 文件 236/236；`tsc --noEmit`、Vite production build 通过。未修改 Rust，不运行 Rust 测试。Windows WebView2/发布包内存行为未人工验证。
+- 剩余风险：React 被动 effect 的实际清理时序仍应在主代理的集成测试/浏览器验证中确认；`OwnedBlobUrls` 已覆盖幂等纯逻辑，但 sanitize 失败与真实 iframe 快速换章仍建议用 Chromium 任务矩阵复核。
+- 关联：`docs/tasks/active/reader-session-lifecycle-and-blob-ownership.md`、ResourceServer/ChapterPaginator/ReaderView 生命周期契约。
+
+## B-037：内容锚点在重排后漂移且进度重复/回退
+
+- 状态：代码、自动化与 WSL Chromium 回归完成，待 Windows WebView2 审核
+- 现象：旧锚点以 DOM 元素序号和横向比例定位，字体/列宽变化后可能落到不同文字；父子递归 leaf 文本累计会重复计数。旧记录恢复后 `charsRead=0` 又可能按页码比例覆盖进度。
+- 根因：页面中心被错误地等同于排版目标，且元素树不是稳定文本地址；旧恢复在 `load()` 完成后才注入锚点，错过首次 recompute。legacy-only 锚点还不能安全升级到文本锚点。
+- 选择的修复：中心只通过 caret API 作有限邻近采样，当前章节自然 measure 后建立单次可见文本索引。保存 code-point `anchorTextOffset`/有界 snippet；恢复验证原 offset，漂移时线性搜索最近同 snippet，以 Range rect 决定已有列。失败才用严格 legacy index/ratio，再用 saved page。成功 legacy 定位后只读采样升级；所有文本-only sentinel 在 shelf/bookmark/archive/Rust 边界写为 legacy null。`<linear=no>` 只保留此前 linear 章节权重。
+- 约束：不写 padding/margin/transform、不插占位、不改变内容结构或第一页原点；archive 保持 v1，旧 JSON 缺字段默认为 null；snippet 最多 32 code point 且无空白，Rust/前端同时校验。
+- 验证：text index 覆盖深层 `p>a>span` 不重计、emoji UTF-16 映射、hidden 不改 DOM、snippet 原位/漂移/重复最近；fallback、legacy shelf、text-only 书签/历史/portable、旧 legacy 页比例均回归。定向 70/70、全量 Vitest 27 文件 250/250、TypeScript/Vite build、Rust 11/11、fmt/check 通过。真实 WSL Chromium 使用《有谁规定了在现实中不能有恋爱喜剧的？.03》验证：1280×800 缩至 900×650 后仍保留同一阅读片段，返回书架再打开的中心锚点完全一致；连续无延迟两次字号+后旧 snippet 仍在当前页可见。页面中心只改变定位采样，不改变首列自然原点。Windows WebView2 仍待发布包人工确认。
+- 关联：`docs/tasks/active/text-content-anchor-and-progress.md`、C-33、B-021、B-033。
+
+## B-038：同一章节内导航不重载
+
+- 状态：代码、自动化与 WSL Chromium 回归完成，待用户审核
+- 发现日期：2026-08-20
+- 现象：目录、书签、历史或普通书内链接指向当前章节时，App 仍递增 `anchorNonce` 并重新加载章节，导致 sanitize、iframe Blob、字体等待和测量重复执行；书签/历史跳转后旧 iframe hash 还可能保留旧 `:target` 状态。
+- 触发条件或样本：当前已完成布局的章节内 `chapter.xhtml#fragment`、`chapter.xhtml`、同章目录、同章书签、back/forward；不要求特定 EPUB。
+- 根因：App 将所有 href 当作章节状态变化，ReaderView effect 只通过 `p.load()` 恢复位置；Paginator 没有供 UI 使用的同步同章恢复事务。
+- 约束：同章 direct 不得调用 load/sanitize/iframe src/fonts/measure/recompute，不得短暂隐藏；文本锚点优先于 legacy/page，旧锚点越界不得 clamp；失败不能污染当前页/anchor/hash/history；跨章行为保持原样；页面中心只能只读采样。
+- 选择的修复：新增 `ChapterPaginator.navigateWithinCurrentChapter()` 与 ReaderHandle 原子入口。Paginator 在 ready DOM 上先做 fragment/anchor preflight，候选 anchor 用临时副本和 `try/finally` 解析；成功后同步页、hash与 settled，失败返回 false。App 用纯 `sameChapterNavigation` helper 分流 direct/reload，TOC/书签先取只读快照，direct 成功后才提交历史；history back/forward 也只在 direct 成功后采用 transition。
+- 为什么这样修：已完成的分页布局可以安全地复用当前 iframe；把直接定位责任留在 Paginator，App 只负责章节路由、历史和进度事务，避免 React 状态更新与历史捕获竞态。成功 text/legacy/page 恢复先清除旧 hash，失败路径不触碰 hash。
+- 未采用方案：不把同章跳转伪装为 `load()` 或设置 `readerDisplayReady=false`；不在 App 复制 Range/DOM 分页逻辑；不做跨章预加载、全书扫描或缓存；不改 B-037 持久化字段/Rust schema。
+- 修改文件：`src/render/paginator.ts`、`src/render/paginator.test.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx`、`src/ui/sameChapterNavigation.ts`、`src/ui/sameChapterNavigation.test.ts`、`docs/tasks/active/same-chapter-navigation.md`、`docs/tasks/active/README.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md`。
+- 验证：定向 49/49；全量 Vitest 28 个测试文件、258/258 通过；`tsc --noEmit`、Vite production build 通过。测试覆盖同章 path/fragment、空 hash 清除、text/legacy/page 优先级、失败原位、Range 异常回滚、direct/reload 分流和历史事务。真实 WSL Chromium 的同章目录跳转、后退、前进均未发生 iframe load、src mutation 或隐藏 style mutation。
+- 剩余风险：Windows WebView2 与生产发布包仍需用户人工确认；跨章仍使用原有 load/display gate。
+- 关联：`docs/tasks/active/same-chapter-navigation.md`、C-33、B-037、B-033、B-026。
+
+## B-039：打开书籍同步扫描整书字数并错误覆盖进度
+
+- 状态：代码与自动化回归完成，待用户审核
+- 发现日期：2026-08-20
+- 现象：打开书架条目时 App 同步读取并扫描全部 spine 文本，首屏被整书 `chapterChars` 扫描阻塞；扫描尚未完成时，未知章节被当成 0，进度分母暂时失真，书架进度可能被写成临时 0/100 或覆盖旧 baseline。
+- 触发条件或样本：任意包含多个 linear 章节的 EPUB；快速返回书架、换书或 idle 统计与章节 ready 交错时尤其容易暴露旧回调写入问题。不要求特定 EPUB。
+- 根因：`handleShelfOpen` 同步调用 `ResourceServer.textFor()`/正则去标签；App 只有普通数组，没有 generation/source 优先级，也没有异步统计取消与 baseline 保护。paginator 的测量结果虽已有可见文本索引，但没有被作为当前章权威计数消费。
+- 约束：首屏不做整书同步扫描；当前已完成章必须使用自然布局后的 measured `totalChars`；后台统计不能参与 CSS/分页/布局；`linear=no` 不进入分母；旧 session callback 不得污染新书；不做 CSS cache、相邻章预加载、流式 ZIP 或 Rust schema 变更。
+- 选择的修复：新增 generation-bearing `chapterCounts` collection，区分 unknown/estimated/measured，measured 不可被 estimated 覆盖；新增可注入 idle scheduler 的 `chapterCountJob`，每 slice 最多一章，结构上复用 B-037 的 script/style、hidden、aria-hidden、footnote 排除并去除 Unicode whitespace，缺资源/parser 失败以 estimated 0 完成并记录诊断。当前 display-ready 且 path/anchor/ready/nonempty 校验通过时，把 `anchor.totalChars` 写 measured。counts ref 作为异步权威，state 仅作 UI 快照，generation + AbortController 保证取消和 A→B 隔离。
+- 进度保护：纯 `resolveProgressPct(exact, baseline)` 统一派生与持久化；summary 未 complete 时 exact 为 null，沿用打开书架时保存且经校验/夹紧的 baseline，不写临时 0/100；complete 后才以 countsRef 与当前 text/page anchor 即时计算并更新 baseline。返回书架先从 ref 计算再 flush。
+- 等待与资源：字体等待和 iframe `defaultView` double-rAF 使用可取消 timer/rAF helper；每个 measure 拥有独立 controller，load/cleanup/dispose abort 旧等待并保留 loadSeq/document/viewer 最终校验。ResourceServer 增加默认 4 MiB/32 项 text LRU，单条超限不缓存，`revokeAll()` 清 entries/bytes，hits/misses 保留为 server 生命周期诊断累计值。
+- 为什么这样修：当前章节在自然分页后已有 B-037 可见文本索引，能提供与锚点一致的 measured code-point 总量；其他章节以 idle provisional 让首屏先可用。generation/source/取消语义将异步统计与书籍会话边界分开，baseline 则避免未知分母改变用户已看到的稳定进度。
+- 未采用方案：不再同步扫描整书；不把 provisional count 注入 DOM/CSS 或分页；不把未访问章节的 CSS `display:none` 伪装成精确 measured；不做跨 chunk HTML lexer、流式 ZIP、相邻章节预加载或 CSS rewrite cache；不修改 Rust schema。
+- 修改文件：`src/ui/chapterCounts.ts`、`src/ui/chapterCounts.test.ts`、`src/ui/chapterCountJob.ts`、`src/ui/chapterCountJob.test.ts`、`src/render/textAnchor.ts`、`src/App.tsx`、`src/render/asyncWait.ts`、`src/render/asyncWait.test.ts`、`src/render/paginator.ts`、`src/render/resources.ts`、`src/render/resources.test.ts`、`docs/tasks/active/incremental-chapter-counts-and-progress.md`、`docs/tasks/active/README.md`、`docs/MODULE_CONTRACTS.md`、`docs/BUGFIX_LOG.md`、`docs/SOURCE_DELTA.md`、`docs/rendering-layers.md`。
+- 验证：B039 定向 10 个文件 69/69；B037/B038 相关 paginator/textAnchor/readingProgress/history/sameChapter 回归包含在内；全量 Vitest 31 个文件 269/269、`tsc --noEmit`、Vite production build 通过。未修改 Rust，不运行 cargo。
+- 剩余风险：未访问章节的 CSS computed hidden 只能在其 iframe 真正 measured 后确认；当前 provisional 结构统计不承诺该部分。真实 EPUB/Chromium 字号与窗口矩阵、Windows WebView2 和发布包内存行为仍需用户确认。
+- 关联：`docs/tasks/active/incremental-chapter-counts-and-progress.md`、B-036、B-037、B-038、C-33。
+
+## B-040：快速连续阅读设置重载丢失内容锚点
+
+- 状态：代码、自动化与 Chromium 回归完成，待用户审核
+- 发现日期：2026-08-20
+- 现象：长书目录章在 900×650 阅读区的第 2 页，单次字号增加能保留页码和旧 snippet；连续无间隔点击两次字号增加时，第二轮可能在第一轮 cleanup/隐藏期间开始，最终跳到第 1/3 页且旧 snippet 不可见；约 600ms 间隔则正常。
+- 根因：ReaderView 对每个 settings/userFonts identity 立即并发调用 `reloadWithSettings()`；paginator 的 anchor 是可变状态，旧 reload 的 cleanup、iframe 文档和新 reload 之间发生时序竞争。
+- 约束：连续设置只执行最后一次；章节/anchor 变化必须取消 pending timer 但不额外 reload；新设置不能被旧 reload 覆盖；保持 B-036 的 loadSeq、VisibilityGate、Blob ownership 与 measure abort；不可引入队列、预加载或布局偏移。
+- 选择的修复：新增 150ms 可取消 settings debouncer。章节 effect 先记录当前 settings 并取消旧 timer，使切章只执行使用最新 settings 的正常 load；book/server cleanup 与 paginator dispose 同样取消 timer。`reloadWithSettings()` 在任何 await/load 前一次性 capture，复制 `ReadingAnchor` 与当前页，传递 `readingAnchor` snapshot 和 `fallbackPage`；无 content document 时保留既有 anchor，text-only `-1` 只存在内存。
+- 为什么这样修：debounce 把连续用户输入收敛为一个明确的最新设置事务；值复制使下一次 load 不依赖 cleanup 后仍可能变化的共享 anchor；既有 loadSeq/display gate/Blob/measure 防线继续负责过期任务，不需要让旧 settings 进入队列等待。
+- 未采用方案：不以页面中心或 DOM 位移补偿位置；不新增 reload queue、相邻章预加载、CSS rewrite cache、URL 租约、流式 ZIP 或 Rust schema。
+- 修改文件：`src/ui/settingsReload.ts`、`src/ui/settingsReload.test.ts`、`src/ui/ReaderView.tsx`、`src/render/paginator.ts`、`src/render/paginator.settings.test.ts`、`docs/tasks/active/reader-settings-reload-debounce.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md`。
+- 验证：B-040 定向 4 个文件、44/44 通过；真实 Chromium 测试书《有谁规定了在现实中不能有恋爱喜剧的？.03》在 900×650 下快速无延迟连续两次字号+仍位于第 2/3 页，旧 snippet 保持当前页可见且无 pageerror；同章 direct 无 load/src/style mutation，返回书架重开 anchor 一致。最终全量 Vitest、`tsc --noEmit`、Vite production build 均通过；无 Rust 改动，不运行 cargo。
+- 剩余风险：debounce 延迟固定为 150ms，若后续发现输入设备或无障碍操作需要不同窗口，应另立任务评估；Windows WebView2 仍待发布流程确认。
+- 关联：`docs/tasks/active/reader-settings-reload-debounce.md`、B-036、B-037、B-038、B-039、分页器显示门与阅读锚点契约。
+
+## B-041：多看普通图文容器被误判为全页图
+
+- 状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-20
+- 现象：`EPub指南——从入门到放弃` 的 3.1「样式来源」中，`.duokan-image-single` 内的普通图片与 `.duokan-image-maintitle` 图注被拉成整页 flex 图；图片宽度占满视口，图注被挤压到极窄区域。
+- 触发条件或样本：一个 `.duokan-image-single` 同时包含 `img` 与可见 `p.duokan-image-maintitle`；书籍作者 CSS 本意为 `width:100%` 的普通图文容器。
+- 根因：阅读器将 `.duokan-image-single` 类名无条件混入显式全页图集合：消毒器注入 `height:100% !important`/flex 和图片 `width/height:100% !important`，百分比宽度改写与分页器的全页候选、fit-content 跳过也沿用同一错误语义。该类并不等同于全页图。
+- 约束：不按图注类、书名或章节名特判；仍须保留 `.duokan-image-fullscreen`、`.illus`、`.kuchie`、`.cover` 的显式全页语义，以及 B-013 的无文字单图/inline SVG 页面级识别。
+- 选择的修复：从 sanitize 强制全页 CSS、fullpage 祖先判据、CSS 宽度改写跳过表和 paginator 三处仅由该类触发的排除中移除 `.duokan-image-single`。普通容器恢复既有 L3 默认版心与 L4 作者图注布局；真正无文字的单图页继续由 `isPlainImagePage` 进入 `fullpage-image`。
+- 为什么这样修：全页意图应由明确 fullscreen 类或可验证的整页内容结构表达，不能由兼作普通图文容器的厂商类名猜测。页面级结构检测已经覆盖需要整页显示的纯图片包装，因而不必新增 marker 或维护图注白名单。
+- 未采用方案：不只排除 `.duokan-image-maintitle`，因为类名和结构会随书变化；不移除所有全页图规则，避免回归明确 fullscreen 与 B-013；不按本书路径写 CSS 特判。
+- 修改文件：`src/render/sanitize.ts`、`src/render/cssRewrite.ts`、`src/render/paginator.ts`、对应 `sanitize`/`cssRewrite` 单测、`docs/tasks/active/epub-guide-compatibility.md`、本记录、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md`。
+- 验证：新增回归在旧实现下 2 项失败（普通容器仍跳过 width 改写、仍注入全页 CSS）；修复后 `sanitize`、`cssRewrite`、`paginator` 定向 Vitest 3 文件 114/114 与 `tsc --noEmit` 通过。主审查以目标 EPUB Chromium 1280×800 复核 3.1：章节为 1/4 页、viewer `fullpage=false`；两个普通容器均为 `display:block`、宽 650px、高 302/387px、无 `data-reader-margin-fixed`，图片为 441×253/624×338，图注均宽 640px、位于图片下方且未越界。整组收尾 Vitest 34 文件、304 测试、`tsc --noEmit` 与 `pnpm build`（95 modules）均通过；无 Rust 改动，未运行 cargo。
+- 剩余风险：本轮依赖纯图片的无可见文字结构识别；若未来 `.duokan-image-single` 的真正整页图片带有非图注文本，需要由其内容结构/明确 fullscreen 类单独确认，不能重新把整个类设为全页。
+- 关联：C-34、B-013、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-042：连续百分比 float 被逐项内缩到版心
+
+- 状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-20
+- 现象：`EPub指南——从入门到放弃` 3.4.4「opacity 属性」的五个 viewer 直接子 `.opacity-*` 均为同向 `float:left; width:20%`，却被 C-31 逐项写入版心左 inset，原本一行的五个色块变成 2/2/1 并出现版心外溢。
+- 触发条件或样本：连续直接 sibling、同方向 float、每项最终作者宽度为百分比且总和约为 100%；单个 float、不满整行、混合 px/%、方向变化、clear 或普通块打断不应改变旧 C-31 行为。
+- 根因：C-31 以单个 reader-top float 为决策单位，没有识别作者用连续百分比 float 表达横向栅格；在宽 viewer 中单项 computed width 小于 40rem，于是每项都获得相同物理侧 inset。
+- 约束：不能全局关闭 C-31、不能按 opacity/类名/书名特判、不能依据 computed px 比例猜百分比；Typed OM/CSSOM 无法确认作者最终百分比时必须保守不豁免；B-034 的单个无 margin 顶层 float 仍需得到旧 inset。
+- 选择的修复：新增纯函数 `getPercentageFloatGroupMembers`，只标记连续 direct sibling 的同方向 `left/right` float 组：`reader-top`、`clear:none`、每项明确 `0<width<=100%`、组至少 2 项且百分比总和在 `99..101` 时，`applyBookMargins` 才跳过 C-31。新增 `getAuthoredPercentageWidth`：现代 Typed OM 存在明确值时直接采用（包括 px 的非百分比结果）；旧 WebView 才按简单、可判定的 CSSOM 重要性/特异性/源顺序回退。reader overrides 中若存在匹配 width、复杂伪类/未知条件或不可读 sheet，则保守返回 unknown，避免把用户 CSS 或未建模 cascade 当成作者栅格。
+- 为什么这样修：组级判断保留 C-31 对普通单 float 的保护，只跳过能够由作者声明直接证明为“一整行栅格”的最小集合；真实 sibling 序列包含所有 viewer 子元素，fullscreen/普通块/clear 不会因候选过滤而错误拼组。
+- 未采用方案：不按元素尺寸或五个 `.opacity-*` 类名特判；不把所有百分比 float 视为栅格；不移除 C-31 或统一改写 float width；不在 CSS 改写阶段改变作者声明。
+- 修改文件：`src/render/paginator.ts`、`src/render/paginator.test.ts`、`docs/tasks/active/epub-guide-compatibility.md`、本记录、`docs/rendering-layers.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md`。
+- 验证：先写回归在旧实现下 36 项通过、5 项失败；级联边界补测后 paginator 定向 48/48、`tsc --noEmit` 通过。纯函数覆盖 20×5、50×2、33.333×3 容差、单个 70%、20×2、不满整行、混合 px/%、方向/普通块/clear 断组、Typed OM 最终 px/无值、inline important/stylesheet 覆盖、reader overrides、复杂伪类、未知 CSSOM 和最终获胜 CSSOM 声明。目标 EPUB Chromium 复核：1280×800 时 `.opacity-1..5` 均 `top=310.906`、宽 `252.797`，连续覆盖 viewer `x=8..1271.984`，margin `0/0` 且无 `data-reader-margin-fixed`；900×650 时同一行、宽 `176.797`，覆盖 `x=8..891.984`，同样无写回。章节整章页数分别为 1/4 与 1/5，仅作记录不作断言。最初脚本因同章另有 opacity-rgba/demo 元素误将目标扩大为 5 个以上而超时，后收窄为前五项核对；临时脚本已删除且不纳入同步。整组收尾 Vitest 34 文件、304 测试、`tsc --noEmit` 与 `pnpm build`（95 modules）均通过；无 Rust 改动，未运行 cargo。Windows WebView2 仍待人工确认。
+- 剩余风险：旧 WebView 的 CSSOM 只能在样式表可读且能建立级联顺序时确认百分比；任何不可读 author sheet 都宁可保留 C-31。真实 WebView2 与窄视口下的多栏 float fragmentation 仍需矩阵复核。
+- 关联：C-35、C-31、B-034、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-043：EPUB 3 NAV fragment 与多级目录异常
+
+- 状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-20
+- 现象：目标书的 EPUB 3 NAV 已正确优先使用，但 fragment-only 条目被置灰；父级 `li` 可能拿到嵌套项链接，混合 `ol/ul` 或 div 包装时顺序/层级不稳定；目录头只显示 27 个顶层项，同一 XHTML 的多个 fragment 可能同时高亮。
+- 触发条件或样本：`/home/herenfor/test/测试用epub/ePub指南——从入门到放弃 20230418.epub`；NAV 统计为 27 个顶层节点、334 个递归节点。
+- 根因：`epub:type` 读取只依赖 `epub:type` 前缀属性；旧解析器用全子树第一个 `a` 与分离收集 `ol`/`ul`，可能跨过嵌套 li；fragment href 没有基准文档上下文；UI 只按 path 比较且只统计顶层。
+- 约束：无上下文的 `isUsableHref("#id")` 仍必须为 false；只有已知 nav/NCX 基准文档位于 spine 时绑定 fragment；不改变 NAV 优先级、分页或历史状态机。
+- 选择的修复：命名空间/前缀/local-name/普通属性回退读取 `epub:type`；最近列表搜索在嵌套 li/列表处剪枝，父项只读取自己的链接/文字并按文档顺序合并混合列表；`resolveTocHrefs` 在 spine 上下文中解析 `#`/`#id`；目录 UI 递归统计并用唯一节点引用按 fragment 精确、章首、同路径顺序高亮，App 传入 path+anchor。
+- 为什么这样修：解析器负责保留书籍真实导航树，href 解析负责在有上下文时补足 EPUB 合法的同文档目标，UI identity 比较能从根本上消除同路径多项同时激活，而不需要向分页器注入导航状态。
+- 未采用方案：不全局放开纯 fragment；不把所有同路径项同时高亮；不将 NAV 降级为 NCX；不为 direct 同章导航另加 anchor 持久化或重载。
+- 修改文件：`src/core/nav.ts`、`src/core/nav.test.ts`、`src/core/book.ts`、`src/test/book.test.ts`、`src/ui/TocPanel.tsx`、`src/ui/TocPanel.helpers.test.ts`、`src/App.tsx`、相关任务/台账文档。
+- 验证：旧实现新增父 `li` 测试失败并误取“子节点”；修复后 NAV 12/12（含 XML 直接嵌套 li）、book 14/14、Toc helper 3/3，`tsc --noEmit` 通过。目标 EPUB 1280×800 Chromium 复核确认 `.toc-count` 为 `334 项`、DOM `.toc-item` 为 334 个，缩进为 8/22/36px；正确 `12.4.1 图片处理` 存在，错误 NCX 标签 `14.1 图片处理` 为 0，证明 EPUB 3 NAV 优先。根“目录”无 disabled，点击后 iframe 含 `nav#toc`；点击 `12.4.1` 后唯一 active 正是该项，进入 Chapter12-4 第 2/21 页，章节 h2 含 12.4.1～12.4.4。iframe `:target` 为 null 属于既有跨章 TOC jump 不写 `location.hash` 的范围外行为，不作为本项断言，也不扩修；临时脚本已删除。整组收尾 Vitest 34 文件、304 测试、`tsc --noEmit` 与 `pnpm build`（95 modules）均通过；无 Rust 改动，未运行 cargo。
+- 剩余风险：同章 direct 导航没有为了高亮额外写回运行时 fragment；缺少 anchor 时按章首或同路径第一项回退。Windows WebView2 实机仍待用户确认。
+- 关联：C-36、B-026、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-044：UA 默认 margin 被错误当作作者缩进
+
+- 状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-20
+- 现象：`EPub指南——从入门到放弃` 8.6.5「搬运注释」的两个顶层 `blockquote` 只有 `font-size:.875em` inline style。Chromium UA stylesheet 产生 `margin-left/right:40px`，C-04 把它写成正文版心 base + 40px，盒子整体右移并超出预期范围。
+- 触发条件或样本：页面直接 `reader-top` 元素有非零 computed horizontal margin，但没有作者/用户的 `margin`、`margin-left/right`、`margin-inline` 或 logical start/end 声明；典型为浏览器 UA 的 blockquote 默认值。
+- 根因：C-04 只根据解除 L3 auto margin 后的 computed px 值判断，缺少 CSS 来源证据，因此 UA 默认值与作者显式缩进不可区分。
+- 约束：不能全局清零 blockquote/UA margin，不能按书、章节或标签特判；作者 inline/stylesheet/customCss margin、B-023 百分比 C-16、C-18 intrinsic 盒和 B-034/C-31 float 均须保留。
+- 选择的修复：`hasAuthoredHorizontalMargin` 先检查 comment-aware inline style，再遍历当前生效 CSSOM 的匹配规则，识别 shorthand、物理和 logical 水平 margin。调用时已临时删除 L3 `.reader-top` auto declarations，因此 reader stylesheet 中 customCss 仍可作为用户意图，内建 auto 不会假阳性；仅 non-percentage、computed margin nonzero/unknown、可能到达 C-04 的直接子触发扫描，零/auto 子元素不重复遍历全部样式表，C-16 百分比 margin 则先返回。未知 media/supports、grouping、选择器或不可读样式表返回 `undefined`，仍走旧补偿；明确 false 才在 C-31 后、C-18/C-16/C-04 前保留自然 L3 版心。
+- 为什么这样修：来源门控只排除能够证明为 UA-only 的边距，既避免本书右移，也不会把无法可靠辨别的作者布局重置为默认值；CSSOM 是当前运行时级联的合适边界，不需要书籍专用规则。
+- 未采用方案：不为 `blockquote` 写全局 margin reset；不把所有相等/40px margin 视为 UA；不扫描被移除前的 reader sheet 而吞掉 customCss；不在未知 CSSOM 条件下猜测为 UA。
+- 修改文件：`src/render/paginator.ts`、`src/render/paginator.test.ts`、`docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md`。
+- 验证：新增回归在旧实现下 4 项失败、既有 paginator 48 项通过；修复后 paginator 54/54、`tsc --noEmit` 通过。覆盖注释 inert、inline shorthand/logical、匹配/不匹配规则、活动/非活动 `@media/@supports`、未知 grouping、不可读 sheet、reader customCss、明确 false/true/unknown 的决策门、zero/auto 与 C-16 百分比不扫描边界。目标 EPUB 8.6.5 Chromium：1280×800 下两个 blockquote 都为 `width=640px`、`margin=312/312px`、inline 仍仅 font-size、无 fixed；三段 fragments 严格落于各列 `320..960`、`1608..2248`、`2896..3536` 的 40rem 版心。900×650 下均为 `width=640px`、`margin=122/122px`、无 fixed，fragments 为 `1038..1678`、`1946..2586`，后代 rect 均未越块界。相邻 B-023 赤月、B-024 玩具堂和 Sumeragi 均保持既有实书结果；临时脚本已删除。整组收尾 Vitest 34 文件、304 测试、`tsc --noEmit` 与 `pnpm build`（95 modules）均通过；无 Rust 改动，未运行 cargo。Windows WebView2 尚待人工确认。
+- 剩余风险：外链 CSS 不可读、复杂或未来 CSS grouping 条件无法证实时继续原 C-04 路径，可能仍保留个别误补偿，但不会因错误否定来源吞掉作者布局。
+- 关联：C-37、C-04、C-16、C-18、C-31、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-045：UA 对称 margin 被来源门控吞掉
+
+- 状态：代码、自动化与 WSL Chromium 回归完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-20
+- 现象：B-044 之后，`EPub指南——从入门到放弃` 8.6.5 的两个顶层 `blockquote` 不再整体右移，但恢复的 L3 auto margin 又使其保持完整 640px 正文版心，浏览器默认左右各 40px 的语义缩进消失。
+- 触发条件或样本：元素是 viewer 直接 `reader-top`，只写 `font-size:.875em`，没有作者/用户水平 margin；临时解除 L3 auto 后 computed margin 为有限、非零且近似对称的 UA px 值。
+- 根因：B-044 的 UA 来源门控直接跳过 C-04，保留了居中却丢失了 UA 对称 margin 的双侧内留白。重新进入 C-04 又会把左侧 40px 误当作单侧版心偏移，因此不能简单撤销 B-044。
+- 约束：仅 `reader-top`、`authoredHorizontalMargin === false`、非浮动/非全页、非百分比、左右 margin 有限非负非零且在容差内对称；排除 fit-content/C-31 等更高优先级路径；窄视口不得负宽/溢出；临时值必须可恢复且重排幂等；不按标签、书名或章节特判。
+- 选择的修复：新增 `getReaderTopUaSymmetricInsetMaxWidth()` 纯几何门控，在 C-31 后、C-04 前把当前 border-box 减去左右 UA inset，按 `box-sizing` 换算为临时 `max-width`，然后交还 L3 auto margin 保持居中。写回纳入既有 `marginFixes`，下轮 measure/dispose 前恢复。
+- 为什么这样修：`640px - 40px - 40px = 560px` 表达的是保留两侧留白后的有效阅读宽度，不会重演旧 C-04 的单侧右移，也不会把作者显式 margin 误认为 UA。
+- 未采用方案：不撤销 B-044；不将所有正对称 margin 放入 C-18；不全局重置 blockquote；不固定写死 40px；不干预 float、fullpage、fit-content、百分比或作者/用户 margin。
+- 修改文件：`src/render/paginator.ts`、`src/render/paginator.test.ts`、`docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、本记录、`docs/rendering-layers.md`、`docs/SOURCE_DELTA.md`。
+- 验证：新增回归在旧实现下 1 项失败；修复后 paginator 55/55，全量 Vitest 34 文件 305/305，`tsc --noEmit` 与 `pnpm build`（95 modules）通过。WSL Chromium 1280×800：两个 blockquote 均 `width/max-width=560px`、`margin=352/352px`，每个 fragment 宽 560px 且逐列居中，后代无越界；900×650：均 `width=560px`、`margin=162/162px`，无越界。B-023 赤月、B-024 玩具堂、Sumeragi 保持 1/1/无 viewer 横向溢出；B-041 3.1 图文容器、B-042 五个 opacity float、B-043 12.4.1 NAV 跳转均通过。临时脚本仅在 `/tmp`，未写入仓库。
+- 剩余风险：Windows WebView2 与发布包仍待用户人工确认；旧引擎若无法提供有限 computed width/box-sizing，门控会保守跳过。
+- 关联：C-38、C-37、C-04、C-16、C-18、C-31、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-046：顶层浮动布局单元与完整百分比组版心限宽（C-31/C-39）
+
+- 发现日期：2026-08-20；状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核。
+- 现象：金木犀目录的顶层 `float:right;margin-right:2em` 因旧 C-31 跳过作者 margin 后落入 C-04，被错误搬到页面中部；EPub 指南 3.4.4 的五个 `width:20%` float 若逐项补偿会拆行，完全放任又会横跨全 viewer。
+- 选择：第一阶段建立 float 防火墙，所有顶层 left/right float 均不再进入 C-04/C-18；安全单项投影到 40rem 版心并保留作者 margin，复杂单项只写回原始布局。第二阶段以连续直接 sibling 的完整安全百分比组为最小布局单元，成员宽度按 `min(父容器百分比宽度, 40rem 对应比例宽度)` 计算为本轮 px，首项加入版心 inset；不包 DOM，不按书名/类名特判。复杂组、方向/位置/边距不安全、fullpage/fullwidth/过宽和验收失败均保守保留作者 float。
+- 生命周期：新增独立 `floatLayoutFixes` 完整保存 width/max-width/margins、priority 与 marker，重排/dispose/异常均恢复；C-08 跳过已处理组成员，避免二次宽度写回。
+- 验证：新增 paginator 回归覆盖 5×20、2×50、3×33.333、窄容器、right 组、方向/clear/px/unknown/负或百分比 margin/fullwidth/几何失败/恢复/C-08 隔离，62/62；全量 Vitest 34 文件 312/312，`tsc --noEmit`、`pnpm build`（95 modules）通过。Chromium 实测 3.4.4：1280×800 各 128px、组 `320..960`、4 页；900×650 各 128px、组 `130..770`、5 页；字号 16→20→16 宽度 128→160→128。金木犀 1280/900 右 float 仍分别在版心右缘内 2em（右缘 928/738），均 2 页。
+- 关联：C-39、C-35、C-31、B-034、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-047：显式对称居中标题被 C-04 右移（C-40）
+
+- 发现日期：2026-08-20；状态：代码、自动化与 WSL Chromium 完成，待用户/Windows WebView2 审核。
+- 触发条件或样本：`【测试专用】[みかみてれん].将放言说不会输的高颜值女孩，全力征服的百合故事.01.epub` 的 `OEBPS/Text/toc.xhtml`，`h3.ctt` 使用 `text-align:center` 与左右各 `0.75em` 的对称作者 margin。旧 C-04 将左 margin 优先解释为单侧缩进，标题中心比目录主体向右 24px。
+- 根因：C-04 无法区分左对齐标题的真实左缩进和对称居中元素的作者 margin，导致对称居中盒再次被版心补偿。B-046/C-39 浮动修复未命中该元素；问题不是 float，也不能按 `.ctt` 或书名特判。
+- 选择的修复：新增纯门控 `shouldKeepCenteredAuthorMargins`，在 C-31/C-16/C-18/C-38 后、C-04 前执行。只有 viewer 直接 `reader-top`、`float:none`、`horizontal-tb`、computed `text-align:center`、作者水平 margin 来源明确、左右有限正值且 0.5px 内对称、无 percentage/negative/zero/unknown margin、无作者 width/min-width/max-width sizing intent、非 fit/fullpage 时，保留 L3 自然 auto margin 并跳过 C-04。
+- 来源与回退：`hasAuthoredSizingIntent` 读取 comment-aware inline/HTML sizing 属性和可读作者 CSSOM；reader 内建 `max-width:40rem` 不算作者 intent。固定/最小/最大宽度、不可读/unknown CSSOM、reader custom CSS、非对称布局均保守走旧路径；keyframes CSSRule 不作为静态 selector sizing source。B-024 的 `text-align:left; margin:1.3em 0.75em...` 继续保留 24px 左缩进。
+- 为什么这样修：门控只释放能够证明是普通对称居中作者 margin 的 auto-like 盒，避免重演 C-04 单侧右移；固定 sizing 和不确定来源继续旧路径，优先保护作者明确布局。
+- 修改文件：`src/render/paginator.ts`、`src/render/paginator.test.ts`、`docs/tasks/active/epub-guide-compatibility.md`、`docs/tasks/active/README.md`、`docs/rendering-layers.md`、`docs/MODULE_CONTRACTS.md`、`docs/SOURCE_DELTA.md`。
+- 验证：新增回归在旧实现下失败；修复后 paginator 定向 64/64，全量 Vitest 34 文件 314/314，`tsc --noEmit` 与 `pnpm build`（95 modules）通过。目标目录 Chromium 1280×800 标题/目录主体中心均 640px，900×650 均 450px；字号 16→20→16 无累计偏移且 h3 无 C-04 marker。B-024 1280/900 仍为 `left=344/154px`、`text-align:left`、marker=1；B-045 blockquote 仍为 560px 对称盒；B-023 百分比 margin、B-046 opacity float、金木犀 right float、C-18 summary 均回归通过。
+- 剩余风险：Windows WebView2 与发布包仍待实机确认；不可读 CSSOM 或无法证明作者 sizing intent 时保守保留旧补偿。
+- 关联：C-40、C-24、C-18、C-16、C-04、C-31、C-38、C-39、`docs/tasks/active/epub-guide-compatibility.md`。
+
+## B-048：桌面链接导入遗漏 `cover.webp` 文件名 fallback（C-41）
+
+- 发现日期：2026-08-20；状态：代码与自动化完成，待 Windows 发布包确认。
+- 现象：manifest 中存在 `<item id="image001" href="Images/cover.webp" media-type="image/webp">`，浏览器开发预览可显示封面，但 Windows 发布版导入后没有封面。
+- 根因：这不是 WebView2/WebP 解码问题。浏览器预览由 TypeScript `loadBook()` 解析 EPUB，原先会按资源文件名 `cover.*` 回退；桌面发布版为了不把大 EPUB 复制到 WebView，批量导入改由 Rust `linked_library_import_paths` 直接解析 OPF。Rust 只以 manifest `id.contains("cover")` 兜底，既漏掉 `id=image001`，又可能错误选中 `cover.css` 或 `cover.xhtml`。
+- 约束：保持链接书库的大文件/低内存架构；不解析 EPUB2 guide XHTML、不扫描 ZIP 全体文件、不解压或解码封面候选、不增加哈希/启动时旧书库扫描；不迁移旧绑定。重复导入继续只刷新设备 binding，保留同 `contentHash` 的进度、书签与首次添加时间。
+- 选择的修复：Rust 与 TypeScript 统一候选契约：按 OPF manifest 源顺序，依次检查 EPUB3 `properties="cover-image"`、EPUB2 `meta name="cover"` 指向的 item、以及 URL 解码并去除 query/fragment 后 basename stem 大小写无关精确为 `cover` 的 item。候选必须实际存在且是 `image/*`，或从 jpg/jpeg/png/webp/avif/gif/svg 扩展名可靠推断为图片；上层候选无效时继续下一层。Rust 用已打开 `ZipArchive::by_name` 查询中央目录，绝不读取候选内容。
+- 为什么这样修：保持标准声明优先，同时修复非标准但常见的 `cover.webp`；有序 manifest 让多个候选的选择稳定，精确文件名避免旧 ID 模糊匹配的 CSS/XHTML 误判。
+- 未采用方案：不让发布版回退到 TypeScript 全书读取（会重新引入大文件 IPC/内存成本）；不解析 guide 引用的封面页（需要额外解压和 XHTML DOM 分析）；不按 ZIP 全文件名扫描；不支持自定义 CSS `@font-face` 相对路径。
+- 修改文件：`src-tauri/src/linked_library.rs`、`src/core/book.ts`、`src/test/weirdBooks.test.ts`、`docs/tasks/active/cover-fallback-contract.md`、本记录及交接文档。
+- 验证：修改前 TypeScript 回归错误返回缺失的 `OEBPS/missing.jpg`；修复后合成 EPUB 回归通过，覆盖 URL 编码 `Cover%2EWEBP?cache=1#preview`、无效 EPUB3 声明、EPUB2 指向 CSS、错误 MIME 的扩展名推断和 `id=image001`。完整前端/Rust验证见任务文件。
+- 剩余风险：尚未用 Windows 发布包导入真实 `cover.webp` 样本；已存在旧 binding 不做启动迁移，测试版可重新导入以刷新 binding。若声明为浏览器无法解码的未知 `image/*`，缩略图派生仍会按既有失败路径显示无封面。
+- 关联：C-41、B-031、`docs/tasks/active/cover-fallback-contract.md`。
+
+## B-049：设置数值步进到达边界后环绕默认值
+
+- 状态：代码、自动化与 WSL Chromium UI 验证完成，待用户/Windows WebView2 审核
+- 发现日期：2026-08-21
+- 现象：详细设置的行高、字重、字间距和字符间距连续点击 +/- 到达最小/最大值后，再点击会回到 `undefined` 自动档；边界点击还会创建新 settings 对象并触发无效阅读器重载。
+- 根因：App 原 `stepValue` 把 `undefined` 自动档放进环形数组并使用模运算；同时 setter 不区分真实变化与 clamp 后的原值。MenuPanel 对 `undefined` 的可见值分别是行高 1.6、字重 400、间距 0，不能把存储 sentinel 直接当作数值序列的首档。
+- 约束：纯数值档位必须按可见默认值相邻步进；边界同方向点击保持原 settings identity，不触发持久化/ReaderView reload；有效设置变化继续使用现有 150ms debounce；direct slider change 继续 clamp；不涉及 WebView2 字形生产修复、分页算法或 Rust。
+- 选择的修复：新增 `stepSettingValue(values, current, direction, visibleDefault)`，只接收升序数值档位；从 `undefined` 以 `visibleDefault` 作为当前位置，方向减取最近较小、方向加取最近较大，超界 clamp；若自动档候选仍等于可见默认值则保留 `undefined`。App 将四组档位改为 `[1.4..2.2]`、`[300..700]`、`[0,2..8]`、`[0,4..16]`，边界 updater 返回原对象；字号与 direct slider setter 同步避免边界无效 identity 并 clamp。
+- 修改文件：`src/ui/settingsStepper.ts`、`src/ui/settingsStepper.test.ts`、`src/App.tsx`、`docs/tasks/active/settings-stepper-bounds.md`、`docs/tasks/active/README.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/SOURCE_DELTA.md`。
+- 验证：新增回归在旧 helper 下 3 项失败；修复后步进定向 4/4，设置相关组合 7/7；全量 Vitest 35 文件、319/319 通过；`tsc --noEmit` 与 `pnpm build`（96 modules）通过。浏览器插件因 `sandboxCwd` 元数据错误不可用后，复用 WSL Playwright/Chromium 做真实点击：行高 1.6→1.8 触发 iframe load `0→1`，2.2 额外 `+` 保持值/load=3，1.4 额外 `-` 保持值/load=7；字间距 0 额外 `-` 保持值/load=7，0→2 触发 load `7→8`。Vite/Chromium 已停止，5173/5174 均未监听。
+- 剩余风险：Windows WebView2 仍需用户确认设置重排及既有字形空心化问题；B-049 不改变其生产 CSS 规避策略。
+- 关联：`docs/tasks/active/settings-stepper-bounds.md`、MODULE_CONTRACTS 设置 identity/reload 契约、B-040。

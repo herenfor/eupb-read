@@ -1,5 +1,5 @@
-import type { XmlNodeLike } from "./xml";
-import { childElements, findElements } from "./xml";
+import type { XmlElementLike, XmlNodeLike } from "./xml";
+import { childElements, findElements, isElement, localNameOf } from "./xml";
 import type { TocNode } from "./types";
 
 /** epub:type 命名空间（EPUB 3）。 */
@@ -19,11 +19,77 @@ function firstText(el: XmlNodeLike): string {
   return (el.textContent ?? "").trim();
 }
 
-/** 解析单个 li：在子树中找第一个有文字的 <a> 与嵌套列表（容忍 div 包裹）。 */
+function isListElement(node: XmlNodeLike): boolean {
+  const name = localNameOf(node).toLowerCase();
+  return name === "ol" || name === "ul";
+}
+
+/**
+ * 找当前容器下最近一层列表。遇到列表后不再向其内部搜索，遇到嵌套
+ * li 也不穿透，这样父 li 不会把孙 li 的列表误认为自己的列表。
+ */
+function nearestChildLists(container: XmlNodeLike, stopAtLi = false): XmlElementLike[] {
+  const found: Array<{ depth: number; element: XmlElementLike }> = [];
+  const walk = (node: XmlNodeLike, depth: number): void => {
+    for (const child of childElements(node)) {
+      const name = localNameOf(child).toLowerCase();
+      if (isListElement(child)) {
+        found.push({ depth, element: child });
+        continue;
+      }
+      // container 本身不会出现在 childElements(container) 中；因此遇到
+      // 任意后代 li 都是嵌套项边界，不能用 isRoot 放行当前 li 的直接子项。
+      if (stopAtLi && name === "li") continue;
+      walk(child, depth + 1);
+    }
+  };
+  walk(container, 0);
+  if (found.length === 0) return [];
+  const minDepth = Math.min(...found.map((entry) => entry.depth));
+  return found.filter((entry) => entry.depth === minDepth).map((entry) => entry.element);
+}
+
+/** 读取 li 自身内容，跳过子列表和嵌套 li 的文字。 */
+function ownText(node: XmlNodeLike): string {
+  let text = "";
+  const kids = node.childNodes;
+  if (!kids) return firstText(node);
+  for (let i = 0; i < kids.length; i++) {
+    const child = kids[i];
+    if (isElement(child)) {
+      const name = localNameOf(child).toLowerCase();
+      if (isListElement(child) || name === "li") continue;
+      text += ownText(child);
+    } else {
+      text += child.textContent ?? "";
+    }
+  }
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** 找 li 自身的链接，搜索到子列表/嵌套 li 时停止。 */
+function ownLinks(li: XmlNodeLike): XmlElementLike[] {
+  const out: XmlElementLike[] = [];
+  const walk = (node: XmlNodeLike): void => {
+    for (const child of childElements(node)) {
+      const name = localNameOf(child).toLowerCase();
+      if (isListElement(child) || name === "li") continue;
+      if (name === "a") {
+        out.push(child);
+        continue;
+      }
+      walk(child);
+    }
+  };
+  walk(li);
+  return out;
+}
+
+/** 解析单个 li：容忍 div 包裹，并保持多个最近子列表的文档顺序。 */
 function parseLi(li: XmlNodeLike): TocNode {
   let label = "";
   let href = "";
-  const as = findElements(li, "a");
+  const as = ownLinks(li);
   for (const a of as) {
     const t = firstText(a);
     if (t) {
@@ -32,13 +98,12 @@ function parseLi(li: XmlNodeLike): TocNode {
       break;
     }
   }
-  if (!label) label = firstText(li);
-  const lists = [...findElements(li, "ol"), ...findElements(li, "ul")];
-  const childList = lists[0]; // findElements 按文档序，第一个即最浅层列表
+  if (!label) label = ownText(li);
+  const lists = nearestChildLists(li, true);
   const node: TocNode = {
     label,
     href,
-    children: childList ? parseList(childList) : [],
+    children: lists.flatMap((list) => parseList(list)),
   };
   if (!node.label && node.href) node.label = node.href;
   return node;
@@ -49,9 +114,28 @@ function parseList(listEl: XmlNodeLike): TocNode[] {
   for (const li of childElements(listEl)) {
     if (!li.tagName.toLowerCase().endsWith("li")) continue;
     const node = parseLi(li);
-    if (node.label) out.push(node);
+    // 即使父项没有自己的文字/链接，也保留它的子树，供 UI 以无效项
+    // 置灰展示；不能因为父项缺少 href 就吞掉有效的深层目录。
+    if (node.label || node.children.length > 0) out.push(node);
   }
   return out;
+}
+
+function epubTypeValue(nav: XmlElementLike): string {
+  const namespaced = (nav as XmlElementLike & {
+    getAttributeNS?: (namespace: string, localName: string) => string | null;
+  }).getAttributeNS;
+  const namespacedValue = namespaced?.call(nav, OPS_NS, "type");
+  if (namespacedValue) return namespacedValue;
+  const prefixed = nav.getAttribute("epub:type");
+  if (prefixed) return prefixed;
+  for (let i = 0; i < (nav.attributes?.length ?? 0); i++) {
+    const attr = nav.attributes?.[i];
+    if (!attr) continue;
+    const name = attr.name.toLowerCase();
+    if (name === "type" || name.endsWith(":type")) return attr.value;
+  }
+  return nav.getAttribute("type") ?? "";
 }
 
 /**
@@ -102,18 +186,15 @@ export function parseNav(root: XmlNodeLike): TocNode[] {
   const navs = findElements(root, "nav");
   const tocNav =
     navs.find((nav) => {
-      const types = (nav.getAttribute("epub:type") ?? "").split(/\s+/);
+      const types = epubTypeValue(nav).split(/\s+/);
       return types.includes("toc");
     }) ?? navs[0];
   if (!tocNav) return [];
 
   // 标准路径：最近一层 ol/ul
-  const list = childElements(tocNav).find((c) => {
-    const t = c.tagName.toLowerCase();
-    return t.endsWith("ol") || t.endsWith("ul");
-  });
-  if (list) {
-    const nodes = parseList(list);
+  const lists = nearestChildLists(tocNav);
+  if (lists.length > 0) {
+    const nodes = lists.flatMap((list) => parseList(list));
     if (nodes.length > 0) return nodes;
   }
   // 前端式兜底

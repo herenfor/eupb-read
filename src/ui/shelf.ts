@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { sanitizePersistedTextAnchor } from "../render/textAnchor";
 import type { LibraryRecord } from "./libraryArchive";
 import type { ThumbnailAsset, ThumbnailProvider } from "./thumbnail";
 
@@ -9,6 +10,9 @@ export interface Bookmark {
   page: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  /** Optional on old records; all new writes use null when unavailable. */
+  anchorTextOffset?: number | null;
+  anchorTextSnippet?: string | null;
   /** 创建时锚点所在行文字，用于列表展示 */
   text: string;
   createdAtMs: number;
@@ -29,6 +33,8 @@ export interface ShelfEntry {
   progressPct: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  anchorTextOffset?: number | null;
+  anchorTextSnippet?: string | null;
   /** EPUB 原始字节的 SHA-256；0.1.5 旧条目允许缺失并在判重时懒补。 */
   contentHash?: string;
   /** 新导入且尚未打开过：书架显示“新”标记，第一次打开后清除 */
@@ -60,12 +66,14 @@ export interface ShelfProgressPatch {
   progressPct: number;
   anchorIndex: number | null;
   anchorRatio: number | null;
+  anchorTextOffset: number | null;
+  anchorTextSnippet: string | null;
 }
 
 export interface ShelfSaveInput {
   entry: Omit<
     ShelfEntry,
-    "progressPct" | "lastReadAtMs" | "spineIndex" | "page" | "anchorIndex" | "anchorRatio" | "isNew"
+    "progressPct" | "lastReadAtMs" | "spineIndex" | "page" | "anchorIndex" | "anchorRatio" | "anchorTextOffset" | "anchorTextSnippet" | "isNew"
   > & {
     progressPct?: number;
     lastReadAtMs?: number;
@@ -73,6 +81,8 @@ export interface ShelfSaveInput {
     page?: number;
     anchorIndex?: number | null;
     anchorRatio?: number | null;
+    anchorTextOffset?: number | null;
+    anchorTextSnippet?: string | null;
     isNew?: boolean;
   };
   bytes: Uint8Array;
@@ -156,6 +166,59 @@ export function applyShelfProgressPatch(
   return entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
 }
 
+/** Normalize legacy IndexedDB rows at the storage boundary; new writes use null. */
+function normalizeBookmarkTextAnchor(bookmark: Bookmark): Bookmark {
+  const text = sanitizePersistedTextAnchor({
+    textOffset: bookmark.anchorTextOffset,
+    textSnippet: bookmark.anchorTextSnippet,
+  });
+  return { ...bookmark, anchorTextOffset: text.textOffset, anchorTextSnippet: text.textSnippet };
+}
+
+export function normalizeShelfEntryTextAnchors(entry: ShelfEntry): ShelfEntry {
+  const text = sanitizePersistedTextAnchor({
+    textOffset: entry.anchorTextOffset,
+    textSnippet: entry.anchorTextSnippet,
+  });
+  return {
+    ...entry,
+    anchorTextOffset: text.textOffset,
+    anchorTextSnippet: text.textSnippet,
+    bookmarks: entry.bookmarks?.map(normalizeBookmarkTextAnchor),
+  };
+}
+
+/** Convert persisted shelf fields to a renderer restore anchor. Never persist -1. */
+export function readingAnchorFromShelfEntry(entry: Pick<
+  ShelfEntry,
+  "anchorIndex" | "anchorRatio" | "anchorTextOffset" | "anchorTextSnippet"
+>): {
+  index: number;
+  ratio: number;
+  anchorTextOffset: number | null;
+  anchorTextSnippet: string | null;
+} | null {
+  const text = sanitizePersistedTextAnchor({
+    textOffset: entry.anchorTextOffset,
+    textSnippet: entry.anchorTextSnippet,
+  });
+  const legacy =
+    typeof entry.anchorIndex === "number" &&
+    Number.isSafeInteger(entry.anchorIndex) &&
+    entry.anchorIndex >= 0 &&
+    typeof entry.anchorRatio === "number" &&
+    Number.isFinite(entry.anchorRatio) &&
+    entry.anchorRatio >= 0 &&
+    entry.anchorRatio <= 1;
+  if (!legacy && text.textOffset === null) return null;
+  return {
+    index: legacy ? entry.anchorIndex! : -1,
+    ratio: legacy ? entry.anchorRatio! : 0,
+    anchorTextOffset: text.textOffset,
+    anchorTextSnippet: text.textSnippet,
+  };
+}
+
 /** 只清除新书标记；异步 markOpened 的旧返回值不能覆盖更新后的进度。 */
 export function markShelfEntryOpened(entries: ShelfEntry[], id: string): ShelfEntry[] {
   return entries.map((entry) => (entry.id === id ? { ...entry, isNew: false } : entry));
@@ -223,7 +286,9 @@ class IndexedDbShelfStore implements ShelfStore {
       const all = await reqAsPromise(
         db.transaction("meta", "readonly").objectStore("meta").getAll()
       );
-      return (all as ShelfEntry[]).filter((e) => e && typeof e.id === "string");
+      return (all as ShelfEntry[])
+        .filter((e) => e && typeof e.id === "string")
+        .map(normalizeShelfEntryTextAnchors);
     } finally {
       db.close();
     }
@@ -264,9 +329,11 @@ class IndexedDbShelfStore implements ShelfStore {
         progressPct: existing?.progressPct ?? input.entry.progressPct ?? 0,
         anchorIndex: existing?.anchorIndex ?? input.entry.anchorIndex ?? null,
         anchorRatio: existing?.anchorRatio ?? input.entry.anchorRatio ?? null,
+        anchorTextOffset: existing?.anchorTextOffset ?? input.entry.anchorTextOffset ?? null,
+        anchorTextSnippet: existing?.anchorTextSnippet ?? input.entry.anchorTextSnippet ?? null,
         contentHash,
         isNew: existing?.isNew ?? input.entry.isNew ?? true,
-        bookmarks: existing?.bookmarks ?? input.entry.bookmarks ?? [],
+        bookmarks: (existing?.bookmarks ?? input.entry.bookmarks ?? []).map(normalizeBookmarkTextAnchor),
         available: true,
       };
       const tx = db.transaction(["meta", "books", "covers"], "readwrite");
@@ -489,6 +556,8 @@ class TauriShelfStore implements ShelfStore {
       progressPct: patch.progressPct,
       anchorIndex: patch.anchorIndex,
       anchorRatio: patch.anchorRatio,
+      anchorTextOffset: patch.anchorTextOffset,
+      anchorTextSnippet: patch.anchorTextSnippet,
     });
   }
 

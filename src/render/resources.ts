@@ -6,8 +6,19 @@ import type { Book } from "../core/types";
  */
 export class ResourceServer {
   private urls = new Map<string, string>();
+  private textCache = new Map<string, { text: string; bytes: number }>();
+  private textCacheBytes = 0;
+  private textCacheHits = 0;
+  private textCacheMisses = 0;
 
-  constructor(private book: Book) {}
+  constructor(
+    private book: Book,
+    private textOptions: {
+      textCacheMaxBytes?: number;
+      textCacheMaxEntries?: number;
+      decoder?: (data: Uint8Array) => string;
+    } = {}
+  ) {}
 
   /** 返回内部路径对应的 blob URL；资源缺失返回 undefined。 */
   urlFor(path: string): string | undefined {
@@ -26,12 +37,50 @@ export class ResourceServer {
   textFor(path: string): string | undefined {
     const res = this.book.resources.get(path);
     if (!res) return undefined;
-    return decodeBytes(res.data);
+    const cached = this.textCache.get(path);
+    if (cached) {
+      this.textCacheHits++;
+      this.textCache.delete(path);
+      this.textCache.set(path, cached);
+      return cached.text;
+    }
+    this.textCacheMisses++;
+    const text = (this.textOptions.decoder ?? decodeBytes)(res.data);
+    const bytes = text.length * 2;
+    const maxBytes = this.textOptions.textCacheMaxBytes ?? 4 * 1024 * 1024;
+    const maxEntries = this.textOptions.textCacheMaxEntries ?? 32;
+    if (bytes <= maxBytes && maxBytes > 0 && maxEntries > 0) {
+      while (
+        this.textCache.size >= maxEntries ||
+        this.textCacheBytes + bytes > maxBytes
+      ) {
+        const oldest = this.textCache.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        const removed = this.textCache.get(oldest);
+        this.textCache.delete(oldest);
+        this.textCacheBytes -= removed?.bytes ?? 0;
+      }
+      this.textCache.set(path, { text, bytes });
+      this.textCacheBytes += bytes;
+    }
+    return text;
+  }
+
+  get textCacheStats(): Readonly<{ hits: number; misses: number; entries: number; bytes: number }> {
+    return Object.freeze({
+      hits: this.textCacheHits,
+      misses: this.textCacheMisses,
+      entries: this.textCache.size,
+      bytes: this.textCacheBytes,
+    });
   }
 
   revokeAll(): void {
     for (const u of this.urls.values()) URL.revokeObjectURL(u);
     this.urls.clear();
+    this.textCache.clear();
+    this.textCacheBytes = 0;
+    // Hit/miss counters are diagnostic lifetime totals; only entries/bytes reset.
   }
 }
 

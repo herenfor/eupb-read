@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { buildEpub } from "./fixtures";
-import { loadBook, spineIndexForPath, spineItemPath, DrmError } from "../core/book";
+import { loadBook, resolveTocHrefs, spineIndexForPath, spineItemPath, DrmError } from "../core/book";
 
 const CH1 = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>1</title></head><body><h1>第一章</h1><p>正文内容。</p></body></html>`;
 const CH2 = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>2</title></head><body><h1>第二章</h1><p>更多内容。</p></body></html>`;
+
+describe("resolveTocHrefs: nav/NCX href", () => {
+  const node = (href: string) => ({ label: href || "空", href, children: [] });
+  const resolve = (href: string, basePath = "OEBPS/nav.xhtml", spine = ["OEBPS/nav.xhtml"]) =>
+    resolveTocHrefs([node(href)], basePath, [], "nav", (target) =>
+      spine.includes(target.split("#", 1)[0])
+    )[0];
+
+  it("仅在 nav 文档属于 spine 时解析 # 与 #id", () => {
+    expect(resolve("#").href).toBe("OEBPS/nav.xhtml");
+    expect(resolve("#part-1").href).toBe("OEBPS/nav.xhtml#part-1");
+    expect(resolve("#part-1", "OEBPS/nav.xhtml", ["OEBPS/ch1.xhtml"]).disabled).toBe(true);
+  });
+
+  it("外部、空 href 和没有上下文的 fragment 仍保持禁用", () => {
+    expect(resolve("https://example.com").disabled).toBe(true);
+    expect(resolve("").disabled).toBe(true);
+    expect(resolve("#id", "OEBPS/nav.xhtml", []).disabled).toBe(true);
+  });
+});
 
 describe("loadBook: EPUB 2", () => {
   it("解析 metadata / manifest / spine / NCX 目录", async () => {

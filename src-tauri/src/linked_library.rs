@@ -27,6 +27,8 @@ const MAX_THUMBNAIL_BYTES: usize = 5 * 1024 * 1024;
 const MAX_XML_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COVER_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_ACCESS_WRITE_INTERVAL_MS: u64 = 60 * 60 * 1000;
+const MAX_ANCHOR_SNIPPET_CODE_POINTS: usize = 32;
+const MAX_ANCHOR_TEXT_OFFSET: u64 = 9_007_199_254_740_991;
 static TEMP_FILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
@@ -47,6 +49,10 @@ pub struct LinkedLibraryRecord {
     pub anchor_index: Option<usize>,
     pub anchor_ratio: Option<f64>,
     #[serde(default)]
+    pub anchor_text_offset: Option<u64>,
+    #[serde(default)]
+    pub anchor_text_snippet: Option<String>,
+    #[serde(default)]
     pub bookmarks: Vec<LinkedLibraryBookmark>,
     pub is_new: bool,
 }
@@ -59,6 +65,10 @@ pub struct LinkedLibraryBookmark {
     pub page: usize,
     pub anchor_index: Option<usize>,
     pub anchor_ratio: Option<f64>,
+    #[serde(default)]
+    pub anchor_text_offset: Option<u64>,
+    #[serde(default)]
+    pub anchor_text_snippet: Option<String>,
     pub text: String,
     pub created_at_ms: u64,
 }
@@ -90,6 +100,8 @@ pub struct LinkedLibraryRecordView {
     progress_pct: u32,
     anchor_index: Option<usize>,
     anchor_ratio: Option<f64>,
+    anchor_text_offset: Option<u64>,
+    anchor_text_snippet: Option<String>,
     bookmarks: Vec<LinkedLibraryBookmark>,
     is_new: bool,
     available: bool,
@@ -150,6 +162,26 @@ struct ImportedMetadata {
     cover_mime: String,
 }
 
+/// OPF 中保持源顺序的 manifest。封面 fallback 必须按此顺序取首个有效候选，
+/// 不能依赖 HashMap 的随机迭代顺序。
+#[derive(Debug, Clone)]
+struct OpfManifestItem {
+    id: String,
+    href: String,
+    media_type: String,
+    properties: String,
+}
+
+#[derive(Debug)]
+struct ParsedOpfMetadata {
+    title: String,
+    creator: String,
+    spine: Vec<String>,
+    manifest: Vec<OpfManifestItem>,
+    epub2_cover_id: Option<String>,
+    base: String,
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -168,6 +200,24 @@ fn valid_optional_ratio(ratio: Option<f64>) -> bool {
     ratio
         .map(|value| value.is_finite() && (0.0..=1.0).contains(&value))
         .unwrap_or(true)
+}
+
+fn valid_optional_anchor_text(offset: Option<u64>, snippet: &Option<String>) -> bool {
+    if offset
+        .map(|value| value > MAX_ANCHOR_TEXT_OFFSET)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    match (offset, snippet) {
+        (None, Some(_)) => false,
+        (_, None) => true,
+        (_, Some(value)) => {
+            !value.is_empty()
+                && value.chars().count() <= MAX_ANCHOR_SNIPPET_CODE_POINTS
+                && !value.chars().any(char::is_whitespace)
+        }
+    }
 }
 
 fn portable_file_name(name: &str) -> bool {
@@ -376,6 +426,7 @@ fn zip_path_from_relative(base: &str, href: &str) -> Option<String> {
         .split('?')
         .next()
         .unwrap_or("");
+    let href = percent_decode_path(href);
     if href.is_empty() || href.contains('\\') || href.starts_with('/') {
         return None;
     }
@@ -396,6 +447,28 @@ fn zip_path_from_relative(base: &str, href: &str) -> Option<String> {
     } else {
         Some(parts.join("/"))
     }
+}
+
+/// EPUB 内部 URI 使用 UTF-8 百分号编码。错误的转义保留原字节，和前端
+/// `decodeURIComponent` 失败时保留原值的容错策略一致。
+fn percent_decode_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = (bytes[index + 1] as char).to_digit(16);
+            let lo = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                decoded.push((hi * 16 + lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
 fn xml_name(name: &[u8]) -> &str {
@@ -442,7 +515,7 @@ fn parse_container(xml: &[u8]) -> Result<String, String> {
     }
 }
 
-fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ImportedMetadata, String> {
+fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ParsedOpfMetadata, String> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
@@ -453,7 +526,8 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ImportedMetadata, String> {
     let mut title = String::new();
     let mut creator = String::new();
     let mut capture: Option<&str> = None;
-    let mut manifest: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut manifest = Vec::new();
+    let mut manifest_indexes = HashMap::new();
     let mut spine_ids = Vec::new();
     let mut epub2_cover_id: Option<String> = None;
     loop {
@@ -474,7 +548,14 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ImportedMetadata, String> {
                         let media = xml_attr(&reader, &event, "media-type").unwrap_or_default();
                         let properties =
                             xml_attr(&reader, &event, "properties").unwrap_or_default();
-                        manifest.insert(id, (href, media, properties));
+                        let index = manifest.len();
+                        manifest.push(OpfManifestItem {
+                            id: id.clone(),
+                            href,
+                            media_type: media,
+                            properties,
+                        });
+                        manifest_indexes.insert(id, index);
                     }
                 } else if name == "itemref" {
                     if let Some(idref) = xml_attr(&reader, &event, "idref") {
@@ -499,7 +580,14 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ImportedMetadata, String> {
                         let media = xml_attr(&reader, &event, "media-type").unwrap_or_default();
                         let properties =
                             xml_attr(&reader, &event, "properties").unwrap_or_default();
-                        manifest.insert(id, (href, media, properties));
+                        let index = manifest.len();
+                        manifest.push(OpfManifestItem {
+                            id: id.clone(),
+                            href,
+                            media_type: media,
+                            properties,
+                        });
+                        manifest_indexes.insert(id, index);
                     }
                 } else if name == "itemref" {
                     if let Some(idref) = xml_attr(&reader, &event, "idref") {
@@ -534,34 +622,122 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ImportedMetadata, String> {
     }
     let spine = spine_ids
         .into_iter()
-        .filter_map(|id| manifest.get(&id))
-        .filter_map(|(href, _, _)| zip_path_from_relative(base, href))
-        .collect();
-    let cover = manifest
-        .iter()
-        .find(|(_, (_, _, properties))| {
-            properties
-                .split_ascii_whitespace()
-                .any(|property| property == "cover-image")
+        .filter_map(|id| {
+            manifest_indexes
+                .get(&id)
+                .and_then(|index| manifest.get(*index))
         })
-        .map(|(_, value)| value)
-        .or_else(|| epub2_cover_id.as_ref().and_then(|id| manifest.get(id)))
-        .or_else(|| {
-            manifest
-                .iter()
-                .find(|(id, _)| id.to_ascii_lowercase().contains("cover"))
-                .map(|(_, value)| value)
-        });
-    let (cover_zip_path, cover_mime) = cover
-        .map(|(href, mime, _)| (zip_path_from_relative(base, href), mime.clone()))
-        .unwrap_or((None, String::new()));
-    Ok(ImportedMetadata {
+        .filter_map(|item| zip_path_from_relative(base, &item.href))
+        .collect();
+    Ok(ParsedOpfMetadata {
         title,
         creator,
         spine,
-        cover_zip_path,
-        cover_mime,
+        manifest,
+        epub2_cover_id,
+        base: base.to_string(),
     })
+}
+
+fn inferred_cover_mime(path: &str) -> Option<&'static str> {
+    let extension = path.rsplit_once('.')?.1;
+    if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+        Some("image/jpeg")
+    } else if extension.eq_ignore_ascii_case("png") {
+        Some("image/png")
+    } else if extension.eq_ignore_ascii_case("webp") {
+        Some("image/webp")
+    } else if extension.eq_ignore_ascii_case("avif") {
+        Some("image/avif")
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some("image/gif")
+    } else if extension.eq_ignore_ascii_case("svg") {
+        Some("image/svg+xml")
+    } else {
+        None
+    }
+}
+
+fn cover_mime(item: &OpfManifestItem, zip_path: &str) -> Option<String> {
+    let declared = item.media_type.trim();
+    if declared
+        .get(..6)
+        .map(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        .unwrap_or(false)
+    {
+        return Some(declared.to_ascii_lowercase());
+    }
+    inferred_cover_mime(zip_path).map(str::to_string)
+}
+
+fn is_cover_filename(path: &str) -> bool {
+    let Some(file_name) = path.rsplit('/').next() else {
+        return false;
+    };
+    let Some((stem, _)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    stem.eq_ignore_ascii_case("cover")
+}
+
+/// 产生封面候选的优先级：EPUB3 → EPUB2 → 精确的 `cover.*` 文件名。
+/// `exists` 只查询 ZIP 中央目录，不读取、解压或解码图片。
+fn select_cover<F>(parsed: &ParsedOpfMetadata, mut exists: F) -> (Option<String>, String)
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut candidate_indexes = Vec::new();
+    candidate_indexes.extend(
+        parsed
+            .manifest
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.properties
+                    .split_ascii_whitespace()
+                    .any(|property| property == "cover-image")
+            })
+            .map(|(index, _)| index),
+    );
+    if let Some(cover_id) = &parsed.epub2_cover_id {
+        candidate_indexes.extend(
+            parsed
+                .manifest
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.id == *cover_id)
+                .map(|(index, _)| index),
+        );
+    }
+    candidate_indexes.extend(
+        parsed
+            .manifest
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                zip_path_from_relative(&parsed.base, &item.href)
+                    .as_deref()
+                    .map(is_cover_filename)
+                    .unwrap_or(false)
+            })
+            .map(|(index, _)| index),
+    );
+
+    for index in candidate_indexes {
+        let Some(item) = parsed.manifest.get(index) else {
+            continue;
+        };
+        let Some(path) = zip_path_from_relative(&parsed.base, &item.href) else {
+            continue;
+        };
+        let Some(mime) = cover_mime(item, &path) else {
+            continue;
+        };
+        if exists(&path) {
+            return (Some(path), mime);
+        }
+    }
+    (None, String::new())
 }
 
 fn read_zip_entry_bounded<R: Read>(
@@ -599,7 +775,17 @@ fn inspect_epub(path: &Path) -> Result<ImportedMetadata, String> {
         .by_name(&opf_path)
         .map_err(|_| "EPUB container.xml 指向的 OPF 不存在".to_string())?;
     let opf = read_zip_entry_bounded(&mut opf_entry, MAX_XML_BYTES, "OPF")?;
-    parse_opf(&opf, &opf_path)
+    drop(opf_entry);
+    let parsed = parse_opf(&opf, &opf_path)?;
+    let (cover_zip_path, cover_mime) =
+        select_cover(&parsed, |candidate| archive.by_name(candidate).is_ok());
+    Ok(ImportedMetadata {
+        title: parsed.title,
+        creator: parsed.creator,
+        spine: parsed.spine,
+        cover_zip_path,
+        cover_mime,
+    })
 }
 
 fn binding_view(
@@ -630,6 +816,8 @@ fn binding_view(
         progress_pct: record.progress_pct,
         anchor_index: record.anchor_index,
         anchor_ratio: record.anchor_ratio,
+        anchor_text_offset: record.anchor_text_offset,
+        anchor_text_snippet: record.anchor_text_snippet,
         bookmarks: record.bookmarks,
         is_new: record.is_new,
         available,
@@ -942,6 +1130,8 @@ pub fn linked_library_import_paths(
                         progress_pct: 0,
                         anchor_index: None,
                         anchor_ratio: None,
+                        anchor_text_offset: None,
+                        anchor_text_snippet: None,
                         bookmarks: Vec::new(),
                         is_new: true,
                     };
@@ -1130,12 +1320,17 @@ pub fn linked_library_update_progress(
     progress_pct: u32,
     anchor_index: Option<usize>,
     anchor_ratio: Option<f64>,
+    anchor_text_offset: Option<u64>,
+    anchor_text_snippet: Option<String>,
 ) -> Result<LinkedLibraryRecordView, String> {
     if !valid_content_hash(&content_hash) {
         return Err("无效的书籍内容指纹".into());
     }
     if !valid_optional_ratio(anchor_ratio) {
         return Err("阅读锚点比例必须在 0 到 1 之间".into());
+    }
+    if !valid_optional_anchor_text(anchor_text_offset, &anchor_text_snippet) {
+        return Err("阅读文本锚点无效".into());
     }
     let _guard = state
         .0
@@ -1152,6 +1347,8 @@ pub fn linked_library_update_progress(
     record.progress_pct = progress_pct.min(100);
     record.anchor_index = anchor_index;
     record.anchor_ratio = anchor_ratio;
+    record.anchor_text_offset = anchor_text_offset;
+    record.anchor_text_snippet = anchor_text_snippet;
     save_records(&app, &records)?;
     let bindings = load_bindings(&app)?;
     let thumbnails = load_thumbnail_index(&app)?;
@@ -1195,11 +1392,14 @@ pub fn linked_library_update_bookmarks(
     if !valid_content_hash(&content_hash) {
         return Err("无效的书籍内容指纹".into());
     }
-    if bookmarks
-        .iter()
-        .any(|bookmark| !valid_optional_ratio(bookmark.anchor_ratio))
-    {
-        return Err("书签锚点比例必须在 0 到 1 之间".into());
+    if bookmarks.iter().any(|bookmark| {
+        !valid_optional_ratio(bookmark.anchor_ratio)
+            || !valid_optional_anchor_text(
+                bookmark.anchor_text_offset,
+                &bookmark.anchor_text_snippet,
+            )
+    }) {
+        return Err("书签锚点比例或文本锚点无效".into());
     }
     let _guard = state
         .0
@@ -1236,8 +1436,16 @@ fn validate_portable_records(records: &[LinkedLibraryRecord]) -> Result<(), Stri
         if !valid_optional_ratio(record.anchor_ratio) {
             return Err("存档含有无效阅读锚点比例".into());
         }
+        if !valid_optional_anchor_text(record.anchor_text_offset, &record.anchor_text_snippet) {
+            return Err("存档含有无效阅读文本锚点".into());
+        }
         for bookmark in &record.bookmarks {
-            if !valid_optional_ratio(bookmark.anchor_ratio) {
+            if !valid_optional_ratio(bookmark.anchor_ratio)
+                || !valid_optional_anchor_text(
+                    bookmark.anchor_text_offset,
+                    &bookmark.anchor_text_snippet,
+                )
+            {
                 return Err("存档含有无效书签锚点比例".into());
             }
         }
@@ -1471,14 +1679,54 @@ mod tests {
     }
 
     #[test]
+    fn portable_text_anchors_are_bounded_unicode_code_points() {
+        assert!(valid_optional_anchor_text(Some(7), &Some("😀正文".into())));
+        assert!(valid_optional_anchor_text(None, &None));
+        assert!(!valid_optional_anchor_text(None, &Some("正文".into())));
+        assert!(!valid_optional_anchor_text(
+            Some(1),
+            &Some("has space".into())
+        ));
+        assert!(!valid_optional_anchor_text(
+            Some(1),
+            &Some("😀".repeat(MAX_ANCHOR_SNIPPET_CODE_POINTS + 1)),
+        ));
+        assert!(!valid_optional_anchor_text(
+            MAX_ANCHOR_TEXT_OFFSET.checked_add(1),
+            &None
+        ));
+    }
+
+    #[test]
     fn opf_parser_finds_metadata_spine_and_epub3_cover() {
         let opf = br#"<package><metadata><dc:title xmlns:dc='x'>Title</dc:title><dc:creator xmlns:dc='x'>Author</dc:creator></metadata><manifest><item id='c' href='cover.jpg' media-type='image/jpeg' properties='cover-image'/><item id='a' href='text/a.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='a'/></spine></package>"#;
         let parsed = parse_opf(opf, "OPS/book.opf").unwrap();
         assert_eq!(parsed.title, "Title");
         assert_eq!(parsed.creator, "Author");
         assert_eq!(parsed.spine, vec!["OPS/text/a.xhtml"]);
-        assert_eq!(parsed.cover_zip_path.as_deref(), Some("OPS/cover.jpg"));
-        assert_eq!(parsed.cover_mime, "image/jpeg");
+        let (cover_path, cover_mime) = select_cover(&parsed, |_| true);
+        assert_eq!(cover_path.as_deref(), Some("OPS/cover.jpg"));
+        assert_eq!(cover_mime, "image/jpeg");
+    }
+
+    #[test]
+    fn opf_parser_falls_back_to_cover_filename_in_manifest_order() {
+        let opf = br#"<package><metadata><dc:title xmlns:dc='x'>Title</dc:title></metadata><manifest><item id='image001' href='Images/Cover%2EWEBP?cache=1#preview' media-type=''/><item id='cover-css' href='Styles/cover.css' media-type='text/css'/></manifest><spine/></package>"#;
+        let parsed = parse_opf(opf, "OPS/book.opf").unwrap();
+        let (cover_path, cover_mime) =
+            select_cover(&parsed, |path| path == "OPS/Images/Cover.WEBP");
+        assert_eq!(cover_path.as_deref(), Some("OPS/Images/Cover.WEBP"));
+        assert_eq!(cover_mime, "image/webp");
+    }
+
+    #[test]
+    fn cover_selection_skips_invalid_standard_candidates_before_filename_fallback() {
+        let opf = br#"<package><metadata><meta name='cover' content='cover-css'/></metadata><manifest><item id='missing' href='missing.jpg' media-type='image/jpeg' properties='cover-image'/><item id='cover-css' href='Styles/cover.css' media-type='text/css'/><item id='image001' href='Images/cover.webp' media-type='text/plain'/></manifest><spine/></package>"#;
+        let parsed = parse_opf(opf, "OPS/book.opf").unwrap();
+        let (cover_path, cover_mime) =
+            select_cover(&parsed, |path| path == "OPS/Images/cover.webp");
+        assert_eq!(cover_path.as_deref(), Some("OPS/Images/cover.webp"));
+        assert_eq!(cover_mime, "image/webp");
     }
 
     #[test]
@@ -1495,6 +1743,8 @@ mod tests {
             progress_pct: 0,
             anchor_index: None,
             anchor_ratio: None,
+            anchor_text_offset: None,
+            anchor_text_snippet: None,
             bookmarks: vec![],
             is_new: true,
         };
@@ -1517,6 +1767,8 @@ mod tests {
             progress_pct: 0,
             anchor_index: None,
             anchor_ratio: None,
+            anchor_text_offset: None,
+            anchor_text_snippet: None,
             bookmarks: vec![],
             is_new: true,
         };
@@ -1540,6 +1792,8 @@ mod tests {
             progress_pct: 0,
             anchor_index: None,
             anchor_ratio: None,
+            anchor_text_offset: None,
+            anchor_text_snippet: None,
             bookmarks: vec![],
             is_new: true,
         };

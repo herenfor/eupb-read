@@ -19,6 +19,8 @@ const record = (overrides: Record<string, unknown> = {}) => ({
   progressPct: 30,
   anchorIndex: 4,
   anchorRatio: 0.5,
+  anchorTextOffset: 12,
+  anchorTextSnippet: "正文",
   isNew: false,
   bookmarks: [],
   ...overrides,
@@ -52,9 +54,23 @@ describe("portable library archive", () => {
     expect(result.errors[0].code).toBe("path-leak");
   });
 
+  it("defaults omitted old text-anchor fields and rejects unsafe new ones without changing v1", () => {
+    const { anchorTextOffset: _offset, anchorTextSnippet: _snippet, ...legacy } = record();
+    const old = parseLibraryArchive({ version: 1, records: { [hash]: legacy } });
+    expect(old.errors).toHaveLength(0);
+    expect(old.archive.records[hash].anchorTextOffset).toBeNull();
+    expect(old.archive.records[hash].anchorTextSnippet).toBeNull();
+    const invalid = parseLibraryArchive({
+      version: 1,
+      records: { [hash]: record({ anchorTextOffset: 3, anchorTextSnippet: "has space" }) },
+    });
+    expect(invalid.archive.records).toEqual({});
+    expect(invalid.errors.some((item) => item.code === "invalid-anchor-text")).toBe(true);
+  });
+
   it("merges by hash, preserves the earliest added time, and rejects older progress", () => {
-    const base: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 2, lastReadAtMs: 30, page: 9, bookmarks: [{ id: "b", spineIndex: 0, page: 1, anchorIndex: null, anchorRatio: null, text: "old", createdAtMs: 2 }] }) } } };
-    const incoming: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 5, lastReadAtMs: 10, page: 1, bookmarks: [{ id: "b", spineIndex: 0, page: 2, anchorIndex: null, anchorRatio: null, text: "new", createdAtMs: 3 }, { id: "c", spineIndex: 1, page: 2, anchorIndex: null, anchorRatio: null, text: "c", createdAtMs: 1 }] }) } } };
+  const base: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 2, lastReadAtMs: 30, page: 9, bookmarks: [{ id: "b", spineIndex: 0, page: 1, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "old", createdAtMs: 2 }] }) } } };
+    const incoming: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 5, lastReadAtMs: 10, page: 1, bookmarks: [{ id: "b", spineIndex: 0, page: 2, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "new", createdAtMs: 3 }, { id: "c", spineIndex: 1, page: 2, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "c", createdAtMs: 1 }] }) } } };
     const merged = mergeLibraryArchives(base, incoming);
     expect(merged.records[hash].addedAtMs).toBe(2);
     expect(merged.records[hash].page).toBe(9);

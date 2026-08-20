@@ -3,27 +3,59 @@ import { splitHref } from "../core/paths";
 
 export interface TocPanelProps {
   toc: TocNode[];
-  /** 当前章的内部路径（用于高亮） */
-  activePath?: string;
+  /** 当前阅读位置的内部 href（路径可带 fragment，用于高亮） */
+  activeHref?: string;
   onNavigate(href: string): void;
   onClose(): void;
+}
+
+/** 递归统计目录项，包含所有层级而不只是顶层章节。 */
+export function countTocNodes(nodes: TocNode[]): number {
+  return nodes.reduce((count, node) => count + 1 + countTocNodes(node.children), 0);
+}
+
+/**
+ * 找唯一活动目录项：fragment 精确匹配优先；否则同路径的章首项，再退回
+ * 同路径第一项。返回节点引用供渲染层做 identity 比较，避免同章多项同时高亮。
+ */
+export function findActiveTocNode(
+  nodes: TocNode[],
+  activeHref?: string
+): TocNode | undefined {
+  if (!activeHref) return undefined;
+  const active = splitHref(activeHref);
+  const all: TocNode[] = [];
+  const collect = (items: TocNode[]): void => {
+    for (const item of items) {
+      all.push(item);
+      collect(item.children);
+    }
+  };
+  collect(nodes);
+  const samePath = all.filter((node) => splitHref(node.href).path === active.path);
+  if (samePath.length === 0) return undefined;
+  if (active.anchor) {
+    const exact = samePath.find((node) => splitHref(node.href).anchor === active.anchor);
+    if (exact) return exact;
+  }
+  return samePath.find((node) => splitHref(node.href).anchor === "") ?? samePath[0];
 }
 
 function TocList({
   nodes,
   level,
-  activePath,
+  activeNode,
   onNavigate,
 }: {
   nodes: TocNode[];
   level: number;
-  activePath?: string;
+  activeNode?: TocNode;
   onNavigate(href: string): void;
 }) {
   return (
     <div>
       {nodes.map((node, i) => {
-        const active = activePath !== undefined && splitHref(node.href).path === activePath;
+        const active = node === activeNode;
         const disabled = node.disabled === true;
         return (
           <div key={`${level}-${i}-${node.label}`}>
@@ -48,7 +80,7 @@ function TocList({
               <TocList
                 nodes={node.children}
                 level={level + 1}
-                activePath={activePath}
+                activeNode={activeNode}
                 onNavigate={onNavigate}
               />
             ) : null}
@@ -60,12 +92,14 @@ function TocList({
 }
 
 export function TocPanel(props: TocPanelProps) {
+  const activeNode = findActiveTocNode(props.toc, props.activeHref);
+  const count = countTocNodes(props.toc);
   return (
     <div className="toc-panel">
       <div className="toc-head">
         <span className="toc-title">目录</span>
         <span className="toc-count">
-          {props.toc.length > 0 ? `${props.toc.length} 章` : "无"}
+          {count > 0 ? `${count} 项` : "无"}
         </span>
         <button className="tb-btn" onClick={props.onClose} title="关闭目录">
           ✕
@@ -77,7 +111,7 @@ export function TocPanel(props: TocPanelProps) {
         <TocList
           nodes={props.toc}
           level={0}
-          activePath={props.activePath}
+          activeNode={activeNode}
           onNavigate={props.onNavigate}
         />
       )}

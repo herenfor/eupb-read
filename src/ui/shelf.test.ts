@@ -4,6 +4,8 @@ import {
   filterShelfEntries,
   formatShelfTime,
   markShelfEntryOpened,
+  normalizeShelfEntryTextAnchors,
+  readingAnchorFromShelfEntry,
   shelfIdFor,
   sortShelfEntries,
   type ShelfEntry,
@@ -94,6 +96,8 @@ describe("progress entry merge", () => {
       progressPct: 42,
       anchorIndex: 10,
       anchorRatio: 0.5,
+      anchorTextOffset: 123,
+      anchorTextSnippet: "正文",
     });
     const opened = markShelfEntryOpened(progressed, "book")[0];
     expect(opened).toMatchObject({
@@ -104,6 +108,30 @@ describe("progress entry merge", () => {
       progressPct: 42,
       anchorIndex: 10,
       anchorRatio: 0.5,
+      anchorTextOffset: 123,
+      anchorTextSnippet: "正文",
     });
+  });
+
+  it("normalizes omitted legacy text fields to null and drops invalid snippets", () => {
+    expect(normalizeShelfEntryTextAnchors(entry({}))).toMatchObject({
+      anchorTextOffset: null,
+      anchorTextSnippet: null,
+    });
+    expect(
+      normalizeShelfEntryTextAnchors(entry({ anchorTextOffset: 8, anchorTextSnippet: "bad space" }))
+    ).toMatchObject({ anchorTextOffset: null, anchorTextSnippet: null });
+  });
+
+  it("keeps legacy-only shelf anchors and exposes text-only anchors without persisting -1", () => {
+    expect(readingAnchorFromShelfEntry(entry({ anchorIndex: 8, anchorRatio: 0.25 }))).toEqual({
+      index: 8,
+      ratio: 0.25,
+      anchorTextOffset: null,
+      anchorTextSnippet: null,
+    });
+    expect(
+      readingAnchorFromShelfEntry(entry({ anchorIndex: null, anchorRatio: null, anchorTextOffset: 9, anchorTextSnippet: "正文" }))
+    ).toMatchObject({ index: -1, anchorTextOffset: 9, anchorTextSnippet: "正文" });
   });
 });

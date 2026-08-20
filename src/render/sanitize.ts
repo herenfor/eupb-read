@@ -150,7 +150,7 @@ function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
 :where(#${VIEWER_ID}) img, :where(#${VIEWER_ID}) video, :where(#${VIEWER_ID}) svg { max-height: 100%; }
 /* [L3] 全页图片块：豁免版心限制，占满一整页（正文中的插图页）。 */
 #${VIEWER_ID} .illus, #${VIEWER_ID} .kuchie, #${VIEWER_ID} .cover,
-#${VIEWER_ID} .duokan-image-single, #${VIEWER_ID} .duokan-image-fullscreen {
+#${VIEWER_ID} .duokan-image-fullscreen {
   max-width: none !important;
   height: 100% !important;
   margin: 0 !important;
@@ -160,7 +160,7 @@ function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
   justify-content: center;
 }
 #${VIEWER_ID} .illus img, #${VIEWER_ID} .kuchie img, #${VIEWER_ID} .cover img,
-#${VIEWER_ID} .duokan-image-single img, #${VIEWER_ID} .duokan-image-fullscreen img {
+#${VIEWER_ID} .duokan-image-fullscreen img {
   width: 100% !important;
   height: 100% !important;
   max-width: none !important;
@@ -416,10 +416,10 @@ export async function sanitizeChapter(
   // 我们的页面=窗口全宽、版心=maxEm，若 % 相对整页，90% 的盒子会几乎占满整页。
   // 改写为 min(X%, X%×maxEm rem)：页面级取版心比例，窄容器（td 等）取书自己的 %。
   // 仅 0 < X ≤ 100；X > 100 是刻意出血，保持原样。
-  // 跳过：img/svg（自有缩放规则）、全页图块内部（% 相对整页有意义）、
+  // 跳过：img/svg（自有缩放规则）、明确全页图块内部（% 相对整页有意义）、
   // 已显式定宽祖先内部（% 应相对该祖先，保持原样）。
   const FULLPAGE_CLASS_RE =
-    /(^|\s)(illus|kuchie|cover|duokan-image-single|duokan-image-fullscreen)(\s|$)/;
+    /(^|\s)(illus|kuchie|cover|duokan-image-fullscreen)(\s|$)/;
   const hasFullpageClass = (el: Element): boolean =>
     FULLPAGE_CLASS_RE.test(el.getAttribute("class") ?? "");
   const insideFullpage = (el: Element): boolean => {

@@ -132,7 +132,7 @@ function rewriteWidthDeclarations(css: string, maxEm: number, context: CssCommen
   return css.replace(/([^{}]*\{)([^{}]*\})/g, (block, head: string, body: string) => {
     const selector = head.replace(/\s*\{$/, "");
     if (
-      /(illus|kuchie|cover|duokan-image-single|duokan-image-fullscreen|\bimg\b|\bsvg\b|\bhtml\b|\bbody\b)/i.test(
+      /(illus|kuchie|cover|duokan-image-fullscreen|\bimg\b|\bsvg\b|\bhtml\b|\bbody\b)/i.test(
         stripProtectedCssComments(selector, context)
       ) ||
       hasCombinator(selector, context) ||

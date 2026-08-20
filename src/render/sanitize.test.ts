@@ -380,6 +380,31 @@ describe("sanitizeChapter", () => {
     expect(out).toContain("height: 100% !important");
   });
 
+  it("带图注的 duokan-image-single 是普通正文图，不能仅凭类名被强制为全页 flex 图", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<style>.duokan-image-single { width:100%; margin:1em 0; padding:5px; }
+.duokan-image-maintitle { text-align:center; }</style>
+</head><body><div class="duokan-image-single"><img alt="图 3-3" src="default_style.png"/>
+<p class="duokan-image-maintitle">图 3-3　默认样式</p></div></body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts("OEBPS/Text/chapter3-1.xhtml"));
+
+    expect(out).not.toContain('class="fullpage-image"');
+    expect(out).toContain(".duokan-image-single { width: min(100%, 40rem);");
+    expect(out).not.toMatch(/#epub-viewer\s+\.duokan-image-single\s*\{/);
+    expect(out).not.toMatch(/#epub-viewer\s+\.duokan-image-single\s+img\s*\{/);
+    expect(out).toContain(".duokan-image-maintitle { text-align:center; }");
+  });
+
+  it("显式 duokan-image-fullscreen 仍保留全页图规则", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div class="duokan-image-fullscreen"><img alt="插图" src="illus.jpg"/></div>
+</body></html>`;
+    const { html: out } = await sanitizeChapter(html, opts("OEBPS/Text/illus.xhtml"));
+
+    expect(out).toMatch(/#epub-viewer\s+\.duokan-image-fullscreen\s*\{[^}]*height:\s*100%\s*!important;[^}]*display:\s*flex\s*!important;/s);
+    expect(out).toMatch(/#epub-viewer\s+\.duokan-image-fullscreen\s+img\s*\{[^}]*width:\s*100%\s*!important;[^}]*height:\s*100%\s*!important;/s);
+  });
+
   it("文字页不注入 fullpage-image", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>有文字</p><img alt="x" src="a.png"/></body></html>`;
     const { html: out } = await sanitizeChapter(html, opts());

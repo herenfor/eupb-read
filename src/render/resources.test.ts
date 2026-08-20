@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { decodeBytes } from "./resources";
+import { describe, expect, it, vi } from "vitest";
+import type { Book } from "../core/types";
+import { decodeBytes, ResourceServer } from "./resources";
 
 describe("decodeBytes（编码容错）", () => {
   it("UTF-8 正常解码", () => {
@@ -31,5 +32,73 @@ describe("decodeBytes（编码容错）", () => {
 
   it("空数据", () => {
     expect(decodeBytes(new Uint8Array(0))).toBe("");
+  });
+});
+
+function book(): Book {
+  return {
+    version: 3,
+    opfPath: "OEBPS/content.opf",
+    metadata: { title: "test", identifier: "test", language: "zh" },
+    manifest: new Map(),
+    spine: [],
+    guide: [],
+    toc: [],
+    resources: new Map([
+      [
+        "OEBPS/img.png",
+        { path: "OEBPS/img.png", data: new Uint8Array([1, 2, 3]), mediaType: "image/png" },
+      ],
+    ]),
+    fixedLayout: false,
+    issues: [],
+    drmProtected: false,
+  };
+}
+
+describe("ResourceServer lifecycle", () => {
+  it("共享资源 URL 复用，并在会话结束 revokeAll 后幂等清空", () => {
+    const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:book/shared");
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    try {
+      const server = new ResourceServer(book());
+      expect(server.urlFor("OEBPS/img.png")).toBe("blob:book/shared");
+      expect(server.urlFor("OEBPS/img.png")).toBe("blob:book/shared");
+      expect(create).toHaveBeenCalledTimes(1);
+      server.revokeAll();
+      server.revokeAll();
+      expect(revoke).toHaveBeenCalledTimes(1);
+      expect(revoke).toHaveBeenCalledWith("blob:book/shared");
+    } finally {
+      create.mockRestore();
+      revoke.mockRestore();
+    }
+  });
+
+  it("caches decoded chapter text with LRU hit/eviction and skips oversized entries", () => {
+    const decode = vi.fn((bytes: Uint8Array) => new TextDecoder().decode(bytes));
+    const b = book();
+    b.resources = new Map([
+      ["a", { path: "a", data: new TextEncoder().encode("alpha"), mediaType: "text/html" }],
+      ["b", { path: "b", data: new TextEncoder().encode("bravo"), mediaType: "text/html" }],
+      ["huge", { path: "huge", data: new TextEncoder().encode("1234567890123"), mediaType: "text/html" }],
+    ]);
+    const server = new ResourceServer(b, { textCacheMaxBytes: 20, textCacheMaxEntries: 2, decoder: decode });
+    expect(server.textFor("a")).toBe("alpha");
+    expect(server.textFor("a")).toBe("alpha");
+    expect(server.textFor("b")).toBe("bravo");
+    expect(server.textFor("huge")).toBe("1234567890123");
+    expect(server.textCacheStats.hits).toBe(1);
+    expect(server.textCacheStats.entries).toBe(2);
+    expect(server.textCacheStats.bytes).toBe(20);
+    expect(server.textFor("a")).toBe("alpha");
+    expect(server.textCacheStats.misses).toBe(3);
+    expect(server.textFor("huge")).toBe("1234567890123");
+    expect(server.textCacheStats.misses).toBe(4);
+    server.revokeAll();
+    expect(server.textCacheStats.entries).toBe(0);
+    expect(server.textCacheStats.bytes).toBe(0);
+    expect(server.textCacheStats.hits).toBe(2);
+    expect(server.textCacheStats.misses).toBe(4);
   });
 });

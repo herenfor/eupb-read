@@ -101,4 +101,70 @@ describe("parseNav: 标准结构容错", () => {
     const toc = parseNav(doc.documentElement);
     expect(toc.map((t) => t.label)).toEqual(["甲", "乙"]);
   });
+
+  it("命名空间 epub:type 与属性回退均能识别 toc nav", async () => {
+    const doc = await parseXmlText(
+      `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+        <nav epub:type="landmarks"><ol><li><a href="land.xhtml">标记</a></li></ol></nav>
+        <nav epub:type="toc"><ol><li><a href="toc.xhtml">目录</a></li></ol></nav>
+      </body></html>`,
+      "application/xml"
+    );
+    expect(parseNav(doc.documentElement).map((n) => n.label)).toEqual(["目录"]);
+  });
+
+  it("div 包装的混合 ol/ul 按最近列表的实际文档顺序解析", async () => {
+    const doc = await parseXmlText(
+      wrap(`<nav epub:type="toc"><div><ul>
+        <li><a href="a.xhtml">甲</a></li>
+      </ul><ol>
+        <li><a href="b.xhtml">乙</a></li>
+      </ol></div></nav>`),
+      "text/html"
+    );
+    expect(parseNav(doc.documentElement).map((n) => n.label)).toEqual(["甲", "乙"]);
+  });
+
+  it("父 li 的标签不误取嵌套列表链接，且子列表保留", async () => {
+    const doc = await parseXmlText(
+      wrap(`<nav epub:type="toc"><ol>
+        <li><span>父节点</span><div><ol><li><a href="child.xhtml">子节点</a></li></ol></div></li>
+      </ol></nav>`),
+      "text/html"
+    );
+    const [parent] = parseNav(doc.documentElement);
+    expect(parent.label).toBe("父节点");
+    expect(parent.href).toBe("");
+    expect(parent.children.map((n) => n.label)).toEqual(["子节点"]);
+  });
+
+  it("没有自身标签的父 li 仍保留子树并可由上层置灰", async () => {
+    const doc = await parseXmlText(
+      wrap(`<nav epub:type="toc"><ol>
+        <li><ol><li><a href="child.xhtml">子节点</a></li></ol></li>
+      </ol></nav>`),
+      "text/html"
+    );
+    const [parent] = parseNav(doc.documentElement);
+    expect(parent.label).toBe("");
+    expect(parent.href).toBe("");
+    expect(parent.children[0].label).toBe("子节点");
+  });
+
+  it("XML 中直接嵌套 li 也不会穿透父项边界", async () => {
+    const doc = await parseXmlText(
+      `<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+        <nav epub:type="toc"><ol><li><span>父节点</span>
+          <li><a href="child.xhtml">子链接</a>
+            <div><ol><li><a href="grandchild.xhtml">孙链接</a></li></ol></div>
+          </li>
+        </li></ol></nav>
+      </body></html>`,
+      "application/xml"
+    );
+    const [parent] = parseNav(doc.documentElement);
+    expect(parent.label).toBe("父节点");
+    expect(parent.href).toBe("");
+    expect(parent.children).toEqual([]);
+  });
 });
