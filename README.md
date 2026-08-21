@@ -168,4 +168,4 @@ pnpm tauri build
 
 ## 许可
 
-[MIT License](LICENSE)。
+[Apache License 2.0](LICENSE)。
