@@ -273,3 +273,11 @@ diff -qr \
   <PROJECT_ROOT>/eupb-read \
   <PROJECT_ROOT>/epub-reader
 ```
+
+## 开源协议切换（2026-08-21）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `LICENSE` | 替换 | 由 MIT License 切换为 **Apache License 2.0**（官方原文，202 行），用户选择以防潜在纠纷 | 与 apache.org 官方文本逐字比对 | 是 |
+| `NOTICE` | 新增 | Apache 2.0 规范建议的 NOTICE 文件，声明 Copyright 2026 HeRenFor | 人工检查 | 是 |
+| `README.md` | 更新 | 许可章节由 MIT 改为 Apache License 2.0 | 链接检查 | 是 |
