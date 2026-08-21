@@ -27,6 +27,13 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "license": "Apache-2.0",
+    "resources": [
+      "../LICENSE",
+      "../NOTICE",
+      "../THIRD_PARTY_LICENSES.md",
+      "../third-party-licenses/"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -281,3 +281,17 @@ diff -qr \
 | `LICENSE` | 替换 | 由 MIT License 切换为 **Apache License 2.0**（官方原文，202 行），用户选择以防潜在纠纷 | 与 apache.org 官方文本逐字比对 | 是 |
 | `NOTICE` | 新增 | Apache 2.0 规范建议的 NOTICE 文件，声明 Copyright 2026 HeRenFor | 人工检查 | 是 |
 | `README.md` | 更新 | 许可章节由 MIT 改为 Apache License 2.0 | 链接检查 | 是 |
+
+## 第三方许可合规与发行包落地（2026-08-21）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `THIRD_PARTY_LICENSES.md` | 新增 | 第三方软件声明：运行时/开发依赖许可证表（React/fflate/Tauri 生态/serde 等）、MPL-2.0 五个 crate 及源码地址（cssparser 0.36.0 等）、r-efi 多许可说明、主要依赖版权声明、标准许可证文本索引 | 与 Cargo.lock/node_modules 实际版本核对 | 是 |
+| `third-party-licenses/` | 新增 | 9 份标准许可证全文：Apache-2.0/MIT/MPL-2.0/BSD-2/BSD-3/ISC/Zlib/Unicode-3.0/CC-BY-4.0（SPDX 官方源） | 与 SPDX license-list-data 比对 | 是 |
+| `NOTICE` | 更新 | 追加 Tauri Programme 第三方说明与 THIRD_PARTY_LICENSES.md 指引 | 人工检查 | 是 |
+| `src-tauri/tauri.conf.json` | 更新 | bundle 增加 `license: "Apache-2.0"` 与 `resources`（LICENSE/NOTICE/THIRD_PARTY_LICENSES.md/third-party-licenses/），使许可材料进入 NSIS 发行包 | schema 校验、JSON 合法 | 是 |
+| `package.json` | 更新 | 增加 `"license": "Apache-2.0"`（SPDX 字段） | JSON 合法 | 是 |
+| `src-tauri/Cargo.toml` | 更新 | 增加 `license = "Apache-2.0"`；authors 由笼统名改为真实权利人 `HeRenFor` | Cargo 元数据 | 是 |
+| `README.md` | 更新 | 许可章节扩展：声明第三方组件各自许可证，指向 THIRD_PARTY_LICENSES.md | 链接检查 | 是 |
+| `CONTRIBUTING.md` | 更新 | 新增“贡献许可”条款：贡献默认按 Apache-2.0 提供且不附加额外条款 | 人工检查 | 是 |
+| `LICENSE` | 权限 | 600 → 644，便于 Linux 源码包读取 | `ls -l` | 是 |

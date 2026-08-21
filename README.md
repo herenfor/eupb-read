@@ -168,4 +168,8 @@ pnpm tauri build
 
 ## 许可
 
-[Apache License 2.0](LICENSE)。
+本项目原创代码采用 [Apache License 2.0](LICENSE)。
+
+项目包含分别采用 MIT、Apache-2.0、MPL-2.0、BSD、ISC、Zlib、Unicode-3.0 等许可证的第三方组件。完整清单、版权声明、许可证文本和源码位置见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+
+本项目许可证不改变第三方组件各自的许可证。
