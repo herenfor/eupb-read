@@ -12,6 +12,19 @@ export interface TextAnchorData {
   textSnippet: string | null;
 }
 
+/** A persisted text range used by annotations (end is exclusive). */
+export interface TextRangeAnchorData {
+  startTextOffset: number;
+  endTextOffset: number;
+  startTextSnippet: string | null;
+  endTextSnippet: string | null;
+}
+
+export interface TextSelectionPayload extends TextRangeAnchorData {
+  selectedText: string;
+  rect: { left: number; top: number; right: number; bottom: number };
+}
+
 export interface TextNodePosition {
   node: Text;
   /** DOM Range offsets are UTF-16 code units. */
@@ -149,15 +162,17 @@ export class VisibleTextIndex {
   readonly text: string;
   readonly codePoints: string[];
   readonly totalChars: number;
+  readonly mediaUnits: number;
   private readonly nodes: IndexedTextNode[];
   private readonly nodeMap: Map<Text, IndexedTextNode>;
 
-  constructor(nodes: IndexedTextNode[], text: string) {
+  constructor(nodes: IndexedTextNode[], text: string, mediaUnits = 0) {
     this.nodes = nodes;
     this.nodeMap = new Map(nodes.map((item) => [item.node, item]));
     this.text = text;
     this.codePoints = Array.from(text);
     this.totalChars = this.codePoints.length;
+    this.mediaUnits = mediaUnits;
   }
 
   offsetForNode(node: Node, rawOffset: number): number | null {
@@ -183,10 +198,179 @@ export class VisibleTextIndex {
     return { node: item.node, rawOffset: item.rawStarts[offset - item.start] ?? item.rawEnd };
   }
 
+  /** Convert any Range boundary (text node or element node) to our normalized offset. */
+  offsetForBoundary(doc: Document, node: Node, rawOffset: number): number | null {
+    if (!validOffset(rawOffset) || !this.nodes.length) return null;
+    if (node.nodeType === 3) return this.offsetForNode(node, rawOffset);
+    if (!Number.isSafeInteger(rawOffset) || rawOffset < 0) return null;
+    try {
+      const boundary = doc.createRange();
+      boundary.setStart(node, Math.min(rawOffset, node.nodeType === 1 ? node.childNodes.length : rawOffset));
+      boundary.collapse(true);
+      let normalizedOffset = 0;
+      for (const item of this.nodes) {
+        const itemEnd = doc.createRange();
+        itemEnd.setStart(item.node, item.rawEnd);
+        itemEnd.collapse(true);
+        const startToStart = doc.defaultView?.Range.START_TO_START ?? 0;
+        if (itemEnd.compareBoundaryPoints(startToStart, boundary) <= 0) {
+          normalizedOffset = item.end;
+          continue;
+        }
+        break;
+      }
+      return normalizedOffset;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Build a DOM Range from normalized offsets without inserting marker nodes. */
+  rangeForOffsets(doc: Document, start: number, end: number): Range | null {
+    if (!validOffset(start) || !validOffset(end) || end <= start || end > this.totalChars) return null;
+    const from = this.positionForOffset(start);
+    const to = this.positionForOffset(end);
+    if (!from || !to) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(from.node, from.rawOffset);
+      range.setEnd(to.node, to.rawOffset);
+      return range;
+    } catch {
+      return null;
+    }
+  }
+
   snippetAt(offset: number): string | null {
     if (!validOffset(offset) || offset >= this.totalChars) return null;
     return this.codePoints.slice(offset, offset + MAX_ANCHOR_SNIPPET_CODE_POINTS).join("") || null;
   }
+
+  snippetBefore(offset: number): string | null {
+    if (!validOffset(offset) || offset <= 0 || offset > this.totalChars) return null;
+    return this.codePoints
+      .slice(Math.max(0, offset - MAX_ANCHOR_SNIPPET_CODE_POINTS), offset)
+      .join("") || null;
+  }
+}
+
+function matchesEnding(haystack: readonly string[], needle: readonly string[], end: number): boolean {
+  if (end < needle.length || end > haystack.length) return false;
+  const start = end - needle.length;
+  for (let i = 0; i < needle.length; i++) if (haystack[start + i] !== needle[i]) return false;
+  return true;
+}
+
+/** Resolve an annotation range, preferring the full selected text when present. */
+export function resolveTextRangeOffsets(
+  index: VisibleTextIndex,
+  anchor: TextRangeAnchorData,
+  selectedText?: string
+): { start: number; end: number } | null {
+  if (
+    !validOffset(anchor.startTextOffset) ||
+    !validOffset(anchor.endTextOffset) ||
+    anchor.endTextOffset <= anchor.startTextOffset ||
+    anchor.endTextOffset > index.totalChars
+  ) return null;
+  const selected = selectedText ? normalizeAnchorText(selectedText) : "";
+  const startNeedle = anchor.startTextSnippet ? Array.from(anchor.startTextSnippet) : [];
+  const endNeedle = anchor.endTextSnippet ? Array.from(anchor.endTextSnippet) : [];
+  let start = anchor.startTextOffset;
+  if (startNeedle.length && !matchesAt(index.codePoints, startNeedle, start)) {
+    const resolved = resolveTextAnchorOffset(index, { textOffset: start, textSnippet: anchor.startTextSnippet });
+    if (resolved === null) return null;
+    start = resolved;
+  }
+  if (selected) {
+    const codePoints = Array.from(selected);
+    const min = Math.max(0, start - 4096);
+    const max = Math.min(index.totalChars - codePoints.length, start + 4096);
+    let best: number | null = null;
+    for (let candidate = min; candidate <= max; candidate++) {
+      if (!matchesAt(index.codePoints, codePoints, candidate)) continue;
+      if (best === null || Math.abs(candidate - start) < Math.abs(best - start)) best = candidate;
+    }
+    if (best !== null) {
+      const end = best + codePoints.length;
+      if (end <= index.totalChars) return { start: best, end };
+    }
+  }
+  let end = anchor.endTextOffset;
+  if (endNeedle.length && !matchesEnding(index.codePoints, endNeedle, end)) {
+    let nearest: number | null = null;
+    for (let candidate = endNeedle.length; candidate <= index.totalChars; candidate++) {
+      if (!matchesEnding(index.codePoints, endNeedle, candidate)) continue;
+      if (nearest === null || Math.abs(candidate - end) < Math.abs(nearest - end)) nearest = candidate;
+    }
+    if (nearest === null) return null;
+    end = nearest;
+  }
+  return end > start ? { start, end } : null;
+}
+
+const MAX_SELECTION_CODE_POINTS = 4096;
+
+function rangeRect(range: Range): { left: number; top: number; right: number; bottom: number } | null {
+  const rects = Array.from(range.getClientRects?.() ?? []).filter((r) =>
+    [r.left, r.top, r.right, r.bottom].every(Number.isFinite)
+  );
+  const fallback = rects.length > 0 ? null : range.getBoundingClientRect?.();
+  const all = rects.length > 0 ? rects : fallback ? [fallback] : [];
+  if (!all.length) return null;
+  return {
+    left: Math.min(...all.map((r) => r.left)),
+    top: Math.min(...all.map((r) => r.top)),
+    right: Math.max(...all.map((r) => r.right)),
+    bottom: Math.max(...all.map((r) => r.bottom)),
+  };
+}
+
+/** Capture a valid current-document selection as a stable normalized range. */
+export function captureTextSelection(
+  doc: Document,
+  viewer: HTMLElement,
+  index: VisibleTextIndex,
+  selection = doc.getSelection?.()
+): TextSelectionPayload | null {
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  let range: Range;
+  try {
+    range = selection.getRangeAt(0);
+  } catch {
+    return null;
+  }
+  if (range.collapsed || !viewer.contains(range.startContainer) || !viewer.contains(range.endContainer)) return null;
+  if (hasStructurallyExcludedAncestor(range.startContainer) || hasStructurallyExcludedAncestor(range.endContainer)) return null;
+  // A selection can begin/end in normal text while spanning an excluded
+  // aside/script in between. Do not create an ambiguous anchor in that case.
+  for (const element of Array.from(viewer.querySelectorAll("*"))) {
+    if (!isStructurallyHiddenElement(element)) continue;
+    try {
+      if (range.intersectsNode(element)) return null;
+    } catch {
+      return null;
+    }
+  }
+  const start = index.offsetForBoundary(doc, range.startContainer, range.startOffset);
+  const end = index.offsetForBoundary(doc, range.endContainer, range.endOffset);
+  if (start === null || end === null || end <= start) return null;
+  const selectedText = range.toString();
+  if (
+    !selectedText ||
+    codePointLength(selectedText) > MAX_SELECTION_CODE_POINTS ||
+    codePointLength(normalizeAnchorText(selectedText)) > MAX_SELECTION_CODE_POINTS
+  ) return null;
+  const rect = rangeRect(range);
+  if (!rect) return null;
+  return {
+    selectedText,
+    startTextOffset: start,
+    endTextOffset: end,
+    startTextSnippet: index.snippetAt(start),
+    endTextSnippet: index.snippetBefore(end),
+    rect,
+  };
 }
 
 /** Build once per valid current chapter document; callers own invalidation. */
@@ -225,7 +409,22 @@ export function buildVisibleTextIndex(doc: Document, viewer: HTMLElement): Visib
     normalizedOffset += rawStarts.length;
     pieces.push(normalized);
   }
-  return new VisibleTextIndex(nodes, pieces.join(""));
+  const mediaTags = new Set(["img", "video", "audio", "canvas", "svg", "object", "embed"]);
+  let mediaUnits = 0;
+  for (const element of Array.from(viewer.querySelectorAll("*"))) {
+    const tag = element.tagName.toLowerCase();
+    if (!mediaTags.has(tag) || isStructurallyHiddenElement(element) || hasStructurallyExcludedAncestor(element)) continue;
+    if (tag !== "svg" && element.closest("svg")) continue;
+    let hidden = false;
+    try {
+      const computed = doc.defaultView?.getComputedStyle(element);
+      hidden = computed?.display === "none" || computed?.visibility === "hidden" || computed?.visibility === "collapse";
+    } catch {
+      // Structural visibility remains a conservative fallback.
+    }
+    if (!hidden) mediaUnits++;
+  }
+  return new VisibleTextIndex(nodes, pieces.join(""), mediaUnits);
 }
 
 function matchesAt(haystack: readonly string[], needle: readonly string[], start: number): boolean {

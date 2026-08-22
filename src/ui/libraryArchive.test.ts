@@ -8,6 +8,20 @@ import {
 } from "./libraryArchive";
 
 const hash = "a".repeat(64);
+const note = (overrides: Record<string, unknown> = {}) => ({
+  id: "note-1",
+  spineIndex: 1,
+  chapterPath: "Text/chapter.xhtml",
+  startTextOffset: 10,
+  endTextOffset: 14,
+  startTextSnippet: "开始文字",
+  endTextSnippet: "结束文字",
+  selectedText: "开始 文字",
+  content: "值得回看",
+  createdAtMs: 100,
+  updatedAtMs: 100,
+  ...overrides,
+});
 const record = (overrides: Record<string, unknown> = {}) => ({
   title: "A/B: title",
   creator: "Author",
@@ -69,7 +83,7 @@ describe("portable library archive", () => {
   });
 
   it("merges by hash, preserves the earliest added time, and rejects older progress", () => {
-  const base: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 2, lastReadAtMs: 30, page: 9, bookmarks: [{ id: "b", spineIndex: 0, page: 1, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "old", createdAtMs: 2 }] }) } } };
+    const base: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 2, lastReadAtMs: 30, page: 9, bookmarks: [{ id: "b", spineIndex: 0, page: 1, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "old", createdAtMs: 2 }] }) } } };
     const incoming: LibraryArchive = { version: 1, records: { [hash]: { contentHash: hash, ...record({ addedAtMs: 5, lastReadAtMs: 10, page: 1, bookmarks: [{ id: "b", spineIndex: 0, page: 2, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "new", createdAtMs: 3 }, { id: "c", spineIndex: 1, page: 2, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, text: "c", createdAtMs: 1 }] }) } } };
     const merged = mergeLibraryArchives(base, incoming);
     expect(merged.records[hash].addedAtMs).toBe(2);
@@ -77,6 +91,26 @@ describe("portable library archive", () => {
     expect(merged.records[hash].bookmarks.find((item) => item.id === "b")?.page).toBe(2);
     expect(merged.records[hash].bookmarks).toHaveLength(2);
     expect(() => exportLibraryArchive(merged)).not.toThrow();
+  });
+
+  it("prefers actual reading evidence over a newer import-only timestamp", () => {
+    const read = { ...record({ addedAtMs: 10, lastReadAtMs: 20, spineIndex: 0, page: 3, progressPct: 0, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, isNew: true }) };
+    const imported = { ...record({ addedAtMs: 30, lastReadAtMs: 0, spineIndex: 0, page: 0, progressPct: 0, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, isNew: true }) };
+    const merged = mergeLibraryArchives(
+      { version: 1, records: { [hash]: { contentHash: hash, ...read } } },
+      { version: 1, records: { [hash]: { contentHash: hash, ...imported } } },
+    );
+    expect(merged.records[hash].page).toBe(3);
+  });
+
+  it("does not treat the legacy isNew import timestamp as reading evidence", () => {
+    const legacy = { ...record({ addedAtMs: 20, lastReadAtMs: 20, spineIndex: 0, page: 0, progressPct: 0, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, isNew: true }) };
+    const read = { ...record({ addedAtMs: 10, lastReadAtMs: 11, spineIndex: 0, page: 2, progressPct: 0, anchorIndex: null, anchorRatio: null, anchorTextOffset: null, anchorTextSnippet: null, isNew: true }) };
+    const merged = mergeLibraryArchives(
+      { version: 1, records: { [hash]: { contentHash: hash, ...legacy } } },
+      { version: 1, records: { [hash]: { contentHash: hash, ...read } } },
+    );
+    expect(merged.records[hash].page).toBe(2);
   });
 
   it("validates device bindings separately", () => {
@@ -113,5 +147,32 @@ describe("portable library archive", () => {
     const result = parseLibraryArchive({ version: 1, records: {}, settings: { customFontName: "Noto Sans CJK" } });
     expect(result.errors).toHaveLength(0);
     expect(result.archive.settings?.customFontName).toBe("Noto Sans CJK");
+  });
+
+  it("normalizes old notes to [] and merges note ids by updated time", () => {
+    const old = parseLibraryArchive({ version: 1, records: { [hash]: record() } });
+    expect(old.errors).toHaveLength(0);
+    expect(old.archive.records[hash].notes).toEqual([]);
+    const first = { version: 1 as const, records: { [hash]: { contentHash: hash, ...record({ notes: [note()] }) } } };
+    const second = { version: 1 as const, records: { [hash]: { contentHash: hash, ...record({ notes: [note({ content: "new", updatedAtMs: 101 }), note({ id: "note-2" })] }) } } };
+    const merged = mergeLibraryArchives(first, second);
+    expect(merged.records[hash].notes?.find((item) => item.id === "note-1")?.content).toBe("new");
+    expect(merged.records[hash].notes?.map((item) => item.id)).toEqual(["note-1", "note-2"]);
+  });
+
+  it("保留可移植存档中的 forceHorizontal 布尔设置", () => {
+    const result = parseLibraryArchive({ version: 1, records: {}, settings: { forceHorizontal: true } });
+    expect(result.errors).toHaveLength(0);
+    expect(result.archive.settings?.forceHorizontal).toBe(true);
+  });
+
+  it("保留可移植存档中的 preloadNextChapter 布尔设置，并兼容旧存档缺省字段", () => {
+    const old = parseLibraryArchive({ version: 1, records: {} });
+    expect(old.errors).toHaveLength(0);
+    expect(old.archive.settings).toBeUndefined();
+
+    const result = parseLibraryArchive({ version: 1, records: {}, settings: { preloadNextChapter: true } });
+    expect(result.errors).toHaveLength(0);
+    expect(result.archive.settings?.preloadNextChapter).toBe(true);
   });
 });

@@ -1,0 +1,97 @@
+import { parseHTML } from "linkedom";
+import { describe, expect, it } from "vitest";
+import {
+  DARK_THEME_CANDIDATE,
+  applyDarkThemeContrast,
+  compositeRgba,
+  contrastRatio,
+  parseRgba,
+  type DarkThemeComputedStyle,
+  type DarkThemeStyleAdapter,
+} from "./darkThemeContrast";
+
+function style(overrides: Partial<DarkThemeComputedStyle> = {}): DarkThemeComputedStyle {
+  return {
+    color: "rgb(212, 212, 212)",
+    backgroundColor: "rgba(0, 0, 0, 0)",
+    backgroundImage: "none",
+    opacity: "1",
+    ...overrides,
+  };
+}
+
+function adapter(styles: Map<Element, DarkThemeComputedStyle>, onRead?: () => void): DarkThemeStyleAdapter {
+  return {
+    getComputedStyle: (element) => {
+      onRead?.();
+      return styles.get(element) ?? style();
+    },
+    setColor: (element, color) => {
+      const current = styles.get(element) ?? style();
+      styles.set(element, { ...current, color });
+    },
+    mark: (element) => element.setAttribute("data-reader-dark-contrast", "1"),
+  };
+}
+
+describe("dark theme contrast repair", () => {
+  it("parses RGB/alpha and composites translucent foreground over background", () => {
+    expect(parseRgba("rgb(212, 212, 212)")).toEqual({ r: 212, g: 212, b: 212, a: 1 });
+    expect(parseRgba("rgba(255, 255, 255, 0.8)")?.a).toBe(0.8);
+    const result = compositeRgba(
+      parseRgba("rgba(255, 255, 255, 0.8)")!,
+      parseRgba("rgb(30, 30, 30)")!,
+    );
+    expect(Math.round(result.r)).toBe(210);
+    expect(contrastRatio(parseRgba(DARK_THEME_CANDIDATE)!, result)).toBeGreaterThan(4.5);
+  });
+
+  it("only repairs the dark theme when the candidate materially improves contrast", () => {
+    const { document } = parseHTML("<html><body><div id='box'><p>text</p></div></body></html>");
+    const body = document.body;
+    const box = document.querySelector("#box")!;
+    const paragraph = document.querySelector("p")!;
+    const styles = new Map<Element, DarkThemeComputedStyle>([
+      [body, style({ backgroundColor: "rgb(30, 30, 30)" })],
+      [box, style({ backgroundColor: "rgba(255, 255, 255, 0.8)" })],
+      [paragraph, style()],
+    ]);
+    const count = applyDarkThemeContrast(document as unknown as Document, { theme: "dark", adapter: adapter(styles) });
+    expect(count).toBe(2);
+    expect(box.getAttribute("data-reader-dark-contrast")).toBe("1");
+    expect(paragraph.getAttribute("data-reader-dark-contrast")).toBe("1");
+    expect(styles.get(box)?.color).toBe(DARK_THEME_CANDIDATE);
+    expect(applyDarkThemeContrast(document as unknown as Document, { theme: "light", adapter: adapter(styles) })).toBe(0);
+  });
+
+  it("reads each element style once during a top-down traversal", () => {
+    const { document } = parseHTML(
+      "<html><body><div><p>one</p><section><span>two</span></section></div></body></html>",
+    );
+    const body = document.body;
+    const styles = new Map<Element, DarkThemeComputedStyle>([[body, style({ backgroundColor: "rgb(30, 30, 30)" })]]);
+    let reads = 0;
+    applyDarkThemeContrast(document as unknown as Document, { theme: "dark", adapter: adapter(styles, () => reads++) });
+    expect(reads).toBe(document.body.querySelectorAll("*").length + 2); // html + body and descendants
+  });
+
+  it("conservatively skips explicit author colors, background images and opacity", () => {
+    const { document } = parseHTML(
+      "<html><body><p id='author'>author</p><p id='image'>image</p><p id='faded'>faded</p></body></html>"
+    );
+    const body = document.body;
+    const author = document.querySelector("#author")!;
+    const image = document.querySelector("#image")!;
+    const faded = document.querySelector("#faded")!;
+    const styles = new Map<Element, DarkThemeComputedStyle>([
+      [body, style({ backgroundColor: "rgb(30, 30, 30)" })],
+      [author, style({ color: "rgb(100, 100, 100)" })],
+      [image, style({ backgroundColor: "rgb(255, 255, 255)", backgroundImage: "url(cover.png)" })],
+      [faded, style({ backgroundColor: "rgb(255, 255, 255)", opacity: "0.8" })],
+    ]);
+    expect(applyDarkThemeContrast(document as unknown as Document, { theme: "dark", adapter: adapter(styles) })).toBe(0);
+    expect(author.hasAttribute("data-reader-dark-contrast")).toBe(false);
+    expect(image.hasAttribute("data-reader-dark-contrast")).toBe(false);
+    expect(faded.hasAttribute("data-reader-dark-contrast")).toBe(false);
+  });
+});

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   applyChapterCount,
+  applyChapterCountError,
   computeProgressPct,
   createChapterCountCollection,
+  measuredChapterWeight,
   resolveProgressPct,
   summarizeLinearCounts,
 } from "./chapterCounts";
@@ -53,6 +55,15 @@ describe("chapter count collection", () => {
     expect(computeProgressPct(summary, 4)).toBe(100);
   });
 
+  it("keeps failed chapters incomplete instead of treating them as zero", () => {
+    const initial = createChapterCountCollection(4, [true, true]);
+    const failed = applyChapterCountError(initial, 4, 1).collection;
+    const summary = summarizeLinearCounts(failed, 1);
+    expect(failed.counts[1]).toEqual({ value: null, source: "error" });
+    expect(summary.complete).toBe(false);
+    expect(computeProgressPct(summary, 0)).toBeNull();
+  });
+
   it("keeps a validated baseline only when exact progress is unavailable", () => {
     expect(resolveProgressPct(null, 37)).toBe(37);
     expect(resolveProgressPct(null, 0)).toBe(0);
@@ -61,5 +72,11 @@ describe("chapter count collection", () => {
     expect(resolveProgressPct(null, Number.NaN)).toBe(0);
     expect(resolveProgressPct(0, 37)).toBe(0);
     expect(resolveProgressPct(100, 0)).toBe(100);
+  });
+
+  it("uses measured page count for a non-empty media-only chapter", () => {
+    expect(measuredChapterWeight(0, 1, 3)).toBe(3000);
+    expect(measuredChapterWeight(12, 1, 3)).toBe(12);
+    expect(measuredChapterWeight(0, 0, 3)).toBe(0);
   });
 });

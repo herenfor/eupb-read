@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   applyShelfProgressPatch,
   filterShelfEntries,
+  buildShelfFilterFacets,
+  createShelfFilterModel,
   formatShelfTime,
   markShelfEntryOpened,
   normalizeShelfEntryTextAnchors,
+  normalizeShelfAuthor,
+  normalizeShelfLanguage,
   readingAnchorFromShelfEntry,
   shelfIdFor,
   sortShelfEntries,
   type ShelfEntry,
 } from "./shelf";
+import { hasReadPosition } from "./readEvidence";
 
 function entry(over: Partial<ShelfEntry>): ShelfEntry {
   return {
@@ -54,6 +59,11 @@ describe("sortShelfEntries", () => {
   it("recent 按最近阅读排序", () => {
     expect(sortShelfEntries(all, "recent").map((e) => e.id)).toEqual(["a", "c", "b"]);
   });
+  it("recent 对未读导入记录回退到 addedAt", () => {
+    const imported = entry({ id: "imported", addedAtMs: 10, lastReadAtMs: 0, isNew: true });
+    const read = entry({ id: "read", addedAtMs: 1, lastReadAtMs: 2, isNew: false });
+    expect(sortShelfEntries([read, imported], "recent").map((e) => e.id)).toEqual(["imported", "read"]);
+  });
   it("added 按最近添加排序", () => {
     expect(sortShelfEntries(all, "added").map((e) => e.id)).toEqual(["b", "c", "a"]);
   });
@@ -80,6 +90,42 @@ describe("filterShelfEntries", () => {
   });
 });
 
+describe("shelf filter metadata", () => {
+  it("normalizes CJK whitespace/format characters but preserves western name spaces", () => {
+    expect(normalizeShelfAuthor("七菜　なな\u200b\u2060なな")).toBe("七菜なななな");
+    expect(normalizeShelfAuthor("ＡＢＣ１２３")).toBe("ABC123");
+    expect(normalizeShelfAuthor("John Smith")).toBe("John Smith");
+    expect(normalizeShelfAuthor("Alice\u200bSmith")).toBe("Alice\u200bSmith");
+    expect(normalizeShelfAuthor("　")).toBe("未知作者");
+  });
+
+  it("groups BCP-47 languages and treats omitted legacy values as unknown", () => {
+    expect(normalizeShelfLanguage("zh-CN")).toBe("中文");
+    expect(normalizeShelfLanguage("ja_JP")).toBe("日语");
+    expect(normalizeShelfLanguage("en-US")).toBe("英语");
+    expect(normalizeShelfLanguage()).toBe("未知语言");
+  });
+
+  it("filters by intersection and reports cross-filtered facet counts", () => {
+    const now = new Date(2026, 7, 23, 12).getTime();
+    const day = 24 * 60 * 60 * 1000;
+    const books = [
+      entry({ id: "a", creator: "七菜　なな", title: "甲", language: "zh-CN", addedAtMs: now - 1_000 }),
+      entry({ id: "b", creator: "七菜\u200bなな", title: "乙", language: "ja-JP", addedAtMs: now - 2 * day }),
+      entry({ id: "c", creator: "John Smith", title: "甲", addedAtMs: now - 40 * day }),
+      entry({ id: "d", creator: "其他", title: "丙", language: "en", addedAtMs: new Date(2025, 1, 1).getTime() }),
+    ];
+    const model = createShelfFilterModel(books, { authors: ["七菜なな"], titles: ["乙"] }, now);
+    expect(model.entries.map((book) => book.id)).toEqual(["b"]);
+    expect(model.facets.titles.counts["甲"]).toBe(1);
+    expect(model.facets.titles.counts["乙"]).toBe(1);
+    expect(model.facets.languages.counts["中文"]).toBe(0);
+    expect(model.facets.languages.counts["日语"]).toBe(1);
+    expect(model.facets.languages.counts["未知语言"]).toBe(0);
+    expect(buildShelfFilterFacets(books, {}, now).timeSegments.counts.today).toBe(1);
+  });
+});
+
 describe("formatShelfTime", () => {
   it("无效值返回空串", () => {
     expect(formatShelfTime(0)).toBe("");
@@ -87,6 +133,13 @@ describe("formatShelfTime", () => {
 });
 
 describe("progress entry merge", () => {
+  it("recognizes a real saved position even when the rounded percentage is zero", () => {
+    expect(hasReadPosition(entry({ progressPct: 0, page: 4, isNew: true }))).toBe(true);
+    expect(hasReadPosition(entry({ progressPct: 0, page: 0, spineIndex: 0, isNew: true, anchorTextOffset: 8 }))).toBe(true);
+    expect(hasReadPosition(entry({ progressPct: 0, page: 0, spineIndex: 0, isNew: true, lastReadAtMs: 0 }))).toBe(false);
+    expect(hasReadPosition(entry({ progressPct: 0, page: 0, spineIndex: 0, isNew: false }))).toBe(true);
+  });
+
   it("清除新书标记不会覆盖刚写入的页码与锚点", () => {
     const original = entry({ id: "book", page: 2, progressPct: 10, isNew: true });
     const progressed = applyShelfProgressPatch([original], "book", {

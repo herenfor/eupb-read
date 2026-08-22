@@ -30,6 +30,7 @@ pub fn run() {
             linked_library::linked_library_update_progress,
             linked_library::linked_library_mark_opened,
             linked_library::linked_library_update_bookmarks,
+            linked_library::linked_library_update_notes,
             linked_library::linked_library_replace_records,
             linked_library::linked_library_thumbnail_read,
             linked_library::linked_library_thumbnail_write_raw,
@@ -37,7 +38,8 @@ pub fn run() {
             fonts_import_raw,
             fonts_list,
             fonts_read,
-            fonts_delete
+            fonts_delete,
+            system_fonts::system_fonts_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -264,5 +266,6 @@ mod tests {
     }
 }
 mod linked_library;
+mod system_fonts;
 
 use linked_library::LinkedLibraryWriteState;

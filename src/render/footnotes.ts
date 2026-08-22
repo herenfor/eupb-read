@@ -51,6 +51,14 @@ export function isFootnoteLink(a: HTMLAnchorElement): boolean {
   return anchor !== "" && findAsideById(note, anchor) !== null;
 }
 
+/** Return only a real footnote anchor in this document for hover handling. */
+export function getFootnoteHoverAnchor(target: EventTarget | null, doc: Document | null): HTMLAnchorElement | null {
+  if (!doc || !target || typeof (target as Element).closest !== "function") return null;
+  const a = (target as Element).closest<HTMLAnchorElement>("a");
+  if (!a || !doc.documentElement?.contains(a) || !isFootnoteLink(a)) return null;
+  return a;
+}
+
 export interface FootnoteInfo {
   text: string;
   /** 注释含图片等富内容时的 HTML（已消毒章内 DOM，图片 src 已是 blob URL） */

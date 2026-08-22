@@ -22,6 +22,12 @@ export class ShelfProgressWriter {
     private readonly options: { debounceMs?: number } = {},
   ) {}
 
+  /** Start a new reading session for a book without disturbing other books. */
+  beginSession(id: string): void {
+    if (this.disposed) throw new Error("阅读进度写入器已销毁");
+    this.startedIds.delete(id);
+  }
+
   enqueue(id: string, patch: ShelfProgressPatch): void {
     if (this.disposed) throw new Error("阅读进度写入器已销毁");
     const firstForBook = !this.startedIds.has(id);

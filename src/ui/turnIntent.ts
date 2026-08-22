@@ -34,6 +34,7 @@ export class WheelTurnAccumulator {
 export class TurnIntentBuffer {
   private ready = false;
   private pending: TurnDirection | null = null;
+  private displayedOnce = false;
 
   /** 进入章节加载/最终定位阶段；已有待执行方向继续保留。 */
   markLoading(): void {
@@ -43,6 +44,9 @@ export class TurnIntentBuffer {
   /** ready 时返回立即执行方向；否则覆盖单槽并返回 null。 */
   request(direction: TurnDirection): TurnDirection | null {
     if (this.ready) return direction;
+    // The first display-ready is an unlock boundary, not a replay boundary:
+    // input received while the book is initially hidden/loading is stale.
+    if (!this.displayedOnce) return null;
     this.pending = direction;
     return null;
   }
@@ -50,6 +54,11 @@ export class TurnIntentBuffer {
   /** 最终显示准备完成；取出且清空唯一待执行方向。 */
   markReady(): TurnDirection | null {
     this.ready = true;
+    if (!this.displayedOnce) {
+      this.displayedOnce = true;
+      this.pending = null;
+      return null;
+    }
     const direction = this.pending;
     this.pending = null;
     return direction;
@@ -63,5 +72,9 @@ export class TurnIntentBuffer {
 
   get isReady(): boolean {
     return this.ready;
+  }
+
+  get hasDisplayedOnce(): boolean {
+    return this.displayedOnce;
   }
 }

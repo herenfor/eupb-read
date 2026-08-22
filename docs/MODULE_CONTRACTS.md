@@ -74,6 +74,31 @@
 - 书架打开应恢复进度；重复导入同一本书应保留原有进度和首次添加时间。
 - 阅读进度写入必须保证同一本书最后稳定位置胜出：UI 先更新内存态，后台写入单通道串行并合并待写值；触发条件必须包含实际页/锚点状态，不能只依赖取整后的进度百分比。返回书架和 Tauri 关闭窗口前必须 flush。`markOpened` 只能修改 `isNew`，不能用陈旧整条记录覆盖进度。
 - 章节字数统计由 App 的 generation-bearing counts ref/state 分离维护：当前完成章节从 ready anchor 的 `totalChars` 写入 measured，其余 linear 章节由可取消 idle job 每 slice 最多估算一章；结构 provisional 统计排除 script/style、hidden、`aria-hidden=true` 和明确脚注，但不承诺未访问章节的 computed CSS hidden。扫描未 complete 时 `resolveProgressPct` 必须沿用打开时书架 baseline，不能写临时 0/100；complete 后才用最新 counts 与当前 anchor 更新 baseline。旧 session/book/server 的回调不得写入新书；统计不得参与 CSS、分页或布局。
+- B-050：书架的“读过/继续阅读”必须使用 `hasReadPosition` 阅读证据（`isNew=false`、非零位置/百分比或有效锚点），不得把暂时的 `progressPct=0` 当作未读；进度条仍只显示可用百分比。状态栏在 counts incomplete 时显示“计算中”，complete+estimated 显示“约 N%”，全 measured 才显示普通 N%。每次成功稳定位置写入同时清除 `isNew`，`markOpened` 仍只能执行 isNew-only 更新。
+- B-050：章节 provisional 统计失败时写入 `error`/unknown 而非真实 0；纯媒体/无可见文字章节使用 `MEDIA_UNIT_CHAR_WEIGHT=1000` 每媒体单元的保守权重（SVG 内嵌 image 不重复计数），当前 measured 媒体章按 `pageCount * MEDIA_UNIT_CHAR_WEIGHT` 计算。只在最后一个 linear 章节最后一页允许明确 100%。
+- B-050：结构 provisional counts 按 `contentHash ?? shelfId` 写入版本化、有界本机缓存；缓存严格校验版本、linear mask/长度和 safe integer，最多保留 256 个按 touchedAt 的 LRU 条目、总计数上限 100000，缓存不进入 portable archive，Quota/损坏必须按 cache miss 处理。打开时恢复 cached estimates 并跳过对应 job；job 使用带 100ms timeout 的有界 scheduler slice（默认最多 4 章），批量提交但不阻塞首屏，非 estimated 结果不得擦除已有 structural estimate。
+- B-051：`TurnIntentBuffer` 按每本书生命周期区分首次 loading 与已显示后的跨章 loading。首次 display-ready 前 `request()` 必须完全丢弃且首次 `markReady()` 不消费 pending；首次 ready 只解锁并 reset 外层 wheel 累计。之后跨章 loading 继续保留最后方向单槽并在下一次 ready 消费一次；`reset` 只清 ready/pending、不抹除本书已显示历史，换书依靠 `ReaderView key`/新实例恢复初始锁。
+- B-052：宿主 App 与 iframe `ChapterPaginator` 共用 `selectionGuard`；仅非编辑区域的 A/a + Ctrl 或 Meta 被 preventDefault，并清除对应 document 的 selection。`input`、`textarea`、`contenteditable` 及其后代放行；方向键翻页不受影响。进入 reader 的 `view/bookKey` 生命周期只清理一次宿主旧 selection，章节切换/设置重排不得清除正文手动选择。
+- B-053/C-42：dark theme 的章节对比度修正只在 iframe load 后、首次 `prepareChapterForDisplay`/measure 前运行一次。扫描按 html 基底到 body 后代单次 DFS，每个元素只读取一次 computed style，并在父元素写入 inline 修正后再访问子元素，以保持真实继承。仅对 computed 前景近似主题 `rgb(212,212,212)`、有效合成背景下 contrast<4.5 且 `#1a1a1a` 显著改善的元素写普通优先级 inline color 与 `data-reader-dark-contrast`；背景容器可因子孙文本修正。background-image、未知颜色/合成、opacity<1 和作者明确不同颜色必须保守跳过；marker 随文档替换自然销毁，不参与翻页或 reflow。
+- B-054/C-43：脚注 marker 与宿主 `FootnotePop` 共享 `FootnoteHoverGate`；marker/overlay 任一 enter 取消 140ms close grace，leave 只调度且重复 leave 不堆 timer，两者均离开且未 pinned 才触发一次 close。未固定且 gate 仍 visible 的同一 marker 重复 mouseover 不得重复 resolve/show/payload；普通正文或非脚注 anchor mouseover 完全不得触碰 gate，只有当前文档内经 `getFootnoteHoverAnchor` 确认的脚注 anchor 才能 marker-enter。show、点击 pinned、再次点击、正文空白、关闭按钮、章节 load cleanup 和 dispose 必须同步 visible/pinned/timer。`ReaderHandle.setFootnoteOverlayHover()` 是宿主 hover 转发边界；不改 popup CSS/定位/分页。
+- B-055/C-44：`FootnotePayload.rect` 与 `FootnotePop` 必须共享 `.main` 局部坐标系；弹层 JSX 位于 `.main` 内、status bar 之前，z-index 保持 60。`placeFootnote` 对有限非负输入按 gap=8 输出非负 `left/top/cardWidth/maxHeight`：宽度不超过 `min(300, containerWidth-2gap)`，右/左与上/下按完整可见优先，均不足时按可用空间较大方向 clamp；容器不足时 maxHeight 为 height-2gap。真实 card/main 尺寸变化才更新 state，ResizeObserver/resize listener 必须 cleanup，不改变 B-054 hover gate 或分页。
+- B-056/C-45：dark theme 的章节覆盖样式仅在 `buildOverrideCss` 中为 `#epub-viewer` 注入普通优先级 `text-shadow: 1px 1px 1px #1e1e1e`，通过 CSS 继承为浅色盒/复杂背景提供可读性兜底；不得写成 `#epub-viewer *` 或 `!important`，不得在 light/sepia 注入。作者后代明确的 `text-shadow`（包括 `none`）依靠正常级联覆盖；不改 `applyDarkThemeContrast`、分页或 Rust。
+
+- B-058/C-47：字体设置必须区分 `fontSource="system"|"imported"` 与 `customFontId`；跟随书籍时清空 source/id/name。旧版只有 `customFontName` 时，字体元数据到达后尽量绑定 imported id，缺失时安全回退。localStorage 和 portable archive 保存 source/id/name，不保存系统字体路径或 Blob URL。
+- B-058/C-47：`system_fonts_list` 仅由 Tauri Windows 首次打开字体中心时调用，返回 DirectWrite 的 `family`/`localizedNames`，不得返回路径或读取系统字体文件；结果会话缓存。非 Windows 返回空列表，Android 仅接口预留。枚举 loading/error/empty 必须可见；系统字体缺失或命令失败不得后台清空 persisted system family。
+- B-058/C-47：导入字体启动只调用 `FontStore.list()` 元数据；仅当前 imported id 调用一次 `readFont` 并创建 Blob URL。懒加载竞态不得让旧读取覆盖新选择；新 URL 创建成功后才 revoke 旧 URL，读取失败保留旧 URL；切换到书籍/system 和卸载必须释放活动 URL。
+- B-058/C-47：FontSettingsPanel 独立于主菜单，提供 tabs、搜索、导入/删除与当前选择；系统/导入列表使用固定行高虚拟窗口，必须有总高度及 top/bottom spacer、overscan 和 clamp，能够滚动到最后一项；列表行不默认用自身字体渲染。面板 z-index=42，backdrop z-index=41，关闭任一层不得留下不可达状态。
+- B-058/C-47：注入 CSS 的 family 字符串必须转义反斜杠、双引号、CR、LF、form-feed 等 CSS 字符串控制字符；system family 只写 `font-family`，不得生成 `@font-face`，imported 仅使用当前选中 Blob 的一个 `@font-face`。
+- B-059/C-48：正文搜索仅对当前打开的可重排 EPUB 提供按需 `SearchSession`；首次非空查询按 spine 顺序提取并在本次书籍会话缓存章节文本，逐章让出主线程并报告进度，关闭/切书/dispose 必须取消并释放 session。标准化正文和字符映射必须使用紧凑字符串/TypedArray 一类有界结构，不得为每个字符长期保留 JavaScript 对象，也不得为每条命中重复拆分整章。不得在打开书籍时预扫描，不生成持久化索引，不进入存档。
+- B-059/C-48：搜索文本按可见结构提取；`script/style/noscript/template/head`、`hidden`、`aria-hidden` 和脚注排除，块级元素形成边界、行内元素可拼接。标准化使用 NFKC、小写、软连字符移除及布局空白处理，并保留原文范围映射。支持标准化短语和同一上下文内多关键词 AND，短语优先去重；不把编辑距离、OR、前缀、邻近或语义搜索伪装成首版能力。
+- B-059/C-48：查询使用 180ms debounce、AbortController 和 generation 门，旧查询不得回写新结果；结果最多保留 101 条，UI 最多展示 100 条。结果须提供章节路径/标题、原文片段和 UTF-16 高亮范围，并携带现有 code-point 文本锚点与 32 字符锚点片段。
+- B-059/C-48：结果预览不得写阅读进度；仅用户点击结果时才执行跳转并记录现有最多 3 步 back/forward 历史。同章优先 direct 定位，跨章经过 display gate；fixed-layout 书籍不得显示搜索入口。搜索结果不得依赖全书百分比定位。
+- B-060/C-49：正文笔记锚点使用章节 path/spine、Unicode code-point 起止 offset、首尾有界 snippet 与选中文字；不得以页码或全书百分比作为笔记身份。跳转必须进入既有 3 步 back/forward 历史；解析失败不得猜测其他正文。
+- B-060/C-49：笔记下划线只用 iframe 内 CSS Custom Highlight，不得用 span 包裹、改写 EPUB DOM 或触发章节重排。只为当前章节建立文本索引与 ranges；API 不可用时保留数据和列表、降级为无下划线。
+- B-060/C-49：笔记属于 portable library record，同 ID 以较新 updatedAt 合并且不得携带设备路径。前端/Rust 均限制有效非空字段、4096 code-point 选区和 10000 code-point 内容；列表必须可分批访问全部记录。
+- B-061/C-50：`preloadNextChapter` 是兼容保留的内部字段，界面名称为默认关闭的“高性能模式”；它不属于活动章节布局身份，单独切换不得重载当前 paginator。fixed-layout 必须禁用；关闭时只能保留当前 iframe/paginator，开启时最多保留上一篇/当前篇/下一篇三个同尺寸槽位，后台槽可布局但不可见、不可交互。调度必须先完成下一篇，再开始上一篇，不能并发执行两个隐藏完整分页任务。
+- B-061/C-50：预渲染必须复用 `ChapterPaginator.loadAndWaitForDisplay()` 的完整字体、补偿、重算与最终定位边界；不得只等待 sanitize 或 iframe load。后台 slot 的 state/issues/链接/脚注/选区/翻页/display-ready 全部以 active identity 门控，绝不能写 App 当前状态。
+- B-061/C-50：缓存提升只能在 React 已提交目标 spineIndex 的章节 effect 中进行，并再次核验 linear 相邻关系、path、最终 ready 与 slot 身份；显式目录/搜索/书签/笔记/历史跳转不得提升缓存，未命中/失败走原 P0。顺序提升后旧活动槽保留为反向缓存。设置/字体/尺寸变化、关闭模式、切书和 dispose 必须取消并释放全部备用 paginator；书籍结束时去重 dispose 所有 slot 后才 `ResourceServer.revokeAll()`。
 - 结束书籍会话时先 flush 最新进度，再由 React 提交卸载 ReaderView/paginator；其 cleanup 完成资源撤销后，App 才清空 `book/server/bookKey/initialAnchor/currentShelfId/chapterCounts` 等会话状态。页面中心只用于观察锚点，不参与阅读器布局或渲染规则。
 - 批量导入期间不得逐本替换书架列表；导入结果在全部完成后一次性合并，既有封面组件不应因每本完成而重复刷新。
 - 外链只允许交给系统安全打开 `http`、`https`、`mailto`、`tel`。
@@ -90,11 +115,15 @@
 - 打开正文前必须验证当前绑定；stat 签名变化时重新流式哈希，内容哈希不匹配不得把旧记录的进度套到新文件。源文件读取与封面 ZIP 条目读取必须有尺寸/路径边界，重新关联只有完整哈希精确匹配才成功。
 - C-41 封面元数据由 TypeScript 浏览器预览与 Rust 链接导入共享同一候选顺序：EPUB3 `cover-image`、EPUB2 `meta[name=cover]`、manifest href basename stem 精确为 `cover`。href 必须先移除 query/fragment、URL 解码并按 OPF 目录规范化；候选必须存在并为 `image/*`，或由 jpg/jpeg/png/webp/avif/gif/svg 扩展名推断为图片。Rust 必须保留 manifest 源顺序并仅用已打开 ZIP 的 `by_name` 查询候选，不得扫描/解压全部 ZIP、额外哈希或在启动时迁移旧 binding；失效的高优先级候选必须继续 fallback。桌面导入差异来自 Rust 原生链接书库解析，不是 WebView2 图片解码差异。
 - 阅读进度保持“最后稳定值胜出”：前端合并连续更新，返回书架、隐藏和正常关闭时 flush；`markOpened` 只能改变 `isNew`。当前章分子优先文本 offset；仅没有可用文本锚点时可按当前页比例估算，不能把已恢复的 legacy anchor 写成 0 字。`linear=no` 可恢复但不贡献其自身全书权重。
+- B-050：新导入记录的 `lastReadAtMs`/`last_read_at_ms` 必须为 0，最近阅读 UI 在 0 时回退 `addedAtMs`；成功 `updateProgress` 必须设置 `isNew=false`。portable merge 先按 `hasReadEvidence` 区分真实位置与 import-only 记录，再按 `lastReadAtMs` 决胜，保持最早 addedAt、`isNew` AND 和书签合并。
+- `ShelfProgressWriter.beginSession(id)` 只重置该书的首次稳定写入门；调用方必须先完成上一个会话 flush，再开始新打开，不能破坏 in-flight/pending 最新值合并。
 - 缩略图是设备缓存：只对接近视口的卡片生成/读取，全局并发最多 4，派生尺寸最多 240×360，单项最多 5 MiB，总量最多 100 MiB 并按 LRU 淘汰；只接受 JPEG/WebP 派生结果。它不得进入同步存档，删除条目时应删除对应缓存，缓存缺失不能影响打开正文。
 - 版本 1 存档只包含可同步记录和经过白名单/范围校验的阅读器设置；不得包含源路径、设备绑定、正文、封面原图、缩略图或自定义 CSS 中的本机 `file:`/绝对路径。导入时按 `contentHash` 合并，较新的稳定进度和书签胜出；没有本机绑定的记录保留为不可用，等待用户重新定位。
 - 桌面 EPUB/存档路径只通过系统文件选择、桌面拖放或受控命令进入；存档文本由 dialog/fs 插件保存和读取。桌面运行时不得重新注册旧复制正文/封面与 `shelf.json` 命令。
 - 浏览器 IndexedDB 仅为隔离预览后端，不承诺持久源路径；真实链接书库行为以 Tauri 后端为准。
 - 本次契约改变经用户明确同意不迁移测试书库。切换时可以删除旧托管正文和缓存，但不得扫描或删除用户原始 EPUB。
+- B-062/C-51：书架筛选只消费已持久化元数据，不得在打开抽屉或切换筛选时读取源 EPUB。`language` 是可选同步字段；旧记录缺失必须归入“未知语言”。浏览器和 Rust 新导入取 OPF 第一个非空 `dc:language`，portable archive v1 以可选字段向后兼容。
+- B-062/C-51：作者分类键使用 NFKC，并仅移除 Han/Hiragana/Katakana 字符之间的 Unicode `White_Space`/`Cf`；不得覆盖原始 `creator`，不得删除西文姓名内部空格。UI 必须复用 `createShelfFilterModel` 的索引、匹配和交叉计数，不维护第二套规范化实现。
 
 ## 6. 渲染规则变更
 
@@ -120,3 +149,12 @@
 
 - Tauri 桌面运行时同一时间只能保留一个应用实例；浏览器 `pnpm dev` 不受此约束。
 - 官方单实例插件必须先于其他 Tauri 插件注册。后续启动通知到达时，已有 `main` 窗口按“显示、取消最小化、聚焦”顺序恢复；窗口暂时不存在或单步窗口调用失败不得让现有实例退出。
+
+## B-057/C-46：强制横排设置契约
+
+- `ReaderSettings.forceHorizontal` 缺省/旧存储 `undefined` 等同 `false`；`DEFAULT_SETTINGS` 明确写入 `false`。
+- `App` 负责初始化、localStorage 写入、恢复默认和存档导入；`MenuPanel` 只提交布尔切换，现有 `ReaderView` settings identity/debounce/reload 负责重载并保留锚点。
+- `ReaderView` 对 `book.fixedLayout` 将有效渲染设置中的 `forceHorizontal` 置为 false；固定版式不被横排覆盖。
+- `sanitizeChapter` 仅在开启时注入 `writing-mode: horizontal-tb !important`、`-webkit-writing-mode: horizontal-tb !important` 和 `text-orientation: mixed !important`。规则覆盖 html/body/viewer 及不在 SVG 树内的普通后代，不声明 `direction`。
+- SVG 及其后代排除后代覆盖选择器；SVG 内显式声明的书写模式按 CSS 级联保留。仅依赖 html/body 继承、但 SVG 内未声明的原始竖排状态无法凭 CSS 恢复，这是已知边界。
+- light/dark/sepia 不改变横排规则；设置持久化与 portable archive 白名单必须同时保留该字段。

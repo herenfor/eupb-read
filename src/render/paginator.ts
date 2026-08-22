@@ -1,17 +1,24 @@
 import { sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { resolvePath, isExternalUrl, isFragmentOnly, splitHref } from "../core/paths";
-import { isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes";
+import { getFootnoteHoverAnchor, isFootnoteLink, resolveFootnote, type FootnoteInfo } from "./footnotes";
 import type { ResourceServer } from "./resources";
 import { OwnedBlobUrls } from "./blobOwnership";
 import { TEXT_MEASURE, type ReaderSettings } from "./settings";
 import { VisibilityGate } from "./displayGate";
 import { hasAuthoredCssProperty } from "./cssRewrite";
+import { clearDocumentSelection, isSelectAllShortcut } from "./selectionGuard";
+import { applyDarkThemeContrast } from "./darkThemeContrast";
+import { FootnoteHoverGate } from "./footnoteHoverGate";
 import { waitForDoubleRaf, waitForFontsReady } from "./asyncWait";
 import {
   buildVisibleTextIndex,
+  captureTextSelection,
   resolveTextAnchorOffset,
+  resolveTextRangeOffsets,
   sanitizePersistedTextAnchor,
   type TextAnchorData,
+  type TextRangeAnchorData,
+  type TextSelectionPayload,
   type VisibleTextIndex,
 } from "./textAnchor";
 
@@ -60,6 +67,15 @@ export interface FootnotePayload {
   pinned: boolean;
 }
 
+export interface ReaderNoteForPaginator extends TextRangeAnchorData {
+  id: string;
+  selectedText?: string;
+}
+
+export interface SelectionContextPayload extends TextSelectionPayload {
+  chapterPath: string;
+}
+
 export interface LoadOptions {
   /** 跳转到页内锚点（目录跳转用） */
   anchor?: string;
@@ -102,6 +118,7 @@ export interface ReadingAnchor extends TextAnchorData {
   ratio: number;
   charsRead: number;
   totalChars: number;
+  mediaUnits?: number;
 }
 
 /** Pure restore precedence shared by initial layout and tests. */
@@ -1668,9 +1685,17 @@ export class ChapterPaginator {
   private pendingFallbackPage: number | null = null;
   /** Built once after current chapter layout is stable; never spans documents. */
   private textIndex: VisibleTextIndex | null = null;
+  private notes: ReaderNoteForPaginator[] = [];
+  private selectionContextMenuHandler?: (payload: SelectionContextPayload) => void;
+  private contextMenuHandler = (e: MouseEvent): void => this.handleContextMenu(e);
   /** 本次加载需要“停在最后一页且翻好页再显示”（回翻上一章防闪页） */
   private pendingStartAtEnd = false;
   private lastState: ChapterState = { status: "loading" };
+  /** 最终 display-ready（而非中途 status=ready）结果，供预加载槽位等待。 */
+  private displayReadySeq = -1;
+  private displayReadyResult = false;
+  private displayReadyPromise: Promise<boolean> = Promise.resolve(false);
+  private resolveDisplayReady: ((ready: boolean) => void) | null = null;
   private recomputeRetries = 0;
   /** reflow 序号：丢弃过期测量结果，防快速缩放时旧布局覆盖新布局 */
   private reflowSeq = 0;
@@ -1678,6 +1703,8 @@ export class ChapterPaginator {
   private lastFootnoteEl: HTMLElement | null = null;
   /** 当前脚注是否被点击固定（固定时不随 hover 移出关闭） */
   private footnotePinned = false;
+  /** iframe 标记与宿主弹层共享的短暂 hover 交接窗口。 */
+  private footnoteHoverGate: FootnoteHoverGate;
   /** 第二遍 margin 处理写回过的元素与原始 inline 值（下次测量前恢复） */
   private marginFixes: Array<{
     el: HTMLElement;
@@ -1741,17 +1768,43 @@ export class ChapterPaginator {
     /** 外部链接（http/https/mailto/tel）点击回调，由 App 层调系统默认浏览器打开 */
     private onExternalLink?: (url: string) => void,
     /** 首次测量、分页与最终入口定位全部完成，iframe 已可安全交互。 */
-    private onDisplayReady?: () => void
+    private onDisplayReady?: () => void,
+    /** 有效正文选区的现代右键菜单数据；通过 setter 可保持最新 UI 回调。 */
+    onSelectionContextMenu?: (payload: SelectionContextPayload) => void
   ) {
+    this.selectionContextMenuHandler = onSelectionContextMenu;
     this.displayGate = new VisibilityGate(this.iframe, {
       timeoutMs: INITIAL_RENDER_GATE_TIMEOUT_MS,
     });
+    this.footnoteHoverGate = new FootnoteHoverGate(() => this.onFootnoteClose?.());
+  }
+
+  setSelectionContextMenuHandler(handler?: (payload: SelectionContextPayload) => void): void {
+    this.selectionContextMenuHandler = handler;
+  }
+
+  /** 清除 iframe 内原生文本选区（关闭选区菜单或进入笔记编辑时使用）。 */
+  clearTextSelection(): void {
+    this.contentDoc?.getSelection()?.removeAllRanges();
+  }
+
+  /** 更新当前书籍笔记；只刷新当前章节的 Highlight，不触发重排或重新测量。 */
+  setNotes(notes: ReaderNoteForPaginator[]): "applied" | "unsupported" | "deferred" {
+    this.notes = notes.slice();
+    if (!this.contentDoc || !this.viewer || !this.textIndex) return "deferred";
+    return this.applyNoteHighlights();
   }
 
   /** 加载一章。path 为规范化内部路径。 */
   async load(path: string, opts: LoadOptions = {}): Promise<void> {
     this.abortMeasureWaits();
     const seq = ++this.loadSeq;
+    this.displayReadySeq = -1;
+    this.displayReadyResult = false;
+    this.resolveDisplayReady?.(false);
+    this.displayReadyPromise = new Promise<boolean>((resolve) => {
+      this.resolveDisplayReady = resolve;
+    });
     this.disposed = false;
     this.recomputeRetries = 0;
     // 换章加载：丢弃旧锚点与旧页号（页号只对同章重排有意义，
@@ -1783,6 +1836,7 @@ export class ChapterPaginator {
     const htmlText = this.server.textFor(path);
     if (htmlText === undefined) {
       this.emit({ status: "error", message: `章节资源缺失：${path}` });
+      this.finishDisplayReady(seq, false);
       this.displayGate.release(seq);
       return;
     }
@@ -1807,6 +1861,7 @@ export class ChapterPaginator {
       ownedCssUrls.revokeAll();
       if (seq === this.loadSeq) {
         this.emit({ status: "error", message: `章节渲染失败：${(e as Error).message}` });
+        this.finishDisplayReady(seq, false);
         this.displayGate.release(seq);
       }
       return;
@@ -1837,6 +1892,7 @@ export class ChapterPaginator {
       if (this.chapterCssUrls === ownedCssUrls) this.chapterCssUrls = new OwnedBlobUrls();
       if (seq === this.loadSeq && !this.disposed) {
         this.emit({ status: "error", message: `章节渲染失败：${(e as Error).message}` });
+        this.finishDisplayReady(seq, false);
         this.displayGate.release(seq);
       }
       return;
@@ -1851,6 +1907,7 @@ export class ChapterPaginator {
     const doc = this.iframe.contentDocument;
     if (!doc) {
       this.emit({ status: "error", message: "无法访问章节内容" });
+      this.finishDisplayReady(seq, false);
       this.displayGate.release(seq);
       return;
     }
@@ -1858,6 +1915,7 @@ export class ChapterPaginator {
     const viewer = doc.getElementById(VIEWER_ID);
     if (!viewer) {
       this.emit({ status: "error", message: "章节缺少阅读器容器" });
+      this.finishDisplayReady(seq, false);
       this.displayGate.release(seq);
       return;
     }
@@ -1867,6 +1925,13 @@ export class ChapterPaginator {
     // 可保证 blob 文档的第一帧也不会漏出，同时 visibility:hidden 仍可测量。
     this.displayGate.hold(seq);
     this.emit({ status: "measuring" });
+    if (this.settings.theme === "dark") {
+      try {
+        applyDarkThemeContrast(doc, { theme: this.settings.theme });
+      } catch {
+        // Contrast repair is conservative and must never block chapter display.
+      }
+    }
     doc.addEventListener("load", this.imgHandler, true);
     // 拦截书内链接：防止 iframe 自身导航导致内容丢失
     doc.addEventListener("click", this.linkHandler, true);
@@ -1879,12 +1944,18 @@ export class ChapterPaginator {
     doc.addEventListener("wheel", this.wheelHandler, { passive: false });
     // 键盘翻页：焦点在书页内时，方向键事件不会冒泡到主窗口，需在此监听
     doc.addEventListener("keydown", this.keyHandler);
+    // 阅读器内始终屏蔽浏览器原生右键菜单；只有有效正文选区才回调 UI。
+    doc.addEventListener("contextmenu", this.contextMenuHandler);
     void this.prepareChapterForDisplay(seq, atEnd)
       .then((prepared) => {
-        if (!prepared || seq !== this.loadSeq || this.disposed) return;
+        if (!prepared || seq !== this.loadSeq || this.disposed) {
+          if (seq === this.loadSeq && this.disposed === false) this.finishDisplayReady(seq, false);
+          return;
+        }
         // 先解除显示门，再通知 UI 消费加载期输入；这样缓冲翻页不会在
         // 锚点/章末定位之前执行，也不会依赖中途的 ready 状态事件。
         this.displayGate.release(seq);
+        this.finishDisplayReady(seq, true);
         this.onDisplayReady?.();
       })
       .catch((error: unknown) => {
@@ -1893,6 +1964,7 @@ export class ChapterPaginator {
             status: "error",
             message: `章节布局失败：${error instanceof Error ? error.message : String(error)}`,
           });
+          this.finishDisplayReady(seq, false);
         }
       })
       .finally(() => this.displayGate.release(seq));
@@ -1919,6 +1991,35 @@ export class ChapterPaginator {
       this.setPage(Math.max(0, this.metrics.pageCount - 1));
     }
     return true;
+  }
+
+  /** 最终显示门已解除且入口定位完成。 */
+  get isDisplayReady(): boolean {
+    return this.displayReadySeq === this.loadSeq && this.displayReadyResult;
+  }
+
+  /** 等待当前（或指定代次）章节完成最终 display-ready。 */
+  waitForDisplayReady(expectedLoadSeq: number = this.loadSeq): Promise<boolean> {
+    if (expectedLoadSeq !== this.loadSeq) return Promise.resolve(false);
+    if (this.displayReadySeq === expectedLoadSeq) return Promise.resolve(this.displayReadyResult);
+    return this.displayReadyPromise;
+  }
+
+  /** 加载并等待最终 display-ready；预加载器不得只等待 iframe load。 */
+  async loadAndWaitForDisplay(path: string, opts: LoadOptions = {}): Promise<boolean> {
+    const loading = this.load(path, opts);
+    const expectedLoadSeq = this.loadSeq;
+    await loading;
+    return this.waitForDisplayReady(expectedLoadSeq);
+  }
+
+  private finishDisplayReady(seq: number, ready: boolean): void {
+    if (seq !== this.loadSeq || this.displayReadySeq === seq) return;
+    this.displayReadySeq = seq;
+    this.displayReadyResult = ready;
+    const resolve = this.resolveDisplayReady;
+    this.resolveDisplayReady = null;
+    resolve?.(ready);
   }
 
   /** 设置分栏并等待字体就绪后测量（带超时保护：任何一步挂起都不能阻塞 ready）。 */
@@ -3120,6 +3221,57 @@ export class ChapterPaginator {
       return;
     }
     this.textIndex = buildVisibleTextIndex(this.contentDoc, this.viewer);
+    this.applyNoteHighlights();
+  }
+
+  private handleContextMenu(e: MouseEvent): void {
+    const doc = this.contentDoc;
+    const viewer = this.viewer;
+    if (!doc || !viewer || !viewer.contains(e.target as Node | null)) return;
+    e.preventDefault();
+    const index = this.textIndex ?? buildVisibleTextIndex(doc, viewer);
+    this.textIndex = index;
+    const payload = captureTextSelection(doc, viewer, index);
+    if (payload) this.selectionContextMenuHandler?.({ ...payload, chapterPath: this._currentPath });
+  }
+
+  private clearNoteHighlights(): void {
+    const css = this.contentDoc?.defaultView?.CSS as
+      | (typeof CSS & { highlights?: { delete(name: string): boolean } })
+      | undefined;
+    const highlights = css?.highlights;
+    if (!highlights) {
+      return;
+    }
+    highlights.delete("reader-notes");
+  }
+
+  private applyNoteHighlights(): "applied" | "unsupported" | "deferred" {
+    const doc = this.contentDoc;
+    const index = this.textIndex;
+    if (!doc || !this.viewer || !index) return "deferred";
+    const css = doc.defaultView?.CSS as
+      | (typeof CSS & {
+          highlights?: { set(name: string, value: Highlight): unknown; delete(name: string): boolean };
+        })
+      | undefined;
+    const highlights = css?.highlights;
+    const HighlightCtor = (doc.defaultView as (Window & { Highlight?: typeof Highlight }) | null)?.Highlight;
+    if (!highlights || !HighlightCtor) {
+      return "unsupported";
+    }
+    this.clearNoteHighlights();
+    const ranges: Range[] = [];
+    for (const note of this.notes) {
+      const resolved = resolveTextRangeOffsets(index, note, note.selectedText);
+      if (!resolved) continue;
+      const range = index.rangeForOffsets(doc, resolved.start, resolved.end);
+      if (range) ranges.push(range);
+    }
+    if (ranges.length > 0) {
+      highlights.set("reader-notes", new HighlightCtor(...ranges));
+    }
+    return "applied";
   }
 
   /**
@@ -3177,6 +3329,7 @@ export class ChapterPaginator {
       ratio,
       charsRead: textOffset ?? 0,
       totalChars: index.totalChars,
+      mediaUnits: index.mediaUnits,
       textOffset,
       textSnippet: textOffset === null ? null : index.snippetAt(textOffset),
     };
@@ -3218,6 +3371,7 @@ export class ChapterPaginator {
             this.anchor.textSnippet = index.snippetAt(offset);
             this.anchor.charsRead = offset;
             this.anchor.totalChars = index.totalChars;
+            this.anchor.mediaUnits = index.mediaUnits;
             return { col, source: "text" };
           }
         }
@@ -3408,6 +3562,7 @@ export class ChapterPaginator {
     ratio: number;
     charsRead: number;
     totalChars: number;
+    mediaUnits: number;
     textOffset: number | null;
     textSnippet: string | null;
   } | null {
@@ -3418,6 +3573,7 @@ export class ChapterPaginator {
       ratio: this.anchor.ratio,
       charsRead: this.anchor.charsRead,
       totalChars: this.anchor.totalChars,
+      mediaUnits: this.anchor.mediaUnits ?? 0,
       textOffset: this.anchor.textOffset,
       textSnippet: this.anchor.textSnippet,
     };
@@ -3456,6 +3612,7 @@ export class ChapterPaginator {
           typeof a.totalChars === "number" && Number.isSafeInteger(a.totalChars) && a.totalChars >= 0
             ? a.totalChars
             : 0,
+        mediaUnits: 0,
         textOffset: text.textOffset,
         textSnippet: text.textSnippet,
       };
@@ -3472,6 +3629,16 @@ export class ChapterPaginator {
 
   get currentPage(): number {
     return this.metrics.currentPage;
+  }
+
+  /** 预渲染调度器只读快照；不得据此绕过 display-ready 准备边界。 */
+  getStateSnapshot(): ChapterState {
+    return { ...this.lastState };
+  }
+
+  /** 当前已提交章节路径，用于槽位命中校验。 */
+  getCurrentPath(): string {
+    return this._currentPath;
   }
 
   /** 设置变更（字号/主题）后整体重载（保留阅读位置）。 */
@@ -3528,6 +3695,11 @@ export class ChapterPaginator {
 
   /** 键盘翻页（书页内焦点）。 */
   private handleKey(e: KeyboardEvent): void {
+    if (isSelectAllShortcut(e)) {
+      e.preventDefault();
+      clearDocumentSelection(this.contentDoc);
+      return;
+    }
     const k = e.key;
     if (k === "ArrowRight" || k === "PageDown" || k === " ") {
       e.preventDefault();
@@ -3578,6 +3750,7 @@ export class ChapterPaginator {
         // 点击 = 固定弹窗；再次点击同一标记 = 取消固定并关闭
         if (this.footnotePinned && this.lastFootnoteEl === a) {
           this.footnotePinned = false;
+          this.footnoteHoverGate.reset();
           this.onFootnoteClose?.();
           return;
         }
@@ -3633,6 +3806,7 @@ export class ChapterPaginator {
   private showFootnote(a: HTMLAnchorElement, info: FootnoteInfo, pinned: boolean): void {
     this.lastFootnoteEl = a;
     this.footnotePinned = pinned;
+    this.footnoteHoverGate.show(pinned);
     const r = a.getBoundingClientRect();
     this.onFootnote?.({
       text: info.text,
@@ -3645,9 +3819,12 @@ export class ChapterPaginator {
   /** 桌面 hover 弹注（script.js 的 mouseover 行为）；已固定时不切换。 */
   private handleFootnoteHoverIn(e: Event): void {
     if (this.footnotePinned) return;
-    const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
-    if (!a || !this.contentDoc || !isFootnoteLink(a)) return;
-    const info = resolveFootnote(this.contentDoc, a);
+    const doc = this.contentDoc;
+    const a = getFootnoteHoverAnchor(e.target, doc);
+    if (!a || !doc) return;
+    this.footnoteHoverGate.markerEnter();
+    if (this.lastFootnoteEl === a && this.footnoteHoverGate.isVisible()) return;
+    const info = resolveFootnote(doc, a);
     if (info) this.showFootnote(a, info, false);
   }
 
@@ -3658,7 +3835,7 @@ export class ChapterPaginator {
     if (!a || !isFootnoteLink(a)) return;
     const rel = e.relatedTarget as Node | null;
     if (rel && a.contains(rel)) return;
-    this.onFootnoteClose?.();
+    this.footnoteHoverGate.markerLeave();
   }
 
   /** 固定脚注后点击正文空白处关闭。 */
@@ -3667,12 +3844,20 @@ export class ChapterPaginator {
     const a = (e.target as Element | null)?.closest<HTMLAnchorElement>("a");
     if (a && isFootnoteLink(a)) return; // 标记点击由 linkHandler 处理并 stopPropagation
     this.footnotePinned = false;
+    this.footnoteHoverGate.reset();
     this.onFootnoteClose?.();
   };
 
   /** UI 层主动关闭固定脚注后，同步分页器状态（避免 hover 被锁住）。 */
   dismissFootnote(): void {
     this.footnotePinned = false;
+    this.footnoteHoverGate.reset();
+  }
+
+  /** 宿主脚注卡片 hover 进入/离开时，同步 iframe 内 marker 的关闭 gate。 */
+  setFootnoteOverlayHover(over: boolean): void {
+    if (over) this.footnoteHoverGate.overlayEnter();
+    else this.footnoteHoverGate.overlayLeave();
   }
 
   /** 当前脚注标记在 iframe 内的视口矩形（弹层随重排重定位用）；无则 null。 */
@@ -3767,6 +3952,7 @@ export class ChapterPaginator {
     this.abortMeasureWaits();
     this.lastFootnoteEl = null;
     this.footnotePinned = false;
+    this.footnoteHoverGate.reset();
     this.restoreInlineBoxFixes();
     this.restoreFloatLayoutFixes();
     this.restoreTrailingFloatFixes();
@@ -3777,6 +3963,8 @@ export class ChapterPaginator {
     this.contentDoc?.removeEventListener("keydown", this.keyHandler);
     this.contentDoc?.removeEventListener("mouseover", this.footnoteHoverInHandler, true);
     this.contentDoc?.removeEventListener("mouseout", this.footnoteHoverOutHandler, true);
+    this.contentDoc?.removeEventListener("contextmenu", this.contextMenuHandler);
+    this.clearNoteHighlights();
     this.contentDoc = null;
     this.viewer = null;
     this.textIndex = null;
@@ -3793,11 +3981,14 @@ export class ChapterPaginator {
   dispose(): void {
     this.disposed = true;
     this.loadSeq++;
+    this.resolveDisplayReady?.(false);
+    this.resolveDisplayReady = null;
     this.abortMeasureWaits();
     window.clearTimeout(this.reflowTimer);
     this.displayGate.dispose();
     this.iframe.removeEventListener("load", this.onIframeLoad);
     this.cleanupDoc();
+    this.footnoteHoverGate.dispose();
     this.iframe.src = "about:blank";
   }
 

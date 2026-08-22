@@ -14,6 +14,7 @@ function entry(hash: string, extra: Record<string, unknown> = {}): ShelfEntry {
     id: `bytes-${hash.slice(0, 4)}`,
     title: "Title / file:// is ordinary metadata",
     creator: "Creator",
+    language: "ja-JP",
     fileName: "book.epub",
     fileSize: 42,
     coverMime: "image/jpeg",
@@ -42,6 +43,8 @@ describe("library archive bridge", () => {
       fontSizePx: 18,
       theme: "dark",
       uiScale: 1.1,
+      forceHorizontal: true,
+      preloadNextChapter: true,
       customFonts: [{ family: "private", url: "file:///C:/private.woff2" }],
     });
     const json = JSON.stringify(archive);
@@ -52,9 +55,10 @@ describe("library archive bridge", () => {
     expect(json).not.toContain("coverMime");
     expect(json).not.toContain("customFonts");
     expect(archive.records[hashA].fileName).toBe("book.epub");
+    expect(archive.records[hashA].language).toBe("ja-JP");
     expect(archive.records[hashA].anchorTextOffset).toBeNull();
     expect(archive.records[hashA].anchorTextSnippet).toBeNull();
-    expect(archive.settings).toEqual({ fontSizePx: 18, theme: "dark", uiScale: 1.1 });
+    expect(archive.settings).toEqual({ fontSizePx: 18, theme: "dark", forceHorizontal: true, preloadNextChapter: true, uiScale: 1.1 });
   });
 
   it("round-trips text anchors through the portable bridge", () => {
@@ -116,6 +120,7 @@ describe("library archive bridge", () => {
     expect(projected).toHaveLength(2);
     expect(projected[0].id).toBe(local.id);
     expect(projected[0].title).toBe("new");
+    expect(projected[0].language).toBe("ja-JP");
     expect(projected[0].fileSize).toBe(99);
     expect(projected[0].coverMime).toBe("image/png");
     expect(projected[0].available).toBe(true);

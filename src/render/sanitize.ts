@@ -39,6 +39,15 @@ const STRIP_TAGS = new Set([
   "textarea",
 ]);
 
+/** Escape a font family for a CSS quoted string, including CSS-significant
+ * control characters that could otherwise terminate or inject declarations. */
+export function escapeCssString(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/[\r\n\f]/g, (char) => `\\${char.charCodeAt(0).toString(16)} `);
+}
+
 /**
  * 表单整体仍会删除；只有这些不会提交、不会选择本地文件的 input 类型可留在
  * 无脚本章节中，以支持作者 CSS 的 :enabled/:disabled/:checked 状态。
@@ -82,6 +91,7 @@ function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
   const bg =
     s.theme === "dark" ? "#1e1e1e" : s.theme === "sepia" ? "#f4ecd8" : "#ffffff";
   const fg = s.theme === "dark" ? "#d4d4d4" : s.theme === "sepia" ? "#3b2f1e" : "#1a1a1a";
+  const noteUnderline = s.theme === "dark" ? "#6cb2ff" : s.theme === "sepia" ? "#9b6a00" : "#b06a00";
   const family =
     s.fontFamily ??
     `"Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif`;
@@ -181,8 +191,8 @@ function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
 }`;
 
   // ---- L2 用户设置：字号/主题/字体 fallback（书 body 字体声明优先） ----
-  const escapeFamily = (family: string): string => family.replace(/"/g, '\\"');
-  const fontFaceCss = (s.customFonts ?? [])
+  const escapeFamily = escapeCssString;
+  const fontFaceCss = (s.fontSource === "system" ? [] : (s.customFonts ?? []))
     .map(
       (f) =>
         `/* [L2] 用户上传字体 */\n@font-face { font-family: "${escapeFamily(f.family)}"; src: url("${f.url}") format("truetype"); font-display: swap; }`
@@ -191,6 +201,18 @@ function buildOverrideCss(s: ReaderSettings, bodyBgColor?: string): string {
   const bodyFontCss = s.customFontName
     ? `font-family: "${escapeFamily(s.customFontName)}" !important;`
     : "";
+  const writingModeCss = s.forceHorizontal === true
+    ? `
+/* [L2/C-46] 可重排章节的强制横排：覆盖书籍 html/body、分页 viewer 及其普通后代。
+   SVG 本身及其后代不匹配后代选择器；SVG 书籍显式 writing-mode 仍可保留。
+   祖先属性仍会作为 SVG 未声明属性的继承值，纯 CSS 无法凭空恢复未声明的书籍继承态。 */
+html, body, #${VIEWER_ID},
+#${VIEWER_ID} :not(svg):not(svg *) {
+  writing-mode: horizontal-tb !important;
+  -webkit-writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+}`
+    : "";
   const themeCss = `
 /* [L2] 字体 fallback 只放 html；书在 body 上的内嵌字体声明优先。 */
 html { font-size: ${s.fontSizePx}px !important; font-family: ${family}; }
@@ -198,13 +220,27 @@ ${fontFaceCss}
 /* [L2] 主题只覆盖背景色，不用 background 简写（会重置书的 body 背景图）。
    浅色主题下安全的书籍 bgcolor 作为默认值合入这里，用户 CSS 仍在本样式末尾。 */
 body { color: ${fg}; background-color: ${bodyBgColor ?? bg}; ${bodyFontCss} }
+/* [L2] 笔记标记：CSS Custom Highlight 只绘制下划线，不包裹正文节点，
+   因此不会改变文字几何尺寸、分页或作者选择器匹配。颜色按 iframe 主题固定，
+   不依赖宿主页面变量；不设置背景，避免遮挡原书文字。 */
+::highlight(reader-notes) {
+  text-decoration-line: underline;
+  text-decoration-style: solid;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.15em;
+  text-decoration-color: ${noteUnderline};
+}
 /* [L2] ruby 注音 rt 随主题换色（书常固定 ruby>rt{color:#333}）。 */
 #${VIEWER_ID} rt { color: ${fg}; }
+${writingModeCss}
 ${
   s.theme === "dark"
     ? `/* [L2] 深色主题下着重号（text-emphasis）随前景色换色；
    书常写 text-emphasis:circle #000，深色背景上看不见。 */
 #${VIEWER_ID} * { -webkit-text-emphasis-color: ${fg}; text-emphasis-color: ${fg}; }
+/* [L2/C-45] 深色主题可读性兜底：让未自行声明 text-shadow 的文字
+   继承与阅读器背景一致的阴影；作者后代的明确声明（包括 none）可覆盖。 */
+#${VIEWER_ID} { text-shadow: 1px 1px 1px #1e1e1e; }
 /* [L2] 深色主题目录链接换色：书常写 .toc a{color:#000}。
    与 Sigil 深色预览一致的浅蓝。 */
 #${VIEWER_ID} .toc a { color: #6cb2ff; }`

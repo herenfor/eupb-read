@@ -81,7 +81,10 @@ export function parseOpf(root: XmlNodeLike): ParsedOpf {
         if (text) {
           if (name === "title") metadata.title = text;
           else if (name === "identifier") metadata.identifier = text;
-          else if (name === "language") metadata.language = text;
+          // Keep browser and native linked-import metadata deterministic when
+          // an OPF contains more than one dc:language: both use the first
+          // non-empty declaration.
+          else if (name === "language" && !metadata.language) metadata.language = text;
           else metadata[name] = text;
         }
       }

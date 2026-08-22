@@ -27,6 +27,12 @@ Each component remains subject to its respective license.
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | quick-xml | 0.41.0 | MIT | https://github.com/tafia/quick-xml |
 | zip | 2.4.2 | MIT | https://github.com/zip-rs/zip2 |
+| windows (Windows target) | 0.61.3 | MIT OR Apache-2.0 | https://crates.io/crates/windows |
+
+The Windows target dependency `windows` 0.61.3 is used for DirectWrite system
+font enumeration and is recorded under its MIT OR Apache-2.0 terms. This
+feature adds no GPL dependency. Android system-font enumeration is not
+implemented in this release; only the frontend interface space is reserved.
 
 ## Development dependencies
 

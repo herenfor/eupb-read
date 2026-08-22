@@ -9,6 +9,7 @@
  */
 import type { ReaderSettings } from "../render/settings";
 import type { Bookmark, ShelfEntry } from "./shelf";
+import type { ReaderNote } from "./notes";
 import {
   LIBRARY_ARCHIVE_VERSION,
   parseLibraryArchive,
@@ -25,12 +26,16 @@ const SETTINGS_KEYS = [
   "theme",
   "fontFamily",
   "customFontName",
+  "fontSource",
+  "customFontId",
   "customCss",
   "gapPx",
   "lineHeight",
   "fontWeight",
   "letterSpacingPx",
   "wordSpacingPx",
+  "forceHorizontal",
+  "preloadNextChapter",
   "uiScale",
 ] as const;
 const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi;
@@ -105,11 +110,16 @@ function bookmarkForArchive(bookmark: Bookmark): LibraryRecord["bookmarks"][numb
   };
 }
 
+function noteForArchive(note: ReaderNote): ReaderNote {
+  return { ...note };
+}
+
 function recordForArchive(entry: ShelfEntry, contentHash: string): LibraryRecord {
   return {
     contentHash,
     title: entry.title,
     creator: entry.creator,
+    ...(entry.language ? { language: entry.language } : {}),
     fileName: fileNameHint(entry.fileName),
     addedAtMs: entry.addedAtMs,
     lastReadAtMs: entry.lastReadAtMs,
@@ -122,6 +132,7 @@ function recordForArchive(entry: ShelfEntry, contentHash: string): LibraryRecord
     anchorTextSnippet: entry.anchorTextSnippet ?? null,
     isNew: entry.isNew,
     bookmarks: (entry.bookmarks ?? []).map(bookmarkForArchive),
+    notes: (entry.notes ?? []).map(noteForArchive),
   };
 }
 
@@ -158,10 +169,10 @@ export function buildLibraryArchive(entries: readonly ShelfEntry[], settings?: P
 export const libraryArchiveFromShelfEntries = buildLibraryArchive;
 
 function recordsForBackend(input: LibraryArchive | ArchiveParseResult | readonly LibraryRecord[]): LibraryRecord[] {
-  if (Array.isArray(input)) return input.map((record) => ({ ...record, bookmarks: [...record.bookmarks] }));
+  if (Array.isArray(input)) return input.map((record) => ({ ...record, bookmarks: [...record.bookmarks], notes: [...(record.notes ?? [])] }));
   const parsed = parseLibraryArchive("archive" in input ? input.archive : input);
   if (parsed.errors.length) throw new Error(`存档包含不可交给后端的字段：${parsed.errors[0].message}`);
-  return Object.values(parsed.archive.records).map((record) => ({ ...record, bookmarks: [...record.bookmarks] }));
+  return Object.values(parsed.archive.records).map((record) => ({ ...record, bookmarks: [...record.bookmarks], notes: [...(record.notes ?? [])] }));
 }
 
 /** Convert keyed records into an explicit backend payload array. */
@@ -181,6 +192,7 @@ function projectedEntry(record: LibraryRecord, existing: BrowserShelfEntry | und
     id: existing?.id ?? record.contentHash,
     title: record.title,
     creator: record.creator,
+    ...(record.language ? { language: record.language } : {}),
     fileName: record.fileName,
     // These are local byte-store fields and are never taken from the archive.
     fileSize: existing?.fileSize ?? 0,
@@ -197,6 +209,7 @@ function projectedEntry(record: LibraryRecord, existing: BrowserShelfEntry | und
     isNew: record.isNew,
     contentHash: record.contentHash,
     bookmarks: record.bookmarks.map((bookmark) => ({ ...bookmark })),
+    notes: (record.notes ?? []).map((note) => ({ ...note })),
   };
   if (existing && Object.prototype.hasOwnProperty.call(existing, "available")) result.available = existing.available;
   if (!existing) result.available = false;
@@ -208,6 +221,7 @@ function localEntryWithoutDeviceFields(entry: BrowserShelfEntry): BrowserShelfEn
     id: entry.id,
     title: entry.title,
     creator: entry.creator,
+    ...(entry.language ? { language: entry.language } : {}),
     fileName: fileNameHint(entry.fileName),
     fileSize: entry.fileSize,
     coverMime: entry.coverMime,
@@ -223,6 +237,7 @@ function localEntryWithoutDeviceFields(entry: BrowserShelfEntry): BrowserShelfEn
     isNew: entry.isNew,
     ...(entry.contentHash ? { contentHash: entry.contentHash } : {}),
     bookmarks: entry.bookmarks ? entry.bookmarks.map((bookmark) => ({ ...bookmark })) : entry.bookmarks,
+    notes: entry.notes ? entry.notes.map((note) => ({ ...note })) : [],
   };
   if (Object.prototype.hasOwnProperty.call(entry, "available")) result.available = entry.available;
   return result;

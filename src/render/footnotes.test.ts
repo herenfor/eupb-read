@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseHTML } from "linkedom";
-import { isFootnoteLink, resolveFootnote } from "./footnotes";
+import { getFootnoteHoverAnchor, isFootnoteLink, resolveFootnote } from "./footnotes";
 
 function doc(bodyHtml: string): Document {
   const { document } = parseHTML(`<!doctype html><html><head></head><body>${bodyHtml}</body></html>`);
@@ -20,6 +20,7 @@ describe("script.js（LK 参考脚本）脚注模式识别", () => {
 <aside id="note001"><p>注：SECOM，日本保全公司</p></aside></note>`);
     const a = anchor(d, "a");
     expect(isFootnoteLink(a)).toBe(true);
+    expect(getFootnoteHoverAnchor(a, d)).toBe(a);
     expect(resolveFootnote(d, a)?.text).toBe("注：SECOM，日本保全公司");
   });
 
@@ -38,6 +39,7 @@ describe("script.js（LK 参考脚本）脚注模式识别", () => {
 <aside id="n1">注释文本</aside></note>`);
     const a = anchor(d, "a");
     expect(isFootnoteLink(a)).toBe(false);
+    expect(getFootnoteHoverAnchor(a, d)).toBeNull();
     expect(resolveFootnote(d, a)).toBeNull();
   });
 

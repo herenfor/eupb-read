@@ -58,8 +58,14 @@ export interface SavedSettings {
   wordSpacingPx?: number;
   /** 用户自定义字体（已上传字体 family） */
   customFontName?: string;
+  fontSource?: "system" | "imported";
+  customFontId?: string;
   /** 用户自定义 CSS 文本 */
   customCss?: string;
+  /** 可重排章节是否强制覆盖为横排；旧设置缺省为 false */
+  forceHorizontal?: boolean;
+  /** 是否预先准备下一章以加快顺序切换；旧设置缺省为 false */
+  preloadNextChapter?: boolean;
 }
 
 export function readSavedSettings(): SavedSettings {

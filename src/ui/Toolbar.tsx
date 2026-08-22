@@ -14,6 +14,10 @@ export interface ToolbarProps {
   canHistoryForward?: boolean;
   /** 打开目录（一级工具栏图标） */
   onOpenToc?: () => void;
+  /** 打开当前书正文搜索（一级工具栏图标） */
+  onOpenSearch?: () => void;
+  /** 打开当前书笔记页面。 */
+  onOpenNotes?: () => void;
   /** 书签：添加/移除当前页书签 */
   onToggleBookmark?: () => void;
   isBookmarked?: boolean;
@@ -76,6 +80,8 @@ export function Toolbar(props: ToolbarProps) {
     Boolean(props.onToggleMenu),
     Boolean(props.onToggleBookmark),
     Boolean(props.onOpenToc),
+    Boolean(props.onOpenSearch),
+    Boolean(props.onOpenNotes),
     Boolean(props.onToggleLog),
     props.issueCount > 0,
   ]);
@@ -181,6 +187,16 @@ export function Toolbar(props: ToolbarProps) {
         {props.onOpenToc && (
           <button className="tb-btn" onClick={props.onOpenToc} title="打开目录">
             📖
+          </button>
+        )}
+        {props.onOpenSearch && (
+          <button className="tb-btn" onClick={props.onOpenSearch} title="搜索正文" aria-label="搜索正文">
+            🔍
+          </button>
+        )}
+        {props.onOpenNotes && (
+          <button className="tb-btn" onClick={props.onOpenNotes} title="笔记" aria-label="打开笔记">
+            📝
           </button>
         )}
       </div>

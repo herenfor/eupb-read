@@ -1,10 +1,12 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { Book } from "../core/types";
 import { nextLinearIndex, spineItemPath } from "../core/book";
 import {
   ChapterPaginator,
   type ChapterState,
   type FootnotePayload,
+  type ReaderNoteForPaginator,
+  type SelectionContextPayload,
   type WithinChapterNavigationOptions,
 } from "../render/paginator";
 import type { ResourceServer } from "../render/resources";
@@ -25,6 +27,7 @@ export interface ReaderHandle {
     ratio: number;
     charsRead: number;
     totalChars: number;
+    mediaUnits: number;
     textOffset: number | null;
     textSnippet: string | null;
   } | null;
@@ -43,6 +46,10 @@ export interface ReaderHandle {
   } | null;
   /** UI 层关闭固定脚注后同步分页器状态 */
   dismissFootnote(): void;
+  /** 宿主脚注卡片 hover 进入/离开时同步 iframe 内 hover gate。 */
+  setFootnoteOverlayHover(over: boolean): void;
+  /** 清除正文 iframe 内的原生文本选区。 */
+  clearTextSelection(): void;
 }
 
 interface ReaderViewProps {
@@ -56,6 +63,8 @@ interface ReaderViewProps {
   settings: ReaderSettings;
   /** 用户上传字体的会话内资源（family + blob URL） */
   userFonts: Array<{ family: string; url: string }>;
+  /** 当前章节笔记；更新仅重建 CSS Highlight，不触发章节重载。 */
+  notes: ReaderNoteForPaginator[];
   onPageState(s: ChapterState): void;
   /** Paginator display gate released after final anchor/page positioning. */
   onDisplayReady(): void;
@@ -76,6 +85,8 @@ interface ReaderViewProps {
   onFootnote(payload: FootnotePayload): void;
   /** 桌面端 hover 移出脚注标记时关闭弹层 */
   onFootnoteClose(): void;
+  /** iframe 正文有效选区的自定义右键菜单数据（rect 已换算为宿主 viewport）。 */
+  onSelectionContextMenu?(payload: SelectionContextPayload): void;
   /** 打开书时恢复的阅读锚点（可选，页码之外的精确定位） */
   initialAnchor?: {
     index: number;
@@ -87,6 +98,19 @@ interface ReaderViewProps {
   initialPage?: number;
 }
 
+type ReaderFrame = "primary" | "secondary" | "tertiary";
+
+interface PaginatorSlot {
+  frame: ReaderFrame;
+  iframe: HTMLIFrameElement;
+  paginator: ChapterPaginator | null;
+  path: string | null;
+  spineIndex: number | null;
+  state: ChapterState;
+  ready: boolean;
+  generation: number;
+}
+
 function parseViewport(vp: string | undefined): { w: number; h: number } | null {
   if (!vp) return null;
   const m = /^(\d+)\s*[xX,]\s*(\d+)$/.exec(vp.trim());
@@ -94,13 +118,62 @@ function parseViewport(vp: string | undefined): { w: number; h: number } | null 
   return { w: Number(m[1]), h: Number(m[2]) };
 }
 
+/** 固定版式页面保持原始版式；强制横排只作用于可重排正文。 */
+export function effectiveReaderSettings(settings: ReaderSettings, fixedLayout: boolean): ReaderSettings {
+  if (!fixedLayout && settings.gapPx !== 0) return settings;
+  return {
+    ...settings,
+    gapPx: 0,
+    forceHorizontal: fixedLayout ? false : settings.forceHorizontal === true,
+  };
+}
+
+/** 预加载开关只影响调度，不属于活动 paginator 的布局身份。 */
+export function sameRenderingSettings(a: ReaderSettings, b: ReaderSettings): boolean {
+  return (
+    a.fontSizePx === b.fontSizePx &&
+    a.theme === b.theme &&
+    a.fontFamily === b.fontFamily &&
+    a.customFontName === b.customFontName &&
+    a.fontSource === b.fontSource &&
+    a.customFontId === b.customFontId &&
+    a.customFonts === b.customFonts &&
+    a.customCss === b.customCss &&
+    a.gapPx === b.gapPx &&
+    a.lineHeight === b.lineHeight &&
+    a.fontWeight === b.fontWeight &&
+    a.letterSpacingPx === b.letterSpacingPx &&
+    a.wordSpacingPx === b.wordSpacingPx &&
+    a.forceHorizontal === b.forceHorizontal
+  );
+}
+
 export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function ReaderView(
   props,
   ref
 ) {
   const { book, server, spineIndex, settings } = props;
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const primaryIframeRef = useRef<HTMLIFrameElement>(null);
+  const secondaryIframeRef = useRef<HTMLIFrameElement>(null);
+  const tertiaryIframeRef = useRef<HTMLIFrameElement>(null);
+  const readerContainerRef = useRef<HTMLDivElement>(null);
+  const activeIframeRef = useRef<HTMLIFrameElement | null>(null);
   const paginatorRef = useRef<ChapterPaginator | null>(null);
+  const activeSlotRef = useRef<PaginatorSlot | null>(null);
+  // The active slot plus at most two spare slots form a tiny three-chapter
+  // window: previous/current/next.  Spare slots are never allowed to emit
+  // UI callbacks; their state is only used by the cache scheduler.
+  const spareSlotsRef = useRef<PaginatorSlot[]>([]);
+  const [activeFrame, setActiveFrame] = useState<ReaderFrame>("primary");
+  const activeFrameRef = useRef<ReaderFrame>("primary");
+  const preloadGenerationRef = useRef(0);
+  // Keep the scheduler independent from the closure used when the active
+  // paginator was created.  Toggling the experimental mode must neither
+  // reload the active chapter nor let an old display-ready callback restart
+  // a cancelled preload.
+  const preloadAllowedRef = useRef(false);
+  /** 显式目录/搜索/书签/历史跳转必须使用自身入口锚点，不得误命中相邻缓存。 */
+  const handledAnchorNonceRef = useRef(props.anchorNonce);
   const spineIndexRef = useRef(spineIndex);
   const autoAdvanceRef = useRef(false);
   const pendingStartAtEndRef = useRef(false);
@@ -114,12 +187,304 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   const onBeforeInternalNavigateRef = useRef(props.onBeforeInternalNavigate);
   const onInternalNavigationSettledRef = useRef(props.onInternalNavigationSettled);
   const onDisplayReadyRef = useRef(props.onDisplayReady);
+  const onSelectionContextMenuRef = useRef(props.onSelectionContextMenu);
+  const onPageStateRef = useRef(props.onPageState);
+  const onIssuesRef = useRef(props.onIssues);
+  const onRequestChapterRef = useRef(props.onRequestChapter);
+  const onFootnoteRef = useRef(props.onFootnote);
+  const onFootnoteCloseRef = useRef(props.onFootnoteClose);
+  const onExternalLinkRef = useRef(props.onExternalLink);
 
   spineIndexRef.current = spineIndex;
   onInternalLinkRef.current = props.onInternalLink;
   onBeforeInternalNavigateRef.current = props.onBeforeInternalNavigate;
   onInternalNavigationSettledRef.current = props.onInternalNavigationSettled;
   onDisplayReadyRef.current = props.onDisplayReady;
+  onSelectionContextMenuRef.current = props.onSelectionContextMenu;
+  onPageStateRef.current = props.onPageState;
+  onIssuesRef.current = props.onIssues;
+  onRequestChapterRef.current = props.onRequestChapter;
+  onFootnoteRef.current = props.onFootnote;
+  onFootnoteCloseRef.current = props.onFootnoteClose;
+  onExternalLinkRef.current = props.onExternalLink;
+  preloadAllowedRef.current = settings.preloadNextChapter === true && !book.fixedLayout;
+
+  const isActiveSlot = (slot: PaginatorSlot): boolean =>
+    activeSlotRef.current === slot && paginatorRef.current === slot.paginator && slot.paginator !== null;
+
+  const setActiveFrameVisual = (frame: ReaderFrame): void => {
+    activeFrameRef.current = frame;
+    const primary = primaryIframeRef.current;
+    const secondary = secondaryIframeRef.current;
+    const tertiary = tertiaryIframeRef.current;
+    for (const [candidate, candidateFrame] of [
+      [primary, "primary" as const],
+      [secondary, "secondary" as const],
+      [tertiary, "tertiary" as const],
+    ] as const) {
+      if (!candidate) continue;
+      if (candidateFrame === frame) {
+        candidate.style.removeProperty("visibility");
+        candidate.style.zIndex = "1";
+      } else {
+        candidate.style.setProperty("visibility", "hidden", "important");
+        candidate.style.zIndex = "0";
+      }
+    }
+    setActiveFrame(frame);
+  };
+
+  const publishActiveDisplayReady = (): void => {
+    const slot = activeSlotRef.current;
+    const paginator = paginatorRef.current;
+    if (!slot || !paginator || !isActiveSlot(slot)) return;
+    const state = paginator.getStateSnapshot();
+    lastStateRef.current = state.status;
+    if (state.status !== "ready" || state.empty) return;
+    lastReadyEmptyRef.current = false;
+    onDisplayReadyRef.current();
+    const firstDisplay = !turnIntentRef.current.hasDisplayedOnce;
+    const pending = turnIntentRef.current.markReady();
+    if (firstDisplay) outerWheelRef.current.reset();
+    if (pending !== null) turnPageRef.current(pending);
+    // Only schedule after the active chapter has crossed the final display
+    // gate.  A pending turn may immediately invalidate this slot; that path
+    // is guarded by the slot generation in scheduleAdjacentPreloads.
+    scheduleAdjacentPreloads();
+  };
+
+  const buildPaginator = (slot: PaginatorSlot): ChapterPaginator => {
+    const paginator = new ChapterPaginator(
+      slot.iframe,
+      server,
+      renderSettings,
+      book.version === 2,
+      (state) => {
+        slot.state = state;
+        if (!isActiveSlot(slot)) return;
+        lastStateRef.current = state.status;
+        if (state.status === "loading" || state.status === "measuring") {
+          turnIntentRef.current.markLoading();
+          lastReadyEmptyRef.current = false;
+        } else if (state.status === "error") {
+          turnIntentRef.current.reset();
+          lastReadyEmptyRef.current = false;
+        } else {
+          lastReadyEmptyRef.current = state.empty;
+        }
+        onPageStateRef.current(state);
+        if (state.status !== "ready" || !state.empty || autoAdvanceRef.current) return;
+        autoAdvanceRef.current = true;
+        const next = nextLinearIndex(book, spineIndexRef.current, 1);
+        if (next >= 0) {
+          turnIntentRef.current.markLoading();
+          onRequestChapterRef.current(next);
+        }
+      },
+      (issues) => {
+        if (isActiveSlot(slot)) onIssuesRef.current(issues);
+      },
+      book.fixedLayout,
+      (href) => {
+        if (isActiveSlot(slot)) onInternalLinkRef.current(href);
+      },
+      (href) => {
+        if (isActiveSlot(slot)) onBeforeInternalNavigateRef.current(href);
+      },
+      () => {
+        if (isActiveSlot(slot)) onInternalNavigationSettledRef.current();
+      },
+      (dir) => {
+        if (isActiveSlot(slot)) turnPageRef.current(dir);
+      },
+      (dir) => {
+        if (isActiveSlot(slot)) turnPageRef.current(dir);
+      },
+      (payload) => {
+        if (!isActiveSlot(slot)) return;
+        const main = slot.iframe.parentElement;
+        if (!main) {
+          onFootnoteRef.current(payload);
+          return;
+        }
+        const ir = slot.iframe.getBoundingClientRect();
+        const mr = main.getBoundingClientRect();
+        const dx = ir.left - mr.left;
+        const dy = ir.top - mr.top;
+        onFootnoteRef.current({
+          ...payload,
+          rect: {
+            left: payload.rect.left + dx,
+            top: payload.rect.top + dy,
+            right: payload.rect.right + dx,
+            bottom: payload.rect.bottom + dy,
+          },
+        });
+      },
+      () => {
+        if (isActiveSlot(slot)) onFootnoteCloseRef.current();
+      },
+      (url) => {
+        if (isActiveSlot(slot)) onExternalLinkRef.current(url);
+      },
+      () => {
+        slot.ready = true;
+        slot.state = paginator.getStateSnapshot();
+        if (isActiveSlot(slot)) publishActiveDisplayReady();
+      },
+      (payload) => {
+        if (!isActiveSlot(slot)) return;
+        const rect = slot.iframe.getBoundingClientRect();
+        onSelectionContextMenuRef.current?.({
+          ...payload,
+          rect: {
+            left: payload.rect.left + rect.left,
+            top: payload.rect.top + rect.top,
+            right: payload.rect.right + rect.left,
+            bottom: payload.rect.bottom + rect.top,
+          },
+        });
+      },
+    );
+    slot.paginator = paginator;
+    return paginator;
+  };
+
+  const disposeSpareSlot = (slot: PaginatorSlot): void => {
+    const index = spareSlotsRef.current.indexOf(slot);
+    if (index < 0) return;
+    spareSlotsRef.current.splice(index, 1);
+    preloadGenerationRef.current++;
+    slot.generation++;
+    slot.paginator?.dispose();
+    slot.paginator = null;
+    slot.path = null;
+    slot.spineIndex = null;
+    slot.ready = false;
+  };
+
+  const disposeSpareSlots = (): void => {
+    for (const slot of [...spareSlotsRef.current]) disposeSpareSlot(slot);
+  };
+
+  const iframeForFrame = (frame: ReaderFrame): HTMLIFrameElement | null => {
+    if (frame === "primary") return primaryIframeRef.current;
+    if (frame === "secondary") return secondaryIframeRef.current;
+    return tertiaryIframeRef.current;
+  };
+
+  const scheduleAdjacentPreloads = (): void => {
+    if (!preloadAllowedRef.current || !secondaryIframeRef.current || !tertiaryIframeRef.current) {
+      disposeSpareSlots();
+      return;
+    }
+    const active = activeSlotRef.current;
+    if (!active?.paginator || active.spineIndex === null || !active.ready || active.state.status !== "ready") {
+      return;
+    }
+    const wanted = [
+      nextLinearIndex(book, active.spineIndex, 1),
+      nextLinearIndex(book, active.spineIndex, -1),
+    ].filter((index, position, values) => index >= 0 && values.indexOf(index) === position);
+    const wantedPaths = new Map<number, string>();
+    for (const index of wanted) {
+      const path = spineItemPath(book, index);
+      if (path) wantedPaths.set(index, path);
+    }
+
+    // Keep only the two adjacent chapters.  This also evicts the chapter two
+    // steps away immediately after a promotion.
+    for (const slot of [...spareSlotsRef.current]) {
+      if (slot.spineIndex === null || !wantedPaths.has(slot.spineIndex) || slot.path !== wantedPaths.get(slot.spineIndex)) {
+        disposeSpareSlot(slot);
+      }
+    }
+
+    const usedFrames = new Set<ReaderFrame>([
+      active.frame,
+      ...spareSlotsRef.current.map((slot) => slot.frame),
+    ]);
+    for (const [index, path] of wantedPaths) {
+      const existing = spareSlotsRef.current.find((slot) => slot.spineIndex === index && slot.path === path);
+      if (existing?.paginator) {
+        // display-ready is the cache-hit boundary.  Do not restart a chapter
+        // merely because another ready callback caused the scheduler to run.
+        if (existing.ready && existing.paginator.isDisplayReady) continue;
+        // wanted 顺序为 next→previous；高优先级仍在准备时不启动低优先级，
+        // 避免两个完整分页测量同时争抢主线程。
+        if (existing.state.status === "loading" || existing.state.status === "measuring") return;
+        disposeSpareSlot(existing);
+        usedFrames.delete(existing.frame);
+      }
+      if (spareSlotsRef.current.length >= 2) break;
+      const frame = (["primary", "secondary", "tertiary"] as const).find((candidate) => !usedFrames.has(candidate));
+      if (!frame) break;
+      const iframe = iframeForFrame(frame);
+      if (!iframe) break;
+      const slot: PaginatorSlot = {
+        frame,
+        iframe,
+        paginator: null,
+        path,
+        spineIndex: index,
+        state: { status: "loading" },
+        ready: false,
+        generation: ++preloadGenerationRef.current,
+      };
+      spareSlotsRef.current.push(slot);
+      usedFrames.add(frame);
+      const paginator = buildPaginator(slot);
+      const generation = slot.generation;
+      void paginator.loadAndWaitForDisplay(path, { resetPage: true }).then((ready) => {
+        if (!spareSlotsRef.current.includes(slot) || slot.generation !== generation || slot.paginator !== paginator) return;
+        slot.state = paginator.getStateSnapshot();
+        slot.ready = ready && paginator.isDisplayReady;
+        if (!slot.ready) disposeSpareSlot(slot);
+        else scheduleAdjacentPreloads();
+      });
+      // 一次只启动一个后台完整排版任务；完成后再由上面的回调准备另一侧。
+      return;
+    }
+  };
+
+  const promotePreparedChapter = (path: string, targetIndex: number, atEnd: boolean): boolean => {
+    const current = activeSlotRef.current;
+    const next = spareSlotsRef.current.find((slot) => slot.path === path && slot.spineIndex === targetIndex);
+    if (
+      !current ||
+      current.spineIndex === null ||
+      (targetIndex !== nextLinearIndex(book, current.spineIndex, 1) &&
+        targetIndex !== nextLinearIndex(book, current.spineIndex, -1)) ||
+      !next ||
+      !next.paginator ||
+      !next.ready ||
+      !next.paginator.isDisplayReady ||
+      next.state.status !== "ready"
+    ) {
+      return false;
+    }
+    const state = next.paginator.getStateSnapshot();
+    if (state.status !== "ready") return false;
+    spareSlotsRef.current = spareSlotsRef.current.filter((slot) => slot !== next);
+    // Retain the old current chapter as the adjacent back/forward cache.  The
+    // scheduler below will evict the now-distant spare and warm the new edge.
+    spareSlotsRef.current.push(current);
+    activeSlotRef.current = next;
+    paginatorRef.current = next.paginator;
+    activeIframeRef.current = next.iframe;
+    setActiveFrameVisual(next.frame);
+    next.paginator.setNotes(props.notes);
+    autoAdvanceRef.current = false;
+    if (atEnd) next.paginator.setPage(Math.max(0, next.paginator.pageCount - 1));
+    const promotedState = next.paginator.getStateSnapshot();
+    if (promotedState.status !== "ready") return false;
+    next.state = promotedState;
+    lastStateRef.current = promotedState.status;
+    lastReadyEmptyRef.current = promotedState.empty;
+    onPageStateRef.current(promotedState);
+    if (!promotedState.empty) publishActiveDisplayReady();
+    return true;
+  };
 
   // 每次请求（nonce 变化）时按 atEnd 武装；chapter effect 消费后归 false
   useEffect(() => {
@@ -129,10 +494,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   }, [props.startAtEnd]);
 
   // 固定版式：分栏间距为 0（每章整页显示）
-  const effSettings: ReaderSettings =
-    book.fixedLayout || settings.gapPx === 0
-      ? { ...settings, gapPx: 0 }
-      : settings;
+  const effSettings = effectiveReaderSettings(settings, book.fixedLayout);
   // 渲染层设置：把用户上传字体的 blob URL 注入分页器/sanitize
   const renderSettings: ReaderSettings = { ...effSettings, customFonts: props.userFonts };
   const settingsReloadDebouncerRef = useRef<ReturnType<typeof createSettingsReloadDebouncer> | null>(null);
@@ -148,90 +510,49 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
 
   // 创建分页器（book/server 就绪后；App 端用 key 保证 book 变化时整体重建）
   useEffect(() => {
-    const iframe = iframeRef.current;
+    const iframe = primaryIframeRef.current;
     if (!iframe) return;
-    const p = new ChapterPaginator(
+    const slot: PaginatorSlot = {
+      frame: "primary",
       iframe,
-      server,
-      renderSettings,
-      book.version === 2,
-      (s) => {
-        lastStateRef.current = s.status;
-        if (s.status === "loading" || s.status === "measuring") {
-          turnIntentRef.current.markLoading();
-          lastReadyEmptyRef.current = false;
-        } else if (s.status === "error") {
-          turnIntentRef.current.reset();
-          lastReadyEmptyRef.current = false;
-        } else {
-          lastReadyEmptyRef.current = s.empty;
-        }
-        props.onPageState(s);
-        if (s.status !== "ready") return;
-        // 空章节：自动前进到下一线性章
-        if (s.empty && !autoAdvanceRef.current) {
-          autoAdvanceRef.current = true;
-          const next = nextLinearIndex(book, spineIndexRef.current, 1);
-          if (next >= 0) {
-            turnIntentRef.current.markLoading();
-            props.onRequestChapter(next);
-          }
-        }
-      },
-      (issues) => props.onIssues(issues),
-      book.fixedLayout,
-      (href) => onInternalLinkRef.current(href),
-      (href) => onBeforeInternalNavigateRef.current(href),
-      () => onInternalNavigationSettledRef.current(),
-      (dir) => turnPageRef.current(dir),
-      (dir) => turnPageRef.current(dir),
-      (payload) => {
-        const iframe = iframeRef.current;
-        const main = iframe?.parentElement;
-        if (!iframe || !main) {
-          props.onFootnote(payload);
-          return;
-        }
-        const ir = iframe.getBoundingClientRect();
-        const mr = main.getBoundingClientRect();
-        const dx = ir.left - mr.left;
-        const dy = ir.top - mr.top;
-        props.onFootnote({
-          ...payload,
-          rect: {
-            left: payload.rect.left + dx,
-            top: payload.rect.top + dy,
-            right: payload.rect.right + dx,
-            bottom: payload.rect.bottom + dy,
-          },
-        });
-      },
-      () => props.onFootnoteClose(),
-      (url) => props.onExternalLink(url),
-      () => {
-        // paginator 的普通 ready 可能早于目录锚点/startAtEnd 最终定位；
-        // 这里只消费“显示门已解除”的稳定边界，避免缓冲输入抢跑。
-        if (lastStateRef.current !== "ready" || lastReadyEmptyRef.current) return;
-        // 先公布当前稳定位置，再消费连续滚轮/按键。若该输入立即
-        // 触发换章，App 随后设置的 pending 不会被旧章回调反向清除。
-        onDisplayReadyRef.current();
-        const pending = turnIntentRef.current.markReady();
-        if (pending !== null) turnPageRef.current(pending);
-      }
-    );
+      paginator: null,
+      path: null,
+      spineIndex: null,
+      state: { status: "loading" },
+      ready: false,
+      generation: 0,
+    };
+    const p = buildPaginator(slot);
+    activeSlotRef.current = slot;
+    activeIframeRef.current = iframe;
     paginatorRef.current = p;
+    setActiveFrameVisual("primary");
     return () => {
       settingsReloadDebouncerRef.current?.cancel();
       turnIntentRef.current.reset();
       outerWheelRef.current.reset();
-      p.dispose();
+      const owned = new Set<ChapterPaginator>();
+      if (slot.paginator) owned.add(slot.paginator);
+      if (activeSlotRef.current?.paginator) owned.add(activeSlotRef.current.paginator);
+      for (const spare of spareSlotsRef.current) {
+        if (spare.paginator) owned.add(spare.paginator);
+      }
+      for (const paginator of owned) paginator.dispose();
+      spareSlotsRef.current = [];
+      slot.paginator = null;
       paginatorRef.current = null;
+      activeSlotRef.current = null;
+      activeIframeRef.current = null;
       // ResourceServer 的所有权终点必须在 paginator dispose 之后；章节 iframe
       // 不再读取共享图片/字体 URL 后，才撤销整本书资源。
       server.revokeAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book, server]);
+
+  useEffect(() => {
+    paginatorRef.current?.setNotes(props.notes);
+  }, [props.notes]);
 
   // 章节切换 → 加载
   useEffect(() => {
@@ -248,13 +569,28 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       props.onPageState({ status: "error", message: "章节资源缺失" });
       return;
     }
-    turnIntentRef.current.markLoading();
     void (async () => {
       // 跨章/兼容重载是显式章节跳转：回到开头或页内锚点，
       // 而不是沿用旧页号与旧阅读锚点。回翻上一章时把 atEnd 交给 paginator：
       // 由它“翻到最后一页后再显示”，避免先闪第一页。
       const startAtEnd = pendingStartAtEndRef.current;
       pendingStartAtEndRef.current = false;
+      const explicitNavigation = handledAnchorNonceRef.current !== props.anchorNonce;
+      handledAnchorNonceRef.current = props.anchorNonce;
+      // Promotion intentionally happens in this effect, after React has
+      // committed the new spineIndex.  This keeps App's synchronous refs and
+      // progress writer on the promoted chapter before ready is published.
+      if (!explicitNavigation && promotePreparedChapter(path, spineIndex, startAtEnd)) return;
+      const activeSlot = activeSlotRef.current;
+      const oldIndex = activeSlot?.spineIndex ?? null;
+      if (activeSlot) {
+        activeSlot.path = path;
+        activeSlot.spineIndex = spineIndex;
+      }
+      // Adjacent-but-not-ready and non-adjacent jumps both use the original
+      // P0 load path; same-chapter anchor reloads may retain valid edge caches.
+      if (oldIndex !== spineIndex) disposeSpareSlots();
+      turnIntentRef.current.markLoading();
       await p.load(path, {
         anchor: props.anchor,
         resetPage: true,
@@ -284,7 +620,18 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       settingsIdentityRef.current = { settings, userFonts: props.userFonts };
       return;
     }
-    if (previous.settings === settings && previous.userFonts === props.userFonts) return;
+    const renderingUnchanged =
+      sameRenderingSettings(
+        effectiveReaderSettings(previous.settings, book.fixedLayout),
+        effSettings,
+      ) && previous.userFonts === props.userFonts;
+    if (renderingUnchanged) {
+      if (preloadAllowedRef.current) scheduleAdjacentPreloads();
+      else disposeSpareSlots();
+      settingsIdentityRef.current = { settings, userFonts: props.userFonts };
+      return;
+    }
+    disposeSpareSlots();
     settingsIdentityRef.current = { settings, userFonts: props.userFonts };
     const p = paginatorRef.current;
     if (!p) return;
@@ -296,6 +643,15 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, props.userFonts]);
 
+  // The setting is deliberately a scheduler toggle: it must not reload the
+  // active chapter, but enabling it after a ready chapter should start one
+  // lazy secondary paginator once the second iframe is committed.
+  useEffect(() => {
+    if (preloadAllowedRef.current) scheduleAdjacentPreloads();
+    else disposeSpareSlots();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.preloadNextChapter, book.fixedLayout, activeFrame]);
+
   // 尺寸变化 → 重排（左右拉伸窗口等场景）。
   // 用 debounce：拉伸过程中 ResizeObserver 持续触发，只重置定时器、不做重排；
   // 停止 250ms 后才重排一次。浏览器窗口边框拖动没有 mouseup 事件，
@@ -303,19 +659,26 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
   // 关键：重排时不重新捕获锚点——此时用上一次稳定状态（翻页/上次重排）
   // 存下的锚点，保证正在读的内容在拉伸后仍回到页面中部。
   useEffect(() => {
-    const el = iframeRef.current;
+    // Observe the stable reader viewport rather than whichever iframe is
+    // currently active. Promoting a prepared chapter must not look like a
+    // resize and discard the previous-chapter cache we just retained.
+    const el = readerContainerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     let timer = 0;
     const ro = new ResizeObserver(() => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => paginatorRef.current?.reflow(), 250);
+      disposeSpareSlots();
+      timer = window.setTimeout(() => {
+        paginatorRef.current?.reflow();
+        if (preloadAllowedRef.current) scheduleAdjacentPreloads();
+      }, 250);
     });
     ro.observe(el);
     return () => {
       ro.disconnect();
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [book.fixedLayout, settings.preloadNextChapter]);
 
   // 翻页逻辑（滚轮与按钮/键盘共用）
   const turnPageRef = useRef<(dir: 1 | -1) => void>(() => {});
@@ -381,7 +744,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       },
       getFootnoteMarkerRect() {
         const p = paginatorRef.current;
-        const iframe = iframeRef.current;
+        const iframe = activeIframeRef.current;
         const main = iframe?.parentElement;
         const r = p?.getFootnoteMarkerRect();
         if (!p || !iframe || !main || !r) return null;
@@ -399,6 +762,12 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
       dismissFootnote() {
         paginatorRef.current?.dismissFootnote();
       },
+      setFootnoteOverlayHover(over: boolean) {
+        paginatorRef.current?.setFootnoteOverlayHover(over);
+      },
+      clearTextSelection() {
+        paginatorRef.current?.clearTextSelection();
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [book]
@@ -409,6 +778,7 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
 
   return (
     <div
+      ref={readerContainerRef}
       className="reader"
       onWheel={(event) => {
         // visibility:hidden 时滚轮会命中外层；浏览器还可能把同一连续手势
@@ -430,23 +800,47 @@ export const ReaderView = forwardRef<ReaderHandle, ReaderViewProps>(function Rea
           : undefined
       }
     >
-      <iframe
-        ref={iframeRef}
-        title="chapter"
-        style={
-          book.fixedLayout && vp
-            ? {
-                position: "relative",
-                inset: "auto",
-                width: "auto",
-                height: "auto",
-                aspectRatio: `${vp.w} / ${vp.h}`,
-                maxWidth: "100%",
-                maxHeight: "100%",
-              }
-            : undefined
-        }
-      />
+      {(book.fixedLayout || settings.preloadNextChapter === true || activeFrame === "primary") && (
+        <iframe
+          ref={primaryIframeRef}
+          title={activeFrame === "primary" ? "chapter" : "preloaded chapter"}
+          aria-hidden={activeFrame !== "primary"}
+          style={
+            book.fixedLayout && vp
+              ? {
+                  position: "relative",
+                  inset: "auto",
+                  width: "auto",
+                  height: "auto",
+                  aspectRatio: `${vp.w} / ${vp.h}`,
+                  maxWidth: "100%",
+                  maxHeight: "100%",
+                }
+              : activeFrame === "primary"
+                ? undefined
+                : { visibility: "hidden", zIndex: 0 }
+          }
+        />
+      )}
+      {!book.fixedLayout && (settings.preloadNextChapter === true || activeFrame === "secondary") && (
+        <iframe
+          ref={secondaryIframeRef}
+          title={activeFrame === "secondary" ? "chapter" : "preloaded chapter"}
+          aria-hidden={activeFrame !== "secondary"}
+          // It remains layoutable at the exact reader dimensions, but can
+          // never become visible or interactive until its prepared slot is
+          // promoted after the React spineIndex effect.
+          style={activeFrame === "secondary" ? undefined : { visibility: "hidden", zIndex: 0 }}
+        />
+      )}
+      {!book.fixedLayout && (settings.preloadNextChapter === true || activeFrame === "tertiary") && (
+        <iframe
+          ref={tertiaryIframeRef}
+          title={activeFrame === "tertiary" ? "chapter" : "preloaded chapter"}
+          aria-hidden={activeFrame !== "tertiary"}
+          style={activeFrame === "tertiary" ? undefined : { visibility: "hidden", zIndex: 0 }}
+        />
+      )}
     </div>
   );
 });

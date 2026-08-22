@@ -13,12 +13,21 @@ export interface MenuPanelProps {
   customFontName?: string;
   /** 用户自定义 CSS 文本 */
   customCss?: string;
+  /** 可重排章节是否强制覆盖为横排 */
+  forceHorizontal: boolean;
+  /** 是否预先准备下一章以加快顺序切换；由上层决定固定版式是否禁用 */
+  preloadNextChapter?: boolean;
+  /** 固定版式等场景由上层决定是否禁用此开关 */
+  preloadNextChapterDisabled?: boolean;
   userFonts: Array<{ id: string; fileName: string; family: string }>;
   fontBusy: boolean;
   onImportFont(file: File): void;
   onDeleteFont(id: string): void;
   onCustomFontNameChange(name: string): void;
   onCustomCssChange(css: string): void;
+  onOpenFontSettings(): void;
+  onForceHorizontalChange(enabled: boolean): void;
+  onPreloadNextChapterChange?(enabled: boolean): void;
   onOpenFile(): void;
   onFontDec(): void;
   onFontInc(): void;
@@ -44,6 +53,17 @@ export interface MenuPanelProps {
 /** 只有草稿与已保存值不同才允许触发一次整章重载。 */
 export function isCustomCssDraftDirty(draft: string, saved: string): boolean {
   return draft !== saved;
+}
+
+/** 开关的辅助文案保持和实际行为一致，供菜单与纯逻辑测试复用。 */
+export function forceHorizontalModeDescription(enabled: boolean): string {
+  return enabled ? "竖排转横排" : "跟随书籍";
+}
+
+/** 快速章节切换开关的辅助文案，供菜单与纯逻辑测试复用。 */
+export function preloadNextChapterModeDescription(enabled: boolean, disabled = false): string {
+  if (disabled) return "当前不可用";
+  return enabled ? "预先准备相邻章节" : "按需加载";
 }
 
 const UI_SCALES: Array<{ value: number; label: string }> = [
@@ -121,7 +141,7 @@ function SliderRow(props: SliderRowProps) {
     ((draft - props.min) / (props.max - props.min)) * 100;
 
   return (
-    <div className="slider-row">
+    <div className="slider-row menu-control-card">
       <span className="menu-label">{props.label}</span>
       <div className="slider-main">
         <span className="slider-value">{props.formatValue(draft)}</span>
@@ -156,7 +176,6 @@ function SliderRow(props: SliderRowProps) {
 export function MenuPanel(props: MenuPanelProps) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [customCssDraft, setCustomCssDraft] = useState(props.customCss ?? "");
-  const fontInputRef = useRef<HTMLInputElement>(null);
 
   // 新挂载从已保存值开始；恢复默认或其他外部设置变化也应覆盖草稿。
   useEffect(() => {
@@ -245,54 +264,53 @@ export function MenuPanel(props: MenuPanelProps) {
         onInc={props.onWordSpacingInc}
       />
 
-      <div className="menu-subsection">自定义字体</div>
-      <div className="font-list">
-        {props.userFonts.length === 0 && (
-          <div className="font-empty">尚未添加字体；可上传 TTF/OTF/WOFF/WOFF2。</div>
-        )}
-        {props.userFonts.map((font) => (
-          <div key={font.id} className="font-item">
-            <button
-              className={`font-select${props.customFontName === font.family ? " active" : ""}`}
-              onClick={() => props.onCustomFontNameChange(font.family)}
-              title={font.fileName}
-            >
-              {font.family}
-              {props.customFontName === font.family ? " ✓" : ""}
-            </button>
-            <button
-              className="font-delete"
-              onClick={() => props.onDeleteFont(font.id)}
-              title="删除字体"
-              disabled={props.fontBusy}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-      </div>
-      <button
-        className="menu-item"
-        onClick={() => fontInputRef.current?.click()}
-        disabled={props.fontBusy}
-      >
-        ＋ 添加字体
+      <label className="menu-toggle-row menu-control-card">
+        <span>
+          <span className="menu-label">强制横排</span>
+          <span className="menu-toggle-hint" id="force-horizontal-hint">
+            {forceHorizontalModeDescription(props.forceHorizontal)}
+          </span>
+        </span>
+        <span className="switch-control">
+          <input
+            type="checkbox"
+            checked={props.forceHorizontal}
+            onChange={(e) => props.onForceHorizontalChange(e.target.checked)}
+            aria-label="强制横排"
+            aria-describedby="force-horizontal-hint"
+          />
+          <span className="switch-track" aria-hidden="true" />
+        </span>
+      </label>
+
+      <label className="menu-toggle-row menu-control-card">
+        <span>
+          <span className="menu-label">高性能模式</span>
+          <span className="menu-toggle-hint" id="preload-next-chapter-hint">
+            {preloadNextChapterModeDescription(props.preloadNextChapter === true, props.preloadNextChapterDisabled === true)}
+          </span>
+        </span>
+        <span className="switch-control">
+          <input
+            type="checkbox"
+            checked={props.preloadNextChapter === true}
+            disabled={props.preloadNextChapterDisabled === true}
+            onChange={(e) => props.onPreloadNextChapterChange?.(e.target.checked)}
+            aria-label="高性能模式"
+            aria-describedby="preload-next-chapter-hint"
+          />
+          <span className="switch-track" aria-hidden="true" />
+        </span>
+      </label>
+
+      <div className="menu-subsection">字体</div>
+      <button className="menu-item detail-action-card" onClick={props.onOpenFontSettings}>
+        {props.customFontName ? `当前：${props.customFontName}` : "跟随书籍"} · 打开字体设置
       </button>
-      <input
-        ref={fontInputRef}
-        type="file"
-        accept=".ttf,.otf,.woff,.woff2"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) props.onImportFont(f);
-          e.target.value = "";
-        }}
-      />
 
       <div className="menu-subsection">自定义 CSS</div>
       <textarea
-        className="custom-css-input"
+        className="custom-css-input detail-editor-card"
         rows={5}
         placeholder="/* 这里写任意 CSS，会注入到正文顶部样式之后，可覆盖阅读器规则 */\nbody { color: red !important; }"
         value={customCssDraft}
@@ -300,7 +318,7 @@ export function MenuPanel(props: MenuPanelProps) {
         spellCheck={false}
       />
       <button
-        className="menu-item"
+        className="menu-item detail-action-card"
         onClick={() => props.onCustomCssChange(customCssDraft)}
         disabled={!customCssDirty}
         title={customCssDirty ? "保存草稿并重新应用自定义 CSS" : "没有未保存的 CSS 修改"}

@@ -26,14 +26,34 @@ function book(): Book {
   };
 }
 
-function scheduler(): { scheduler: IdleScheduler; runNext(): void; size(): number } {
+function bookWithLinearChapters(count: number): Book {
+  const result = book();
+  const spine = Array.from({ length: count }, (_, index) => {
+    const id = index < 2 ? (index === 0 ? "a" : "b") : `chapter-${index}`;
+    if (index >= 2) {
+      result.manifest.set(id, {
+        id,
+        href: `${id}.xhtml`,
+        mediaType: "application/xhtml+xml",
+        properties: [],
+      });
+    }
+    return { idref: id, linear: true };
+  });
+  result.spine = spine;
+  return result;
+}
+
+function scheduler(): { scheduler: IdleScheduler; runNext(): void; size(): number; options: Array<{ timeout?: number }> } {
   let next = 0;
   const pending = new Map<number, () => void>();
+  const options: Array<{ timeout?: number }> = [];
   return {
     scheduler: {
-      request(callback) {
+      request(callback, requestOptions) {
         const id = ++next;
         pending.set(id, callback);
+        options.push(requestOptions ?? {});
         return id;
       },
       cancel(id) {
@@ -48,6 +68,7 @@ function scheduler(): { scheduler: IdleScheduler; runNext(): void; size(): numbe
       callback();
     },
     size: () => pending.size,
+    options,
   };
 }
 
@@ -65,12 +86,14 @@ describe("incremental chapter count job", () => {
       book: b,
       server: { textFor: (path) => texts.get(path) },
       generation: 4,
+      maxPerSlice: 1,
       scheduler: clock.scheduler,
       isCurrent: current,
       parse: (text) => parseHTML(`<html><body>${text}</body></html>`).document as unknown as Document,
       onCount: (index, value) => counts.push([index, value]),
     });
     expect(clock.size()).toBe(1);
+    expect(clock.options).toEqual([{ timeout: 100 }]);
     clock.runNext();
     expect(counts).toEqual([[0, 3]]);
     expect(clock.size()).toBe(1);
@@ -79,7 +102,7 @@ describe("incremental chapter count job", () => {
     expect(clock.size()).toBe(0);
   });
 
-  it("completes missing resources as estimated zero and aborts stale A→B work", () => {
+  it("keeps missing resources as error/unknown and aborts stale A→B work", () => {
     const clock = scheduler();
     const counts: Array<[number, number]> = [];
     let live = true;
@@ -109,21 +132,65 @@ describe("incremental chapter count job", () => {
     second.cancel();
   });
 
-  it("turns parser failures into estimated zero plus a diagnostic issue", () => {
+  it("turns parser failures into error/unknown plus a diagnostic issue", () => {
     const clock = scheduler();
     const issues: string[] = [];
     const counts: Array<[number, number]> = [];
+    const errors: number[] = [];
     createChapterCountJob({
       book: book(),
       server: { textFor: () => "<broken>" },
       generation: 1,
+      maxPerSlice: 1,
       scheduler: clock.scheduler,
       parse: () => { throw new Error("bad html"); },
       onCount: (index, value) => counts.push([index, value]),
+      onError: (index) => errors.push(index),
       onIssue: (issue) => issues.push(issue),
     });
     clock.runNext();
-    expect(counts).toEqual([[0, 0]]);
+    expect(counts).toEqual([]);
+    expect(errors).toEqual([0]);
     expect(issues[0]).toContain("chapter 0");
+  });
+
+  it("gives a media-only chapter a bounded positive structural weight", () => {
+    const clock = scheduler();
+    const counts: Array<[number, number]> = [];
+    const b = book();
+    createChapterCountJob({
+      book: b,
+      server: { textFor: (path) => path.endsWith("a.xhtml") ? '<svg><image href="x"/></svg>' : "" },
+      generation: 11,
+      scheduler: clock.scheduler,
+      maxPerSlice: 1,
+      parse: (text) => parseHTML(`<html><body>${text}</body></html>`).document as unknown as Document,
+      onCount: (index, value) => counts.push([index, value]),
+    });
+    clock.runNext();
+    expect(counts).toEqual([[0, 1000]]);
+  });
+
+  it("skips cached chapters and submits one bounded batch per default slice", () => {
+    const clock = scheduler();
+    const batches: Array<Array<[number, number]>> = [];
+    const b = bookWithLinearChapters(6);
+    createChapterCountJob({
+      book: b,
+      server: { textFor: () => "正文" },
+      generation: 12,
+      scheduler: clock.scheduler,
+      parse: (text) => parseHTML(`<html><body>${text}</body></html>`).document as unknown as Document,
+      skipIndices: new Set([0]),
+      onCount: () => undefined,
+      onCounts: (values) => batches.push(values),
+    });
+    expect(clock.options).toEqual([{ timeout: 100 }]);
+    clock.runNext();
+    expect(batches).toEqual([[[1, 2], [2, 2], [3, 2], [4, 2]]]);
+    expect(clock.size()).toBe(1);
+    clock.runNext();
+    expect(batches).toEqual([[[1, 2], [2, 2], [3, 2], [4, 2]], [[5, 2]]]);
+    expect(clock.size()).toBe(0);
   });
 });

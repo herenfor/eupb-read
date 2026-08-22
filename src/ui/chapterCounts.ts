@@ -1,4 +1,4 @@
-export type ChapterCountSource = "unknown" | "estimated" | "measured";
+export type ChapterCountSource = "unknown" | "estimated" | "measured" | "error";
 
 export interface ChapterCount {
   value: number | null;
@@ -17,6 +17,22 @@ export interface ChapterCountSummary {
   current: number | null;
   complete: boolean;
   approximate: boolean;
+}
+
+/** Conservative value for a readable media-only unit when no text exists. */
+export const MEDIA_UNIT_CHAR_WEIGHT = 1000;
+
+/** Measured weight: text wins; a non-empty media-only chapter uses its pages. */
+export function measuredChapterWeight(
+  totalChars: number,
+  mediaUnits: number,
+  pageCount: number,
+): number {
+  if (Number.isSafeInteger(totalChars) && totalChars > 0) return totalChars;
+  if (!Number.isSafeInteger(mediaUnits) || mediaUnits <= 0) return 0;
+  if (!Number.isSafeInteger(pageCount) || pageCount <= 0) return 0;
+  const weight = pageCount * MEDIA_UNIT_CHAR_WEIGHT;
+  return Number.isSafeInteger(weight) ? weight : Number.MAX_SAFE_INTEGER;
 }
 
 function clampProgress(value: number): number {
@@ -51,7 +67,7 @@ export function applyChapterCount(
   generation: number,
   index: number,
   value: number,
-  source: Exclude<ChapterCountSource, "unknown">
+  source: Exclude<ChapterCountSource, "unknown" | "error">
 ): { accepted: boolean; collection: ChapterCountCollection } {
   if (
     generation !== collection.generation ||
@@ -72,6 +88,25 @@ export function applyChapterCount(
     accepted: true,
     collection: { ...collection, counts },
   };
+}
+
+/** Preserve an error as incomplete rather than turning a failed chapter into real zero. */
+export function applyChapterCountError(
+  collection: ChapterCountCollection,
+  generation: number,
+  index: number,
+): { accepted: boolean; collection: ChapterCountCollection } {
+  if (
+    generation !== collection.generation ||
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= collection.counts.length
+  ) {
+    return { accepted: false, collection };
+  }
+  const counts = collection.counts.slice();
+  counts[index] = { value: null, source: "error" };
+  return { accepted: true, collection: { ...collection, counts } };
 }
 
 function addCount(total: number, value: number): number {

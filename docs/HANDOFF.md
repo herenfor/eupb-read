@@ -4,6 +4,16 @@
 
 > 项目自述与功能列表见根目录 [README.md](../README.md)。
 
+> 正文搜索、语义检索、智能分类、RAG 问答与正文总结的长期方向见 [SEARCH_TO_RAG_ROADMAP.md](SEARCH_TO_RAG_ROADMAP.md)。当前已完成 B-059/C-48 的当前书基础正文搜索；跨书检索、语义检索、智能分类、RAG 问答与正文总结仍是后续范围，不得视为已实现或稳定发布能力。
+
+> B-060/C-49 正文笔记首版已经进入隔离副本：选区右键、创建/编辑/删除、按时间列表、文本锚点跳转、CSS Highlight 下划线和 portable archive 均已接入。Windows WebView2 实机仍待审核，契约见 [reader-notes.md](tasks/active/reader-notes.md)。
+
+> B-061/C-50 实验性“高性能模式”已经扩展为前后相邻三槽：默认关闭，后台严格先下一篇、后上一篇，槽位完全静默，顺序跨章命中后直接提升并保留反向缓存；固定版式和未命中保持标准加载。详细设置同时统一为主题色浅卡片与现代开关，纸色对比度已改善。Windows 性能、内存与视觉实机仍待审核，见 [next-chapter-preload.md](tasks/active/next-chapter-preload.md)。
+
+> B-062/C-51 书架二级筛选抽屉已经进入隔离副本：作者/书名/保存时间/语言组合筛选、搜索/排列/密度/主题/存档迁移、轻量动画及书架顶部工具栏移除均完成。OPF language 已贯通浏览器、Rust 和 portable archive；旧记录不扫描源书，显示“未知语言”。B-063～B-066 已让滚动区填满抽屉标题以下空间、预留稳定滚动槽，并修复搜索图标视觉居中；展开筛选出现滚动条时选项宽度不再变化。Windows 原生导入与 100+ 本视觉性能待审核，见 [shelf-filter-drawer.md](tasks/active/shelf-filter-drawer.md)。
+
+> 0.1.9 已完成发布收口；其后隔离副本进入下一版本开发。B-067 为阅读器菜单增加稳定滚动槽，修复展开详细设置后卡片突然变窄；该项不得回记为 0.1.9 内容。
+
 ## 技术栈
 
 - 外壳：Tauri 2（Rust）
@@ -46,13 +56,13 @@ scripts/      构建/自检/测试工具
 ```bash
 pnpm install
 pnpm dev          # 浏览器开发模式（localhost:5173）
-pnpm test         # 单元测试（当前 319 项）
+pnpm test         # 单元测试（当前 407 项）
 pnpm build        # TypeScript 检查 + 生产构建
 pnpm tauri dev    # 桌面窗口调试（需要系统 Tauri 依赖）
 pnpm tauri build  # 桌面打包
 ```
 
-Windows 一键打包见 `scripts/build-windows.ps1`；0.1.8 的 WSL→Windows 安全同步与测试版验收见 `docs/RELEASE_0.1.8.md`。
+Windows 一键打包见 `scripts/build-windows.ps1`；0.1.9 的 WSL→Windows 安全同步与测试版验收见 `docs/RELEASE_0.1.9.md`。0.1.8 文档仅保留为阶段历史。
 
 ## 渲染分层规范
 
@@ -129,10 +139,35 @@ width: X% → width: min(X%, X/100 × 40rem)
 
 版本号需保持四处一致：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、根包在 `src-tauri/Cargo.lock` 中的版本。
 
+## 第三方许可材料（草案已存在，暂时搁置）
+
+当前项目原创代码采用 Apache License 2.0。截至 2026-08-22 的锁文件审计没有发现会强制整个项目改用 GPL/AGPL 的依赖；Rust 锁文件包含 5 个 MPL-2.0 crate（`cssparser 0.36.0`、`cssparser-macros 0.6.1`、`dtoa-short 0.3.5`、`option-ext 0.2.0`、`selectors 0.36.1`）。`r-efi 5.3.0/6.0.0` 的声明为 `MIT OR Apache-2.0 OR LGPL-2.1-or-later`，草案按 MIT/Apache-2.0 选项记录；Windows WebView2 不按 GPL/LGPL 组件处理。Linux 若捆绑 WebKitGTK，需要另做 LGPL 分发审计，不能直接沿用 Windows 结论。
+
+网络波动前启动的修改在 2026-08-22 交接文档首次写入后延迟落盘。当前已经存在以下**草案材料**：
+
+- `THIRD_PARTY_LICENSES.md` 与 `third-party-licenses/` 中 9 份标准许可证文本；
+- `NOTICE` 的第三方说明，以及 README 的第三方许可证入口；
+- `package.json`、`src-tauri/Cargo.toml` 的 `Apache-2.0` 字段和已更新的 Cargo authors；
+- `CONTRIBUTING.md` 的 Apache-2.0 入站贡献条款；
+- `src-tauri/tauri.conf.json` 的 `bundle.license` 与许可材料 `resources`；
+- 根 `LICENSE` 权限已为 `644`。
+
+这些文件**尚未完成最终验收，当前明确暂时搁置，等待进一步补充**。剩余事项如下：
+
+- `THIRD_PARTY_LICENSES.md` 目前以主要直接依赖和许可证类型为主，尚未逐项确认所有实际进入 Windows 二进制的传递依赖、逐包版权声明及上游 NOTICE 是否完整；
+- 尚未人工复核草案中的版本、版权年份、源码链接和标准许可证文本是否与锁文件/上游原文完全一致；
+- Tauri bundle 虽已声明 resources，但尚未在新的 Windows NSIS 安装目录和免安装分发包中验证文件实际存在、可读；是否另加 `bundle.licenseFile` 也尚未决定；
+- 应用图标的来源、原创性或再分发授权尚未留档；
+- 尚未建立目标平台感知的许可证/SBOM 自动生成、依赖升级复核和 GPL/AGPL/LGPL-only/未知许可证 CI 门禁；
+- Linux WebKitGTK 的 LGPL 分发策略尚未制定。
+
+恢复本项时，应先对草案做目标平台感知的逐包审计，再补齐归属/NOTICE，最后在 Windows 安装包与免安装压缩包中验收。完成这些步骤之前，不要把“第三方许可合规与发行包落地”标记为完成，也不要把草案状态表述为正式法律审查结论。
+
 ## 发布前检查清单
 
 1. `pnpm test` 全部通过；
 2. `pnpm build` 通过；
 3. 真机（各目标平台）至少执行一次书架导入/阅读/返回/重启恢复；
 4. 版本号三处一致；
-5. 更新 README 功能列表与本文档变更记录。
+5. 更新 README 功能列表与本文档变更记录；
+6. 若对外分发，确认第三方许可暂缓项已经完成，或明确本次发行仍不包含其合规收口。

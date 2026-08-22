@@ -9,6 +9,10 @@ export interface ReaderSettings {
   fontFamily?: string;
   /** 用户选择的已上传自定义字体 family（优先于 fontFamily 与书字体） */
   customFontName?: string;
+  /** 字体来源；缺省时兼容旧版 customFontName。 */
+  fontSource?: "system" | "imported";
+  /** fontSource=imported 时对应的本地字体元数据 id。 */
+  customFontId?: string;
   /** 已上传字体在本次会话中的 @font-face 资源（App 构造并传入渲染层） */
   customFonts?: Array<{ family: string; url: string }>;
   /** 用户自定义 CSS（高级设置内输入，注入在阅读器覆盖样式之后，允许覆盖） */
@@ -23,6 +27,10 @@ export interface ReaderSettings {
   letterSpacingPx?: number;
   /** 字符（词）间距 px；undefined = 跟随书 */
   wordSpacingPx?: number;
+  /** 将可重排章节中的竖排书写模式强制转换为横排；undefined/false = 跟随书 */
+  forceHorizontal?: boolean;
+  /** 预先准备下一章以加快顺序切换；undefined/false = 按需加载 */
+  preloadNextChapter?: boolean;
 }
 
 export const DEFAULT_SETTINGS: ReaderSettings = {
@@ -30,6 +38,8 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   theme: "light",
   fontFamily: undefined,
   gapPx: 24,
+  forceHorizontal: false,
+  preloadNextChapter: false,
 };
 
 /**

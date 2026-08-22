@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export interface SystemFont {
+  family: string;
+  localizedNames: Array<{ locale: string; name: string }>;
+}
+
 /** 用户上传的自定义字体（用于正文 @font-face）。 */
 export interface UserFont {
   id: string;
@@ -20,6 +25,14 @@ export interface FontStore {
   }): Promise<UserFont>;
   readFont(id: string): Promise<Uint8Array>;
   deleteFont(id: string): Promise<void>;
+}
+
+/** Enumerate fonts exposed by the host. Non-Tauri/browser builds deliberately
+ * return an empty list: CSS still handles named fonts, but the app must not
+ * pretend that a browser can enumerate the user's font directory. */
+export async function listSystemFonts(): Promise<SystemFont[]> {
+  if (!isTauriEnv()) return [];
+  return invoke<SystemFont[]>("system_fonts_list");
 }
 
 export function isTauriEnv(): boolean {

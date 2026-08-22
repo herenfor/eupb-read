@@ -13,15 +13,16 @@ AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完
 
 ## 当前基线
 
-- 当前隔离副本版本：`0.1.8` 测试发布候选，准备由用户同步到 Windows 主机编译分发。
+- `0.1.9` 测试发布候选已经收口；隔离副本现已进入下一版本开发。B-067 阅读器菜单稳定滚动槽属于下一版本，不得混入 0.1.9 发布说明。
 - 已发布版本：`0.1.5`（已在 Windows 编译、打包并分发）
 - 0.1.5 发布提交：`4bb9c7b2e50ef3a13f2cc8cd06d91c25486911b7`
 - 当前源仓比较基线：`e8aabcdeb03543402338aee00fb2e33d52e39841`（`v0.1.6`，`origin/main`）。
 - 基线提交说明：`fix: use u64 for shelf timestamps (Tauri IPC rejects u128)`。
 - 排除本地测试产物后，隔离副本代码与该源仓提交一致；当前文档收尾差异见 `SOURCE_DELTA.md`。
-- 当前隔离副本单元测试基线：35 个测试文件、319 个用例；Rust 测试 13 个。
-- `package.json`、Tauri 配置、Cargo 清单和 Cargo 锁文件中的本项目版本均为 `0.1.8`。
-- 渲染规划：`docs/PRELOAD_PLAN.md` 的 P0 首帧显示门已实现；P1 相邻章预加载与 P2 动画仍只是后续预留，不要视为已实现。
+- 当前隔离副本单元测试基线：前端 46 个测试文件、377 个用例；Rust 测试 17/17；`tsc --noEmit`、Vite production build（106 modules）与 Rust fmt/check/test 均通过。
+- `package.json`、Tauri 配置、Cargo 清单和 Cargo 锁文件中的本项目版本均为 `0.1.9`。
+- 渲染规划：`docs/PRELOAD_PLAN.md` 的 P0 首帧显示门与 P1 前后相邻三槽预加载已实现；P2 动画仍只是后续预留，不要视为已实现。
+- 长期搜索/RAG 方向：`docs/SEARCH_TO_RAG_ROADMAP.md` 已记录“正文语料与全文搜索 → 语义检索与分类 → 带引用问答与分层总结”的开发边界；B-059/C-48 已实现当前书基础正文搜索切片，跨书检索、语义检索与 RAG 仍属后续分支范围。
 - 当前待审 B-029：CSS 注释边界保护已接入 `cssRewrite`、sanitize 和 paginator；递归 `@import` 共享保护 context，且已完成 sanitize 外链 CSS 的 Chromium 端到端验证；普通测试书回归与 Windows WebView2 仍按发布流程确认，详见 `docs/tasks/active/css-comment-boundaries.md`。
 - 当前待审 B-030：末尾递归媒体-only float 的跨列补偿已接入 paginator；使用首列碎片 top + `scrollHeight` 推算未分片底部，并对候选及后代视觉 rect 做列边界/碰撞事务门控，详见 `docs/tasks/active/trailing-media-float-overflow.md`。title.xhtml whole-page wrapper 仍仅为诊断，未修改。
 - 当前待审 B-031：桌面书库已由复制正文改为链接源 EPUB；可同步记录、设备绑定和缩略图缓存分层，支持存档导入/导出、缺失源文件重新定位和视口门控缩略图。自动化完成，Windows 100+ 本发布包性能与原生文件流程仍待确认，详见 `docs/tasks/active/linked-library-refactor.md`。
@@ -31,6 +32,21 @@ AI 只能修改隔离副本。源仓同步、提交和 GitHub 推送由用户完
 - 当前待审 B-035：多看图片脚注富 HTML 复制到宿主弹层后，定向隐藏 `.duokan-footnote-content` 生成的注释 marker 并清零左 padding；普通作者列表保持编号，详见 `docs/tasks/active/footnote-rich-content-marker.md`。
 - 当前待审 B-048：桌面链接导入与浏览器预览已统一 `cover-image → meta cover → cover.*` 封面候选契约；发布版漏封面来自 Rust 原生 OPF 解析而非 WebView2/WebP 解码。候选仅查询已打开 ZIP 中央目录，不解压、不扫描整书；全量 Vitest 34/315、Rust 13/13、TypeScript/Vite 均通过，详见 `docs/tasks/active/cover-fallback-contract.md`。
 - 当前待审 B-049：设置详细数值步进按可见默认值使用纯数值有序档位；最小/最大边界继续点击返回原 settings identity，不触发无效阅读器重载；全量 Vitest 35/319、TypeScript/Vite 与 WSL Chromium 真实点击/reload 计数均通过，详见 `docs/tasks/active/settings-stepper-bounds.md`。
+- 当前待审 B-050：打开期阅读进度已将位置证据与暂时百分比解耦；结构 estimated 计数支持版本化本机缓存（contentHash 优先、256 entries/100000 counts、非 estimated merge-preserve）、默认每 slice 4 章/100ms timeout 的有界 job、error/媒体权重；新导入时间、存档阅读证据 merge 和每会话 progress writer 均已接入，详见 `docs/tasks/active/reading-progress-open-session.md`。全量 Vitest 36/332、tsc、Vite 98 modules、Rust 14/14 + fmt/check 已通过；Windows WebView2/发布包仍待用户补验。
+- 当前待审 B-051：首次进入书籍的首次白屏/首个 display-ready 前，滚轮/方向键/PageUp/PageDown/空格/工具栏翻页意图全部丢弃，不在首次 ready 后回放；首次 ready 清理外层滚轮累计，已显示书籍的跨章 loading 仍保留最后方向单槽。纯逻辑 turnIntent 9/9、全量 Vitest 36/334、tsc 通过；Windows WebView2 真实输入仍待确认，详见 `docs/tasks/active/initial-turn-intent-gate.md`。
+- 当前待审 B-052：App 宿主与 iframe paginator 共用 DOM selection guard，仅拦截非编辑区域 Ctrl/Cmd+A，编辑控件及其后代放行；进入 reader 时清理一次宿主旧 selection，不影响方向键与正文手动选择。定向 76/76、全量 Vitest 37/337、tsc、Vite 99 modules 已通过；Windows WebView2 selection 行为仍待确认，详见 `docs/tasks/active/selection-shortcut-guard.md`。
+- 当前待审 B-053/C-42：dark theme 在 iframe load 后首次 measure 前按有效 alpha 背景与 WCAG contrast 保守修正局部元素；按 html→body 单次 DFS 读取每个元素样式，背景图、未知/opacity/作者不同色跳过，marker 随文档销毁。定向 68/68、全量 Vitest 38/341、tsc、Vite 100 modules 与 WSL Chromium 1280×800 目标资料⑤实机结果已记录；Vite 后已释放 5173，Windows WebView2 主题矩阵仍待确认，详见 `docs/tasks/active/dark-theme-contrast-guard.md`。
+- 当前待审 B-054/C-43：iframe 脚注 marker 与宿主弹层共享 140ms hover grace；普通正文 mouseover 不触碰 gate，重复 mouseover 不重复显示，固定/关闭/章节 cleanup 语义保持。定向 84/84、全量 Vitest 39/345、tsc、Vite 101 modules 与 WSL Chromium 640×480 `note_ref020` 交接实机结果已通过；5174 已释放，Windows WebView2 窄窗 hover 仍待确认，详见 `docs/tasks/active/footnote-hover-grace.md`。
+- 当前待审 B-055/C-44：FootnotePop 已移入 `.main` 统一 marker 局部坐标；placement helper 处理极窄窗口完整可见、左右/上下切换、容器 maxHeight 与尺寸变化。Root 独立验收的 `pnpm exec vitest run` 40/353、`tsc --noEmit`、`pnpm build` Vite 102 modules 与 WSL Chromium 640×480 `note_ref020` fullyInside/无截断证据均通过；5173/5174 无监听，Windows WebView2 UI scale 仍待用户确认，详见 `docs/tasks/active/footnote-placement-narrow-window.md`。
+- 当前待审 B-056/C-45：dark theme 仅在 `#epub-viewer` 根容器注入可继承的 `text-shadow: 1px 1px 1px #1e1e1e`，为浅色盒/复杂背景提供低侵入可读性兜底；不使用 `#epub-viewer *` 或 `!important`，light/sepia 不注入，作者后代显式声明可覆盖。sanitize 定向 54/54（含 `none`/特效保留），Root 独立复验全量 Vitest 40 文件/354 tests、tsc、Vite 102 modules；Windows WebView2 观感与长章节性能仍待用户，详见 `docs/tasks/active/dark-theme-text-shadow-fallback.md`。
+- 当前待审 B-057/C-46：可重排章节新增 `forceHorizontal` 设置，详细菜单可将竖排转换为横排；sanitize 覆盖 html/body/viewer 及非 SVG 树普通后代的标准与 Chromium vendor `writing-mode`，不改 direction，固定版式屏蔽。旧设置 undefined 兼容 false，localStorage/portable archive 均保留字段；Root 独立全量 Vitest 42 文件/359 tests、tsc、Vite 102 modules 及 `/tmp/vertical-smoke.epub` 900×650 WSL Chromium 烟测通过：开启后根级/嵌套 probe 为 `horizontal-tb`、`text-orientation=mixed`，SVG 显式 `vertical-rl` 保持，页码 1/1；Windows WebView2/真实竖排书仍待用户，详见 `docs/tasks/active/force-horizontal-reading.md`。
+- 当前待审 B-058/C-47：Windows 系统字体通过 DirectWrite `system_fonts_list` 返回 family/localizedNames，无路径/文件读取；系统字体只在首次打开字体中心枚举并会话缓存，Android 仅接口预留。独立字体中心提供 tabs/search、导入/删除和按实际容器高度计算、带 spacer 的真实虚拟列表；imported 启动只 list 元数据，当前选择才 read 一个 Blob，竞态/切换/失败 URL ownership 已覆盖；`fontSource`/`customFontId` 已接入 storage/archive。Root 独立前端全量 Vitest 44 files/365 tests、tsc、Vite 104 modules；Rust fmt/check/test 17/17。WSL Chromium 模拟 300 imported 通过启动 get=0、末尾可达 Font299、选择 get=1、z42>z41/hitInside 与 source/id 证据；900×900 动态视口实测高度 292px/DOM rows=13，搜索后 scrollTop=0，最终补丁后定向 63/63、tsc、Vite 再通过。5173/5174 无监听。Windows target cargo check/tauri build、真实枚举、本地化 CSS family 和 WebView2 实机仍待确认，详见 `docs/tasks/active/font-center-system-fonts.md`。
+- 当前待审 B-059/C-48：当前打开的可重排 EPUB 已支持按需、按 spine 顺序的正文搜索；会话缓存章节文本，逐章 yield，可取消并以 generation 防旧回写。标准化处理 NFKC/小写/软连字符/布局空白，排除隐藏结构与脚注，支持短语和同上下文多关键词 AND；正文索引使用紧凑字符串和 TypedArray 映射，结果最多保留 101 条、UI 展示 100 条，提供原文高亮与 code-point 文本锚点跳转，点击才进入既有 3 步历史。全量 Vitest 46 files/377 tests、tsc、Vite 106 modules；WSL Chromium 900×650 实测“opacity 属性”4 条结果及 back/forward 已通过。无持久化索引、跨书搜索、模糊/语义/RAG 功能，详见 `docs/tasks/active/reader-text-search.md`。
+- 当前待审 B-060/C-49：可重排正文已支持选区右键添加笔记、本书笔记列表、编辑/删除、文本锚点跳转和既有三步历史。下划线只使用 CSS Custom Highlight，不修改书籍 DOM；notes 已进入前端/Tauri 书架记录及 portable archive。全量 Vitest 50 files/393 tests、Rust 18/18、tsc、Vite 110 modules与 WSL Chromium 真实链路通过，Windows WebView2 待确认；详见 `docs/tasks/active/reader-notes.md`。
+- 当前待审 B-061/C-50：菜单新增默认关闭的“高性能模式”。可重排书最多保留上一篇/当前篇/下一篇三个同尺寸槽位，后台严格先下一篇、后上一篇，顺序跨章直接提升并保留旧章为反向缓存；显式跳转与未命中仍走 P0。开关不重载当前章，设置/字体/尺寸变化和生命周期会销毁备用槽；fixed-layout 禁用。详细设置已统一为主题色浅卡片和 42×24 现代开关，纸色衬底不再过深；窄窗下滑块和开关卡片统一为同宽同高，步进按钮不溢出且开关标题无多余顶部空白。全量 Vitest 51 files/402 tests、tsc、Vite 110 modules 与 WSL Chromium 实书三 Blob/约 7ms 回翻及 640×520 菜单实测通过；Windows CPU/内存、连续快速翻章与视觉待确认，详见 `docs/tasks/active/next-chapter-preload.md`。
+- 当前待审 B-062/C-51（含 B-063～B-066）：书架新增带动画的二级筛选抽屉，收纳搜索、排列、密度、主题、存档导入/导出；可按作者、书名、保存时间、语言组合筛选。作者分组使用 NFKC 与 CJK 间 Unicode whitespace/Cf 清理但不改原 OPF 值，language 已进入浏览器/Rust/portable archive，旧记录显示未知且不扫描源文件。书架顶部 Toolbar 已移除，阅读器 Toolbar 保留；抽屉滚动区填满剩余高度并预留稳定滚动槽，搜索使用 SVG 图标严格居中，筛选展开不再引起横向缩窄。全量 Vitest 52 files/407 tests、Rust 19/19、tsc、Vite 110 modules 与 Chromium UI 链路通过；Windows 原生导入和 100+ 本实机待确认，详见 `docs/tasks/active/shelf-filter-drawer.md`。
+- 下一版本 B-067：阅读器 `.menu-panel` 预留稳定滚动槽，展开详细设置后设置卡片不再因滚动条出现而变窄；不属于 0.1.9 发布范围。
+- 当前暂缓事项：第三方许可草案已因网络波动前任务延迟落盘，现有 `THIRD_PARTY_LICENSES.md`、许可证文本目录、NOTICE/README/贡献条款、package/Cargo SPDX 字段与 Tauri bundle resources；但逐包传递依赖/版权/NOTICE 审计、Windows 安装包实证、图标授权和 Linux LGPL 边界均未验收。`SOURCE_DELTA.md` 与 `HANDOFF.md` 将其明确标记为“草案已存在、暂时搁置”，后续对话不得视为正式完成。
 
 当前未同步变化以 `docs/SOURCE_DELTA.md` 为准，不要仅根据本节判断。
 
@@ -103,4 +119,5 @@ EPUB bytes
 - 渲染冲突台账：`rendering-layers.md`
 - 开发与发布说明：`HANDOFF.md`
 - 任务模板：`tasks/TEMPLATE.md`
-- 当前版本收尾记录：`RELEASE_0.1.8.md` 与 `tasks/active/version-0.1.8-release-candidate.md`；Windows 安装包状态仍待用户确认。
+- 当前版本收尾记录：`RELEASE_0.1.9.md` 与 `tasks/active/version-0.1.9-release-candidate.md`；0.1.8 文件保留为阶段历史，Windows 安装包状态仍待用户确认。
+- 搜索到 RAG 的长期路线：`SEARCH_TO_RAG_ROADMAP.md`（调研完成、尚未实现）。

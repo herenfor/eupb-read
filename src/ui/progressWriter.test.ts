@@ -75,6 +75,27 @@ describe("ShelfProgressWriter", () => {
     }
   });
 
+  it("按阅读会话重新允许首次位置立即写入", async () => {
+    vi.useFakeTimers();
+    try {
+      const writes: number[] = [];
+      const writer = new ShelfProgressWriter(async (_id, value) => {
+        writes.push(value.page);
+      }, { debounceMs: 100 });
+      writer.enqueue("book", patch(1));
+      await Promise.resolve();
+      await writer.flush();
+      writer.beginSession("book");
+      writer.enqueue("book", patch(2));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writes).toEqual([1, 2]);
+      writer.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("flush 报告写入错误，但后续写入仍可继续", async () => {
     let fail = true;
     const writes: number[] = [];

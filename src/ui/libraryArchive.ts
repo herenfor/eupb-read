@@ -7,6 +7,8 @@
  */
 
 import { sanitizePersistedTextAnchor } from "../render/textAnchor";
+import { hasReadEvidence } from "./readEvidence";
+import { hasDuplicateReaderNoteIds, normalizeReaderNote, type ReaderNote, validateReaderNote } from "./notes";
 
 export const LIBRARY_ARCHIVE_VERSION = 1 as const;
 
@@ -39,6 +41,8 @@ export interface LibraryRecord {
   contentHash: string;
   title: string;
   creator: string;
+  /** OPF dc:language; optional so existing v1 archives stay valid. */
+  language?: string;
   /** Display hint only; never a source path. */
   fileName: string;
   addedAtMs: number;
@@ -52,6 +56,8 @@ export interface LibraryRecord {
   anchorTextSnippet: string | null;
   isNew: boolean;
   bookmarks: ArchiveBookmark[];
+  /** Added in the note feature; omitted in old v1 archives and normalized to []. */
+  notes?: ReaderNote[];
 }
 
 export type ReaderSettingsArchive = { [key: string]: JsonValue };
@@ -175,6 +181,20 @@ function bookmarkValue(value: unknown, path: string, errors: ArchiveIssue[]): Ar
   return { id, spineIndex, page, anchorIndex, anchorRatio, anchorTextOffset: textAnchor.textOffset, anchorTextSnippet: textAnchor.textSnippet, text, createdAtMs };
 }
 
+function noteValue(value: unknown, path: string, errors: ArchiveIssue[]): ReaderNote | null {
+  const validation = validateReaderNote(value);
+  if (!validation.valid) {
+    issue(
+      errors,
+      validation.field ? `${path}.${validation.field}` : path,
+      "invalid-note",
+      validation.reason ?? "invalid note",
+    );
+    return null;
+  }
+  return normalizeReaderNote(value);
+}
+
 function recordValue(value: unknown, hash: string, path: string, errors: ArchiveIssue[]): LibraryRecord | null {
   if (!objectLike(value)) {
     issue(errors, path, "invalid-record", "expected a record object");
@@ -183,6 +203,9 @@ function recordValue(value: unknown, hash: string, path: string, errors: Archive
   reportForbiddenFields(value, path, errors);
   const title = stringValue(value.title, `${path}.title`, errors);
   const creator = stringValue(value.creator, `${path}.creator`, errors);
+  const language = value.language === undefined
+    ? undefined
+    : stringValue(value.language, `${path}.language`, errors);
   const fileName = stringValue(value.fileName, `${path}.fileName`, errors, true);
   const addedAtMs = nonNegative(value.addedAtMs, `${path}.addedAtMs`, errors);
   const lastReadAtMs = nonNegative(value.lastReadAtMs, `${path}.lastReadAtMs`, errors);
@@ -211,13 +234,29 @@ function recordValue(value: unknown, hash: string, path: string, errors: Archive
       if (bookmark) bookmarks.push(bookmark);
     });
   }
-  if (title === null || creator === null || fileName === null || addedAtMs === null || lastReadAtMs === null || spineIndex === null || page === null || progressPct === null || progressPct < 0 || progressPct > 100 || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || invalidTextAnchor || typeof value.isNew !== "boolean") return null;
-  return { contentHash: hash, title, creator, fileName, addedAtMs, lastReadAtMs, spineIndex, page, progressPct, anchorIndex, anchorRatio, anchorTextOffset: textAnchor.textOffset, anchorTextSnippet: textAnchor.textSnippet, isNew: value.isNew, bookmarks };
+  const notes: ReaderNote[] = [];
+  if (value.notes === undefined) {
+    // v1 records predate notes and intentionally normalize to an empty list.
+  } else if (!Array.isArray(value.notes)) {
+    issue(errors, `${path}.notes`, "invalid-array", "expected an array");
+  } else {
+    value.notes.forEach((item, index) => {
+      const note = noteValue(item, `${path}.notes[${index}]`, errors);
+      if (note) notes.push(note);
+    });
+    if (hasDuplicateReaderNoteIds(notes)) {
+      issue(errors, `${path}.notes`, "duplicate-note-id", "note IDs must be unique within a book");
+    }
+  }
+  if (title === null || creator === null || language === null || fileName === null || addedAtMs === null || lastReadAtMs === null || spineIndex === null || page === null || progressPct === null || progressPct < 0 || progressPct > 100 || (anchorIndex === null && value.anchorIndex !== null) || (anchorRatio === null && value.anchorRatio !== null) || invalidTextAnchor || typeof value.isNew !== "boolean") return null;
+  return { contentHash: hash, title, creator, ...(language ? { language } : {}), fileName, addedAtMs, lastReadAtMs, spineIndex, page, progressPct, anchorIndex, anchorRatio, anchorTextOffset: textAnchor.textOffset, anchorTextSnippet: textAnchor.textSnippet, isNew: value.isNew, bookmarks, notes };
 }
 
 const SETTING_KEYS = new Set([
-  "fontSizePx", "theme", "fontFamily", "customFontName", "customCss", "gapPx",
+  "fontSizePx", "theme", "fontFamily", "customFontName", "fontSource", "customFontId", "customCss", "gapPx",
   "lineHeight", "fontWeight", "letterSpacingPx", "wordSpacingPx", "uiScale",
+  "forceHorizontal",
+  "preloadNextChapter",
 ]);
 
 function jsonValue(value: unknown, path: string, errors: ArchiveIssue[]): JsonValue | undefined {
@@ -359,6 +398,9 @@ export function exportLibraryArchive(input: LibraryArchive | ArchiveParseResult)
 }
 
 function newerRecord(a: LibraryRecord, b: LibraryRecord): LibraryRecord {
+  const aRead = hasReadEvidence(a);
+  const bRead = hasReadEvidence(b);
+  if (aRead !== bRead) return bRead ? b : a;
   if (b.lastReadAtMs > a.lastReadAtMs) return b;
   if (b.lastReadAtMs < a.lastReadAtMs) return a;
   // Equal timestamps are deterministic and permit an explicit newer bookmark set.
@@ -375,17 +417,34 @@ function mergeBookmarks(a: ArchiveBookmark[], b: ArchiveBookmark[]): ArchiveBook
   return Array.from(merged.values());
 }
 
+function mergeNotes(a: ReaderNote[], b: ReaderNote[]): ReaderNote[] {
+  const merged = new Map<string, ReaderNote>();
+  for (const item of a) merged.set(item.id, item);
+  for (const item of b) {
+    const previous = merged.get(item.id);
+    if (!previous || item.updatedAtMs > previous.updatedAtMs) {
+      merged.set(item.id, item);
+    } else if (previous.updatedAtMs === item.updatedAtMs) {
+      // Equal timestamps must not depend on archive argument order.
+      const previousKey = JSON.stringify(previous);
+      const candidateKey = JSON.stringify(item);
+      if (candidateKey > previousKey) merged.set(item.id, item);
+    }
+  }
+  return Array.from(merged.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
 /** Merge records without allowing an older reading position to win. */
 export function mergeLibraryArchives(base: LibraryArchive, incoming: LibraryArchive): LibraryArchive {
   const left = parseLibraryArchive(base);
   const right = parseLibraryArchive(incoming);
   if (left.errors.length || right.errors.length) throw new Error("无法合并无效存档");
   const out = EMPTY_ARCHIVE();
-  for (const [hash, record] of Object.entries(left.archive.records)) out.records[hash] = { ...record, bookmarks: [...record.bookmarks] };
+  for (const [hash, record] of Object.entries(left.archive.records)) out.records[hash] = { ...record, bookmarks: [...record.bookmarks], notes: [...(record.notes ?? [])] };
   for (const [hash, candidate] of Object.entries(right.archive.records)) {
     const current = out.records[hash];
     if (!current) {
-      out.records[hash] = { ...candidate, bookmarks: [...candidate.bookmarks] };
+      out.records[hash] = { ...candidate, bookmarks: [...candidate.bookmarks], notes: [...(candidate.notes ?? [])] };
       continue;
     }
     const winner = newerRecord(current, candidate);
@@ -395,6 +454,7 @@ export function mergeLibraryArchives(base: LibraryArchive, incoming: LibraryArch
       addedAtMs: Math.min(current.addedAtMs, candidate.addedAtMs),
       isNew: current.isNew && candidate.isNew,
       bookmarks: mergeBookmarks(current.bookmarks, candidate.bookmarks),
+      notes: mergeNotes(current.notes ?? [], candidate.notes ?? []),
     };
   }
   if (left.archive.settings || right.archive.settings) out.settings = { ...left.archive.settings, ...right.archive.settings };

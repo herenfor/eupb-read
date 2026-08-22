@@ -2,11 +2,13 @@ import { resolvePath } from "../core/paths";
 import type { Book } from "../core/types";
 import {
   hasStructurallyExcludedAncestor,
+  isStructurallyHiddenElement,
   normalizeAnchorText,
 } from "../render/textAnchor";
+import { MEDIA_UNIT_CHAR_WEIGHT } from "./chapterCounts";
 
 export interface IdleScheduler {
-  request(callback: () => void): number;
+  request(callback: () => void, options?: { timeout?: number }): number;
   cancel(handle: number): void;
 }
 
@@ -19,8 +21,8 @@ export function createDefaultIdleScheduler(): IdleScheduler {
   const host = globalThis as unknown as IdleWindow;
   if (typeof host.requestIdleCallback === "function") {
     return {
-      request(callback) {
-        return host.requestIdleCallback!(callback, { timeout: 500 });
+      request(callback, options) {
+        return host.requestIdleCallback!(callback, options ?? { timeout: 100 });
       },
       cancel(handle) {
         host.cancelIdleCallback?.(handle);
@@ -48,8 +50,14 @@ export interface ChapterCountJobOptions {
   scheduler?: IdleScheduler;
   /** Must verify the active session generation and exact book/server identity. */
   isCurrent?: (generation: number, book: Book, server: ChapterCountJobServer) => boolean;
+  /** Cached structural estimates; these indices are not scheduled again. */
+  skipIndices?: ReadonlySet<number>;
+  /** Bounded number of chapters handled by one scheduler callback. */
+  maxPerSlice?: number;
   parse?: (text: string) => Document;
   onCount(index: number, value: number): void;
+  onCounts?(counts: Array<[number, number]>): void;
+  onError?(index: number): void;
   onIssue?(message: string): void;
 }
 
@@ -60,16 +68,33 @@ function defaultParse(text: string): Document {
   return doc;
 }
 
-function countStructuralText(doc: Document): number {
+function countStructuralContent(doc: Document): { text: number; media: number } {
   const root = doc.body ?? doc.documentElement;
-  if (!root) return 0;
+  if (!root) return { text: 0, media: 0 };
   const walker = doc.createTreeWalker(root, 4);
   let total = 0;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (hasStructurallyExcludedAncestor(node)) continue;
     total += Array.from(normalizeAnchorText(node.textContent ?? "")).length;
   }
-  return Number.isSafeInteger(total) ? total : Number.MAX_SAFE_INTEGER;
+  const mediaTags = new Set(["img", "video", "audio", "canvas", "svg", "object", "embed"]);
+  let media = 0;
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    const tag = element.tagName.toLowerCase();
+    if (!mediaTags.has(tag)) continue;
+    if (isStructurallyHiddenElement(element) || hasStructurallyExcludedAncestor(element)) continue;
+    // SVG is one media unit; its nested <image> must not be counted again.
+    if (tag !== "svg" && element.closest("svg")) continue;
+    media++;
+  }
+  const text = Number.isSafeInteger(total) ? total : Number.MAX_SAFE_INTEGER;
+  return { text, media };
+}
+
+export function countStructuralChapter(doc: Document): number {
+  const result = countStructuralContent(doc);
+  if (result.text > 0) return result.text;
+  return result.media > 0 ? result.media * MEDIA_UNIT_CHAR_WEIGHT : 0;
 }
 
 export function createChapterCountJob(options: ChapterCountJobOptions): { cancel(): void } {
@@ -77,9 +102,10 @@ export function createChapterCountJob(options: ChapterCountJobOptions): { cancel
   const controller = new AbortController();
   const indices = options.book.spine
     .map((item, index) => (item.linear ? index : -1))
-    .filter((index) => index >= 0);
+    .filter((index) => index >= 0 && !options.skipIndices?.has(index));
   let cursor = 0;
   let scheduled: number | null = null;
+  const maxPerSlice = Math.max(1, Math.min(4, Math.floor(options.maxPerSlice ?? 4)));
 
   const current = (): boolean =>
     !controller.signal.aborted &&
@@ -90,32 +116,40 @@ export function createChapterCountJob(options: ChapterCountJobOptions): { cancel
     scheduled = scheduler.request(() => {
       scheduled = null;
       if (!current()) return;
-      const index = indices[cursor++];
-      let value = 0;
-      let issue: string | undefined;
-      try {
-        const item = options.book.spine[index];
-        const manifest = options.book.manifest.get(item.idref);
-        if (!manifest) {
-          issue = `chapter ${index}: manifest item missing`;
-        } else {
-          const path = resolvePath(options.book.opfPath, manifest.href);
-          const text = options.server.textFor(path);
-          if (text === undefined) {
-            issue = `chapter ${index}: text resource missing (${path})`;
+      const counts: Array<[number, number]> = [];
+      for (let processed = 0; processed < maxPerSlice && cursor < indices.length; processed++) {
+        const index = indices[cursor++];
+        let value: number | null = null;
+        let issue: string | undefined;
+        try {
+          const item = options.book.spine[index];
+          const manifest = options.book.manifest.get(item.idref);
+          if (!manifest) {
+            issue = `chapter ${index}: manifest item missing`;
           } else {
-            value = countStructuralText((options.parse ?? defaultParse)(text));
+            const path = resolvePath(options.book.opfPath, manifest.href);
+            const text = options.server.textFor(path);
+            if (text === undefined) {
+              issue = `chapter ${index}: text resource missing (${path})`;
+            } else {
+              value = countStructuralChapter((options.parse ?? defaultParse)(text));
+            }
           }
+        } catch (error) {
+          issue = `chapter ${index}: ${error instanceof Error ? error.message : String(error)}`;
         }
-      } catch (error) {
-        issue = `chapter ${index}: ${error instanceof Error ? error.message : String(error)}`;
-        value = 0;
+        if (!current()) return;
+        if (value === null) {
+          options.onError?.(index);
+          if (issue) options.onIssue?.(issue);
+        } else {
+          counts.push([index, value]);
+          if (!options.onCounts) options.onCount(index, value);
+        }
       }
-      if (!current()) return;
-      options.onCount(index, value);
-      if (issue && options.onIssue && current()) options.onIssue(issue);
+      if (counts.length > 0 && options.onCounts) options.onCounts(counts);
       schedule();
-    });
+    }, { timeout: 100 });
   };
 
   const cancel = (): void => {

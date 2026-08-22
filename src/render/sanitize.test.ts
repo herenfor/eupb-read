@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseHTML } from "linkedom";
-import { sanitizeChapter, VIEWER_ID } from "./sanitize";
+import { escapeCssString, sanitizeChapter, VIEWER_ID } from "./sanitize";
 import { DEFAULT_SETTINGS } from "./settings";
 
 function opts(basePath = "OEBPS/Text/ch1.xhtml") {
@@ -12,6 +12,14 @@ function opts(basePath = "OEBPS/Text/ch1.xhtml") {
     settings: DEFAULT_SETTINGS,
   };
 }
+
+describe("font family CSS escaping", () => {
+  it("escapes quote, slash and CSS control characters", () => {
+    const escaped = escapeCssString('A\\B"C\r\n\f');
+    expect(escaped).toBe('A\\\\B\\"C\\d \\a \\c ');
+    expect(escaped).not.toMatch(/[\r\n\f]/);
+  });
+});
 
 function expectCombinatorsAndEscaping(out: string): void {
   expect(out).toContain(".parent>.direct { color: red; }");
@@ -28,6 +36,19 @@ function expectCombinatorsAndEscaping(out: string): void {
 }
 
 describe("sanitizeChapter", () => {
+  it("注入 iframe 内的笔记 Custom Highlight 下划线规则，不包裹正文或设置背景", async () => {
+    const { html: out } = await sanitizeChapter(
+      `<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p></body></html>`,
+      opts()
+    );
+    expect(out).toContain("::highlight(reader-notes)");
+    expect(out).toContain("text-decoration-thickness: 2px");
+    expect(out).toContain("text-underline-offset: 0.15em");
+    const highlightRule = /::highlight\(reader-notes\)\s*\{([^}]*)\}/s.exec(out)?.[1] ?? "";
+    expect(highlightRule).not.toContain("background");
+    expect(out).not.toContain("reader-note-span");
+  });
+
   it("移除脚本与事件属性", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
 <script>alert(1)</script>
@@ -593,6 +614,33 @@ describe("sanitizeChapter", () => {
     expect(light.html).not.toContain("#6cb2ff");
   });
 
+  it("深色主题注入继承式文字阴影兜底，浅色/纸色不注入", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head><style>.none{text-shadow:none}.effect{text-shadow:0 0 2px red}</style></head><body><p>正文</p><p class="none">无阴影</p><p class="effect">作者特效</p></body></html>`;
+    const dark = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "dark" },
+    });
+    expect(dark.html).toContain(
+      `#${VIEWER_ID} { text-shadow: 1px 1px 1px #1e1e1e; }`
+    );
+    expect(dark.html).not.toContain(
+      `#${VIEWER_ID} { text-shadow: 1px 1px 1px #1e1e1e !important; }`
+    );
+    expect(dark.html).not.toContain(
+      `#${VIEWER_ID} * { text-shadow: 1px 1px 1px #1e1e1e; }`
+    );
+    expect(dark.html).toMatch(/\.none\s*\{\s*text-shadow\s*:\s*none\s*\}/);
+    expect(dark.html).toMatch(/\.effect\s*\{\s*text-shadow\s*:\s*0 0 2px red\s*\}/);
+
+    const light = await sanitizeChapter(html, opts());
+    const sepia = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, theme: "sepia" },
+    });
+    expect(light.html).not.toContain("text-shadow: 1px 1px 1px #1e1e1e");
+    expect(sepia.html).not.toContain("text-shadow: 1px 1px 1px #1e1e1e");
+  });
+
   it("深色主题下着重号 text-emphasis 随前景色换色", async () => {
     const html = `<html xmlns="http://www.w3.org/1999/xhtml"><head>
 <style>.dot{text-emphasis:circle #000}</style>
@@ -604,6 +652,35 @@ describe("sanitizeChapter", () => {
     expect(dark.html).toContain("text-emphasis-color: #d4d4d4");
     const light = await sanitizeChapter(html, opts());
     expect(light.html).not.toContain("text-emphasis-color");
+  });
+
+  it("强制横排覆盖根级与嵌套竖排，但不把规则直接应用到 SVG 及其后代", async () => {
+    const html = `<html xmlns="http://www.w3.org/1999/xhtml" style="writing-mode:vertical-rl"><head><style>
+      body{writing-mode:vertical-lr} .nested{writing-mode:vertical-rl} svg text{writing-mode:vertical-rl}
+    </style></head><body><div class="nested"><p>竖排正文</p></div><svg><text style="writing-mode:vertical-rl">图中文字</text></svg></body></html>`;
+    const forced = await sanitizeChapter(html, {
+      ...opts(),
+      settings: { ...DEFAULT_SETTINGS, forceHorizontal: true },
+    });
+    expect(forced.html).toContain("html, body, #epub-viewer,");
+    expect(forced.html).toContain("#epub-viewer :not(svg):not(svg *)");
+    expect(forced.html).toContain("writing-mode: horizontal-tb !important;");
+    expect(forced.html).toContain("-webkit-writing-mode: horizontal-tb !important;");
+    expect(forced.html).toContain("text-orientation: mixed !important;");
+    expect(forced.html).toContain('style="writing-mode:vertical-rl"');
+    expect(forced.html).not.toContain("direction:");
+
+    for (const theme of ["light", "dark", "sepia"] as const) {
+      const themed = await sanitizeChapter(html, {
+        ...opts(),
+        settings: { ...DEFAULT_SETTINGS, theme, forceHorizontal: true },
+      });
+      expect(themed.html).toContain("writing-mode: horizontal-tb !important;");
+    }
+
+    const normal = await sanitizeChapter(html, opts());
+    expect(normal.html).not.toContain("writing-mode: horizontal-tb !important;");
+    expect(normal.html).not.toContain("-webkit-writing-mode: horizontal-tb !important;");
   });
 
   it("脚注标记图标用 middle 垂直对齐（书里的 top 会顶到上一行）", async () => {

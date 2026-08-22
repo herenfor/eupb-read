@@ -777,3 +777,179 @@ CSS 规则的逐项冲突编号仍以 `rendering-layers.md` 为准；本文记�
 - 验证：新增回归在旧 helper 下 3 项失败；修复后步进定向 4/4，设置相关组合 7/7；全量 Vitest 35 文件、319/319 通过；`tsc --noEmit` 与 `pnpm build`（96 modules）通过。浏览器插件因 `sandboxCwd` 元数据错误不可用后，复用 WSL Playwright/Chromium 做真实点击：行高 1.6→1.8 触发 iframe load `0→1`，2.2 额外 `+` 保持值/load=3，1.4 额外 `-` 保持值/load=7；字间距 0 额外 `-` 保持值/load=7，0→2 触发 load `7→8`。Vite/Chromium 已停止，5173/5174 均未监听。
 - 剩余风险：Windows WebView2 仍需用户确认设置重排及既有字形空心化问题；B-049 不改变其生产 CSS 规避策略。
 - 关联：`docs/tasks/active/settings-stepper-bounds.md`、MODULE_CONTRACTS 设置 identity/reload 契约、B-040。
+
+## B-050：打开期阅读进度证据、统计缓存与会话写入
+
+- 状态：代码、自动化回归与 Root 独立 WSL Chromium 烟测完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：多章书打开后快速翻页并立即返回书架时，页码/锚点已经保存，但全书章节统计尚未完成，百分比仍为旧 baseline（常见为 0）；书架只看 `progressPct>0`，显示未读且不显示“继续阅读”。连续输入还可能让打开期统计长期等待，纯图片章被计为零权重。
+- 根因：B-039 的 incomplete summary 只能安全保留 baseline，但 UI 没有区分“百分比暂不可精确计算”和“没有阅读位置”；章节 job 没有显式 timeout/批量边界、失败以 estimated zero 完成，且没有本机派生缓存。新导入时间原先取当前时间，存档 merge 会让 import-only 空位置以较新时间赢过真实位置。
+- 约束：不阻塞首屏、不改变 portable archive schema、不缓存 measured/CSS 相关计数、不把失败伪装成真实零；`linear=no` 不入分母；最后 linear 章最后一页才允许 100%；`markOpened` 仍只能清新标记。
+- 选择的修复：新增通用 `hasReadPosition/hasReadEvidence`，书架显示与整数百分比解耦；成功进度 patch 和后端 `updateProgress` 清 `isNew`。状态栏 incomplete 显示“计算中”，estimated complete 显示“约”。新增版本化、有界 localStorage structural-count cache，按 `contentHash ?? shelfId` 键控，严格校验 linear mask/长度/safe integer，最多 256 entries/100000 counts，并对 measured/error/unknown 做 structural estimate merge-preserve；job 默认每 slice 最多 4 章、100ms timeout 并批量回调，失败写 error/unknown。新增媒体单元 1000 字权重，SVG 内 image 不重复，当前媒体章 measured 使用 `pageCount * 1000`。新导入 `lastReadAt=0`；portable merge 先按阅读证据再按时间。`ShelfProgressWriter.beginSession()` 按每次打开重置首次立即写门。
+- 未采用方案：不改 `paginator.setPage()` 的 emit/capture 顺序；已有状态回归和实现审查未证明 effect 会在 capture 前读取旧锚点，因此保留高风险分页器不变。
+- 修改文件：`src/ui/readEvidence.ts`、`src/ui/ShelfView.tsx`、`src/ui/shelf.ts`、`src/ui/shelf.test.ts`、`src/ui/progressWriter.ts`、`src/ui/progressWriter.test.ts`、`src/ui/chapterCounts.ts`、`src/ui/chapterCounts.test.ts`、`src/ui/chapterCountJob.ts`、`src/ui/chapterCountJob.test.ts`、`src/ui/chapterCountCache.ts`、`src/ui/chapterCountCache.test.ts`、`src/render/textAnchor.ts`、`src/render/textAnchor.test.ts`、`src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchive.test.ts`、`src-tauri/src/linked_library.rs`、本任务及契约/源差异文档。
+- 验证：相关定向 Vitest 7 文件、48/48；全量 Vitest 36 文件、332/332；`tsc --noEmit`；Vite production build（98 modules）；Rust `cargo fmt --check`、`cargo check --quiet`、`cargo test --quiet`，Rust 14/14 均通过。
+- 剩余风险：Windows WebView2 的 localStorage/quota、Tauri 真实关闭/隐藏 flush、目标 EPUB 媒体章和安装包仍需用户实机确认；未启动长期 Vite/Chromium。
+- 关联：`docs/tasks/active/reading-progress-open-session.md`、B-037、B-039、C-33。
+
+## B-051：首次白屏加载期间翻页意图被错误回放
+
+- 状态：代码与定向自动化回归完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：首次进入书籍的白屏加载期间，首个 display-ready 前的滚轮/方向键/PageUp/PageDown/空格/工具栏翻页意图被缓存，首个 ready 后可能补执行，导致打开位置被抢跑。
+- 根因：`TurnIntentBuffer` 原先只有 ready/loading 状态，无法区分本书首次 loading 与已经显示过后的跨章 loading；首次 ready 会消费初始期间的单槽方向。
+- 约束：首次 ready 前输入必须完全丢弃；首次 ready 只解锁且清理外层滚轮累计；已显示书籍的跨章 loading 仍保留最后方向单槽并在下一次 ready 消费一次；不改 paginator、CSS 或显示门顺序。
+- 选择的修复：为 `TurnIntentBuffer` 增加本书生命周期 `displayedOnce` 门；首次 `markReady()` 丢弃 pending，后续 `markLoading()`/`request()` 保留既有单槽语义。`ReaderView` 在首次 display-ready reset 外层 `WheelTurnAccumulator`，书籍 `key={bookKey}` 重建自然重新上锁。
+- 修改文件：`src/ui/turnIntent.ts`、`src/ui/turnIntent.test.ts`、`src/ui/ReaderView.tsx`、`docs/tasks/active/initial-turn-intent-gate.md`、本记录及契约/源差异文档。
+- 验证：`src/ui/turnIntent.test.ts` 9/9；全量 Vitest 36 文件、334/334；`tsc --noEmit` 通过。未启动长期 Vite/Chromium；Windows WebView2 真实输入仍待用户确认。
+- 关联：`docs/tasks/active/initial-turn-intent-gate.md`、B-033、B-039。
+
+## B-052：Ctrl/Cmd+A 误触发宿主全页选择
+
+- 状态：代码与自动化回归完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：书架或阅读器宿主 UI 中按 Ctrl/Cmd+A 会触发整页蓝色选择；iframe 正文内的选择行为也未与宿主统一。
+- 根因：App 宿主 keydown 与 ChapterPaginator iframe keydown 没有排除非编辑区域的 select-all 默认行为。
+- 约束：只拦截 A/a + Ctrl 或 Meta；input、textarea、contenteditable 及其后代必须放行；方向键/PageUp/PageDown 翻页不受影响；进入 reader 只清一次宿主旧 selection，不在章节切换/设置重排时清正文选择。
+- 选择的修复：新增可复用 `selectionGuard`，App 与 paginator 共用；命中后 preventDefault 并对对应 document 执行 `removeAllRanges()`。App 在 `view/bookKey` 进入 reader 时清理宿主既有 selection。
+- 修改文件：`src/render/selectionGuard.ts`、`src/render/selectionGuard.test.ts`、`src/render/paginator.ts`、`src/App.tsx`、`docs/tasks/active/selection-shortcut-guard.md`、本记录及契约/源差异文档。
+- 验证：selectionGuard、paginator、turnIntent 定向 76/76；全量 Vitest 37 文件、337/337；`tsc --noEmit`；Vite production build（99 modules）通过。Windows WebView2 编辑控件与真实 selection 仍待用户确认。
+- 关联：`docs/tasks/active/selection-shortcut-guard.md`、B-033、B-051。
+
+## B-053/C-42：深色主题半透明章节盒对比度不足
+
+- 状态：代码与自动化回归完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：目标书资料⑤ `p-007.xhtml` 在 dark theme 下 body/box/p 都接近 `rgb(212,212,212)`，半透明白 box 合成背景变亮后正文对比度不足；light theme 正常。
+- 根因：现有主题 CSS 只提供全局 body/通用前景色，未在章节自然样式与有效 alpha 背景合成后识别“主题前景撞上浅色 author box”的局部对比度问题。
+- 约束：只处理 dark theme、当前章节 iframe load 后且首次测量前一次；对 background-image、未知颜色/合成、opacity<1、作者明确不同颜色保守跳过；不改显示门/分页顺序，不按书名/class 特判。
+- 选择的修复：新增 `darkThemeContrast` 纯逻辑+DOM adapter，解析 RGB/RGBA/hex，递归合成祖先背景并按 WCAG contrast 计算；仅当 computed 前景近似主题 `rgb(212,212,212)`、当前 `<4.5` 且候选 `#1a1a1a` 显著改善时写普通优先级 inline color 与 `data-reader-dark-contrast` marker。背景容器可因子孙文本被修正，透明后代按有效背景判断；marker 随文档替换自然销毁。
+- 修改文件：`src/render/darkThemeContrast.ts`、`src/render/darkThemeContrast.test.ts`、`src/render/paginator.ts`、`docs/tasks/active/dark-theme-contrast-guard.md`、`docs/rendering-layers.md`、本记录及契约/源差异文档。
+- 验证：darkThemeContrast+paginator 定向 68/68；全量 Vitest 38 文件、341/341；`tsc --noEmit`；Vite production build（100 modules）均通过。Windows WebView2 实机仍待用户确认。
+- WSL Chromium 1280×800 实机：目标书 `[简][雨穴].诡屋.02` 资料⑤ 的 light 模式 body/box/p 均为 `rgb(26,26,26)`、box 背景为 `rgba(255,255,255,0.8)`；dark 模式 body 为 `rgb(212,212,212)`、box/p 为 `rgb(26,26,26)`，box 背景保持 `rgba(255,255,255,0.8)`。Vite 验证后已 Ctrl-C 释放 5173；临时 `/tmp/repro-dark-dialog.mjs` 不同步。
+- 关联：`docs/tasks/active/dark-theme-contrast-guard.md`、C-42、B-049、B-052。
+
+## B-054/C-43：iframe 脚注 marker 与宿主弹层 hover 交接闪烁
+
+- 状态：代码、自动化与 WSL Chromium 回归完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：窄窗口中 iframe 脚注 marker 移向宿主 `FootnotePop` 时，iframe `mouseout` 先到达并立即关闭弹层，随后宿主 hover 又重新显示，产生闪烁；同一仍可见 marker 的重复 mouseover 还会重复解析和发送 payload。
+- 根因：iframe 与宿主卡片属于不同 DOM hover 域，原实现没有交接 grace，也没有 gate 层的 visible/pinned/重复显示状态。
+- 选择的修复：新增可注入调度器的 `FootnoteHoverGate`，使用 140ms close grace；marker/overlay 任一 enter 取消 timer，两者均离开且未 pinned 才一次性 close。Paginator 先以 `getFootnoteHoverAnchor` 确认当前文档内脚注 anchor，普通正文 mouseover 完全不触碰 gate；随后在 marker、show/click pinned、overlay、dismiss、章节 cleanup/dispose 路径同步 gate。ReaderHandle/App 转发宿主 hover；FootnotePop 仅在真实尺寸变化时更新 size state。
+- 约束：固定注释点击、再次点击、关闭按钮、正文空白关闭语义不变；不改 popup CSS、定位算法、分页或 Rust。
+- 修改文件：`src/render/footnoteHoverGate.ts`、`src/render/footnoteHoverGate.test.ts`、`src/render/footnotes.ts`、`src/render/footnotes.test.ts`、`src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx`、`src/ui/FootnotePop.tsx`、`docs/tasks/active/footnote-hover-grace.md`、`docs/rendering-layers.md`、本记录及契约/源差异文档。
+- 验证：定向 84/84；全量 Vitest 39 文件、345/345；`tsc --noEmit`；Vite production build（101 modules）均通过。Windows WebView2 窄窗 hover 仍待用户实机确认。
+- WSL Chromium 640×480 实机：目标书后记第二页 `note_ref020` 的 marker iframe 为 `x=37.0..51.4`，宿主卡片为 `x=59.4..359.4`，中间 8px gap；marker→card 12 步移动后 250ms 弹层仍 present，`MutationObserver added=1 removed=0`。离开两域 300ms 后 `added=1 removed=1`，恰好关闭一次，页码保持 `2/3`。验证后已 Ctrl-C 释放 5174；临时 `/tmp/repro-footnote-flicker.mjs` 不同步。
+- 关联：`docs/tasks/active/footnote-hover-grace.md`、C-43、B-035、B-052。
+
+## B-055/C-44：极窄窗口脚注弹层越界与坐标系错误
+
+- 状态：代码与自动化回归完成，待用户/Windows WebView2 审核。
+- 发现日期：2026-08-22
+- 现象：脚注 payload 的 rect 是 `.main` 局部坐标，原 `FootnotePop` 却渲染在 `.main` 外并按 app/viewport 坐标绝对定位，漏掉 toolbar offset；640×480、四角 marker 和 UI scale 下弹层可能越界，固定 300px 宽度也可能超过容器。
+- 根因：弹层 DOM 坐标系与 marker payload 坐标系不一致，且原定位只偏好右侧/上方，没有容器尺寸、左右/上下完整可见与低高容器约束。
+- 选择的修复：新增纯 `placeFootnote` helper，宽度限制为 `min(300, containerWidth-2*gap)`，右/左与上/下按完整可见优先，均不足时选择空间较大方向并 clamp；容器不足输出 `maxHeight=height-2*gap`。FootnotePop 移入 `.main`，读取真实 clientWidth/clientHeight 与 offsetWidth/Height，ResizeObserver/resize listener 仅在变化时更新并 cleanup。
+- 约束：保持 z-index 60，不改 B-054 hover gate、分页、Rust；内容仍通过现有 overflow-y 滚动。
+- 修改文件：`src/ui/footnotePlacement.ts`、`src/ui/footnotePlacement.test.ts`、`src/ui/FootnotePop.tsx`、`src/App.tsx`、`docs/tasks/active/footnote-placement-narrow-window.md`、`docs/rendering-layers.md`、本记录及契约/源差异文档。
+- 验证：定向 92/92；全量 Vitest 40 文件、353/353；`tsc --noEmit`；Vite production build（102 modules）均通过。WSL Chromium 640×480 已由 Root 独立验收；Windows WebView2 UI scale 仍待用户实机确认。
+- Root 独立验收：`pnpm exec vitest run` 全量 40 files/353 tests、`tsc --noEmit`、`pnpm build`（Vite 102 modules）均通过。WSL Chromium Tauri minWidth 640×480 下，目标书 `[简][初鹿野創].有谁规定了在现实中不能有恋爱喜剧的？.03` 后记第 2/3 页 `note_ref020` 的 `.main` rect=`0,42,640x417`，card rect=`59.40625,50,300x295.421875`，`fullyInside=true`；card `clientHeight=293/scrollHeight=293`，无截断/内部滚动。marker→card 250ms 为 `added=1 removed=0`，离开两域 300ms 后 `added=1 removed=1`，C-43 未回归。5174 已停止，5173/5174 无监听。
+- 关联：`docs/tasks/active/footnote-placement-narrow-window.md`、C-44、B-054/C-43、B-035。
+
+## B-056/C-45：深色主题文字阴影可读性兜底（2026-08-22）
+
+- 状态：代码与自动化回归完成，待用户/Windows WebView2 审核
+- 现象：深色模式下，作者浅色盒子、背景图或复杂半透明背景中的默认浅色文字，在对比度扫描保守跳过时仍可能难以阅读。
+- 根因：`applyDarkThemeContrast` 对背景图、未知合成、opacity 等情况必须保守跳过；仅调整主题前景色不足以覆盖所有复杂背景。
+- 约束：只在 dark theme 注入；使用与深色主题背景一致的 `#1e1e1e`；不使用 `#epub-viewer *` 或 `!important`，不改既有局部对比度逻辑、分页、Rust；light/sepia 不受影响。
+- 选择的修复：在章节覆盖样式的 `#epub-viewer` 根容器注入普通优先级 `text-shadow: 1px 1px 1px #1e1e1e`，依靠 CSS 继承作为低侵入兜底。作者后代明确设置的 `text-shadow`（包括 `none`/特效）保持正常级联优先级并可覆盖。
+- 修改文件：`src/render/sanitize.ts`、`src/render/sanitize.test.ts`、`docs/tasks/active/dark-theme-text-shadow-fallback.md`、本记录及主题/渲染层/源差异文档。
+- 验证：`src/render/sanitize.test.ts` 定向 54/54，覆盖作者后代 `text-shadow:none` 与特效声明保留；Root 独立复验全量 Vitest 40 文件/354 tests、`tsc --noEmit`、Vite production build（102 modules）均通过。
+- 风险：默认文字会增加一次阴影绘制；不会覆盖作者显式 `text-shadow`，但 Windows WebView2 窄窗、长章节和复杂背景下的观感/性能仍待用户实机确认。
+- 关联：`docs/tasks/active/dark-theme-text-shadow-fallback.md`、C-45、B-053/C-42。
+
+## B-057/C-46：竖排 EPUB 无法在横向分页器中阅读（2026-08-22）
+
+- 状态：代码、自动化回归与 Root 独立 WSL Chromium 烟测完成，待用户/Windows WebView2 审核。
+- 现象：竖排 EPUB 保留 `vertical-*` 书写模式，现有横向多栏 paginator 无法形成可读的横排内容。
+- 根因：阅读器没有一个可持久化的用户覆盖设置；仅修改根容器也不足以覆盖书内嵌套竖排声明。
+- 约束：只处理可重排章节；固定版式不改；不改 `direction`、paginator 算法或 Rust；SVG 及其后代不匹配普通后代覆盖选择器，准确保留显式书写模式边界。
+- 选择的修复：新增 `ReaderSettings.forceHorizontal`（旧值缺省 false），详细设置加入“强制横排”开关。sanitize 开启时统一注入 `writing-mode: horizontal-tb !important`、`-webkit-writing-mode: horizontal-tb !important`、`text-orientation: mixed !important` 到 html/body/viewer 及非 SVG 树普通后代；ReaderView 对 fixedLayout 屏蔽。
+- 修改文件：`src/render/settings.ts`、`src/ui/storage.ts`、`src/App.tsx`、`src/ui/ReaderView.tsx`、`src/ui/MenuPanel.tsx`、`src/styles.css`、`src/render/sanitize.ts`、`src/render/sanitize.test.ts`、`src/ui/menuPanel.test.ts`、`src/ui/storage.test.ts`、`src/ui/readerViewSettings.test.ts`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts` 及相关存档测试、任务与契约/渲染台账文档。
+- 验证：定向 sanitizer/菜单/存储/存档 5 文件 73/73；fixedLayout/helper 定向 3 文件 58/58；Root 独立全量 Vitest 42 files/359 tests、`tsc --noEmit`、`pnpm build`（Vite 102 modules）通过。Root 使用临时 `/tmp/vertical-smoke.epub` 在 WSL Chromium 900×650 验证：开启前 html/body/viewer=`vertical-rl`、嵌套 probe=`vertical-lr`、SVG text=`vertical-rl`、页码 1/1；菜单开启并等待 ready 后 html/body/viewer/probe=`horizontal-tb`、`text-orientation=mixed`，SVG 显式 `vertical-rl` 保持，页码仍 1/1，localStorage `forceHorizontal=true`。5174 已停止，5173/5174 无监听；临时 EPUB/脚本不同步。
+- 风险：排除 SVG 后，纯粹通过 html/body 祖先继承而未在 SVG 内声明的书写模式无法凭 CSS 恢复；强制横排可能改变含 SVG 图形文字的整体语义。Windows 真实竖排书/WebView2 仍待用户确认。
+- 关联：`docs/tasks/active/force-horizontal-reading.md`、C-46、B-056/C-45。
+
+## B-058/C-47：系统字体选择与导入字体启动性能（2026-08-22）
+
+- 状态：前端代码、自动化和 WSL Chromium 验收完成，待 Windows 主机构建与实机枚举审核。
+- 现象：自定义字体列表直接嵌入菜单，字体较多时列表渲染和启动阶段逐个读取字体文件；用户无法选择已安装的 Windows 系统字体。
+- 根因：字体选择没有区分 system/imported 来源，启动链路把导入字体元数据和二进制资源一起加载，缺少独立搜索/虚拟列表界面。
+- 选择的修复：新增 `fontSource`/`customFontId` 模型和独立 FontSettingsPanel；Windows/Tauri 通过 `system_fonts_list` 获取 DirectWrite 的 family/localizedNames（无路径、无系统字体文件读取），首次打开面板才枚举并会话缓存。导入字体启动只列元数据，当前选中项才读取一个 Blob URL；懒加载控制器防止竞态，成功创建新 URL 后释放旧 URL，失败保留旧 URL。
+- 约束：系统字体不存在/枚举失败时保留持久化偏好并在面板标记不可用；非 Windows 系统字体列表为空；Android 仅预留接口。CSS family 转义反斜杠、双引号和 CR/LF/form-feed。面板使用 tabs、搜索和带 spacer 的固定行高虚拟窗口；z-index 面板 42、backdrop 41。
+- 修改文件：`src/ui/fontStore.ts`、`src/ui/fontRuntime.ts`、`src/ui/FontSettingsPanel.tsx`、`src/ui/MenuPanel.tsx`、`src/App.tsx`、`src/render/settings.ts`、`src/render/sanitize.ts`、`src/ui/storage.ts`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts`、`src/styles.css` 及对应字体/存档/sanitize 测试；详见 `docs/tasks/active/font-center-system-fonts.md`。
+- 验证：Root 独立前端全量 Vitest 44 files/365 tests、`tsc --noEmit`、Vite 104 modules。WSL Chromium 900×650 模拟 300 imported：启动 binary get=0（StrictMode metadata getAll=2）、末尾 DOM rows=9 且末项 Font299、选择后 binary get=1、panel z42/backdrop z41/hitInside=true、设置 source/imported 与 id 012b。最终动态视口补测（900×900）得到实际 viewportHeight=292、末尾仅挂载 13 行，搜索 Font001 后 DOM scrollTop=0；补丁后定向 4 文件 63/63、tsc 与 Vite 再次通过。5173/5174 无监听，临时脚本数据未入项目。
+- 依赖/许可：Windows `windows` 0.61.3 目标依赖记录为 MIT OR Apache-2.0，无 GPL；DirectWrite 是 Windows 系统 API。Android 仅接口预留。
+- 风险：Linux 无 Windows target；已核对 windows-rs 生成签名并修复 `GetSystemFontCollection` 输出参数，但仍必须在 Windows 主机执行 `cargo check`/`tauri build` 和实机系统字体枚举；大量系统字体、本地化 CSS family 与 WebView2 观感待确认。
+- 关联：`docs/tasks/active/font-center-system-fonts.md`、C-47、B-057/C-46。
+
+## B-059/C-48：当前书正文基础搜索（2026-08-22）
+
+- 状态：代码、自动化和 WSL Chromium 实机回归完成，待用户确认交互与 Windows WebView2 实机表现。
+- 目标：为当前打开的可重排 EPUB 提供第一版正文搜索，建立后续跨书检索/RAG 可复用的文本范围与锚点边界；本项不扩大到跨书、持久化索引或模型功能。
+- 选择的实现：新增按需、按 spine 顺序处理的当前书 `SearchSession`，在本次书籍会话缓存章节语料；每章处理后让出主线程并上报进度。标准化使用 NFKC、小写、软连字符移除和布局空白处理，块级元素形成上下文边界，排除隐藏结构、脚本样式和脚注。查询支持标准化短语及同段落/上下文内多关键词 AND，短语优先去重。
+- 交互边界：查询使用 180ms debounce，支持 AbortController 取消与 generation 防旧任务回写；结果最多保留 101 条，UI 最多展示 100 条。结果展示章节名、上下文和原文高亮；点击才使用现有 code-point 文本锚点跳转并记录最多 3 步历史，预览不写阅读进度。跨章服从 display gate，同章优先 direct 定位；fixed-layout 不显示入口。
+- 约束：不生成磁盘全文索引、不进入存档、不跨书搜索；暂不实现 OR/前缀/邻近、编辑距离、简繁/假名归一化、语义搜索、标签或 RAG。
+- 性能实现：标准化正文使用紧凑字符串；标准化 UTF-16 单元到 code-point、原文范围和锚点偏移使用 `Uint32Array`，避免逐字符 JavaScript 对象。每条结果只从命中原文位置扫描最多 32 个 code point 生成锚点片段，不重复拆分整章。
+- 修改文件：`src/core/search.ts`、`src/core/search.test.ts`、`src/ui/SearchPanel.tsx`、`src/ui/SearchPanel.test.ts`、`src/App.tsx`、`src/ui/Toolbar.tsx`、`src/styles.css`，以及 `docs/tasks/active/reader-text-search.md`、契约/交接文档。
+- 验证：全量 Vitest 46 files/377 tests（搜索核心 8/8）、`tsc --noEmit`、Vite build（106 modules）通过。WSL Chromium 900×650 使用《ePub指南——从入门到放弃 20230418.epub》搜索“opacity 属性”得到 4 条结果并正确高亮 `opacity属性`；点击后 back 可用，back 后 forward 可用，forward 返回正文仍含 `opacity`。临时脚本/书籍未同步，5173 已释放。
+- 关联：`docs/tasks/active/reader-text-search.md`、`docs/SEARCH_TO_RAG_ROADMAP.md`、C-48。
+
+## B-060/C-49：正文选区笔记首版（2026-08-23）
+
+- 状态：代码、自动化和 WSL Chromium 实机回归完成，待用户/Windows WebView2 审核。
+- 实现：正文有效选区的原生右键菜单替换为“复制/添加笔记”；创建与编辑弹窗保存想法，本书笔记页按时间倒序显示并支持编辑、删除、文本锚点跳转。跳转接入既有三步撤销/前进。
+- 排版边界：当前章节通过 CSS Custom Highlight 绘制主题适配下划线，不插入 span、不修改 EPUB DOM、不重排；无 API 时保留数据但不画线。
+- 存储：ShelfEntry、IndexedDB、Tauri Rust 链接书库及 portable archive 均保存/校验/合并 notes；不保存设备路径。
+- 验证：Vitest 50 files/393 tests、tsc、Vite 110 modules、Rust fmt/tests 18/18。WSL Chromium 900×650 真实链路中 Highlight size=1、原生选区清除，保存前后 scrollWidth=900，列表和跳转/后退可用；5173 已释放。
+- 关联：`docs/tasks/active/reader-notes.md`、C-49。
+
+## B-063：书架二级菜单滚动区未占满高度（2026-08-23）
+
+- 现象：书架二级菜单内容较短、窗口纵向空间充足时，打开主题下拉偶尔出现滚动条；滚动条轨道只到“数据管理”下方，没有贯穿菜单剩余高度。
+- 根因：抽屉本身是纵向 flex，但 `.shelf-drawer-scroll` 只有 `min-height:0; overflow:auto`，没有参与剩余空间分配，因此按约 413px 的内容高度收缩，而不是占满固定标题栏以下空间。滚动条属于这个短内容区，轨道自然提前结束；下拉绝对定位溢出又可能触发它。
+- 修复：为滚动区增加 `flex:1 1 auto`，保留 `min-height:0` 和 `overflow:auto`。内容短时滚动区扩展到抽屉底部且不滚动；内容长时仍由同一完整高度区域滚动。不改下拉定位、筛选逻辑或抽屉动画。
+- 验证：新增 CSS 契约测试；前端全量 52 files/406 tests。Chromium 800px 高窗口中，主题下拉前后 `clientHeight=scrollHeight=730`；480px 窗口中可用滚动区为 410px，真实轻微溢出时轨道仍覆盖完整区域。5173 已释放。
+- 关联：`docs/tasks/active/shelf-filter-drawer.md`、B-062/C-51。
+
+## B-064：书架抽屉搜索图标与提示文字重叠（2026-08-23）
+
+- 现象：“搜索书名或作者”的左侧图标压住提示文字，图标尺寸偏小且没有在输入框中正确垂直居中。
+- 根因：输入同时使用 `.shelf-drawer-search` 与 `.shelf-search`；后定义的单类通用规则以同等 specificity 覆盖抽屉专用的左右 padding，使文字从 12px 开始而进入图标区域。
+- 修复：用 `.shelf-drawer-search-wrap .shelf-drawer-search` 明确抽屉作用域；输入框高度 42px、左 padding 42px、字体 14px；图标改为 20×20 inline-flex、21px 字号并以 `top:50%/translateY(-50%)` 居中。
+- 验证：CSS 契约 2/2、TypeScript、全量 Vitest 52 files/407 tests。Chromium 760×620 实测输入高 42px、图标 20×20、垂直中心偏差 0，图标右缘 49px、文字起点 58px，间隔 9px。5173 已由用户关闭并确认释放。
+- 关联：`docs/tasks/active/shelf-filter-drawer.md`、B-063。
+
+## B-065：搜索字符盒居中但字形视觉偏移（2026-08-23）
+
+- 现象：B-064 后图标元素边界与输入框几何中心一致，但 Windows 截图中的放大镜图案仍明显没有视觉居中。
+- 根因：原图标是文本字符 `⌕`。不同系统字体对该字符使用不同基线、advance box 和内部留白；flex 居中只能居中字形盒，无法保证盒内实际墨迹居中。
+- 修复：用内联 SVG circle/path 替代文本字符，固定 24×24 viewBox、18×18 显示尺寸和 1.8px 圆角描边；SVG 为 block，不参与文字基线布局。
+- 验证：抽屉 CSS 契约 2/2、TypeScript 通过。Chromium deviceScaleFactor=2 截图视觉居中，输入框与 SVG 的中心 y 均为 105、偏差 0。临时脚本/截图删除，5173 已释放。
+- 关联：`docs/tasks/active/shelf-filter-drawer.md`、B-064。
+
+## B-066：筛选展开时滚动条导致选项横向缩窄（2026-08-23）
+
+- 现象：点击“全部书籍”后内容超过抽屉高度，纵向滚动条出现并临时占用内容宽度，使选项框相较展开前变窄、产生横向跳动。
+- 根因：滚动区只在实际 overflow 时分配滚动条槽；展开前后的可用 inline size 不一致。
+- 修复：为 `.shelf-drawer-scroll` 增加标准 `scrollbar-gutter:stable`，从抽屉打开时就预留单侧滚动槽。初始内容略窄，但展开/收起宽度稳定。
+- 验证：CSS 契约 2/2、TypeScript。Chromium 760×620 中展开前 `clientHeight/scrollHeight=550/550`，展开后为 `550/608`；两个状态下 scroll clientWidth 均 379px、全部书籍卡片均 347px。临时脚本删除，5173 已释放。
+- 关联：`docs/tasks/active/shelf-filter-drawer.md`、B-063。
+
+## B-067：阅读器菜单展开后滚动条导致选项横向缩窄（2026-08-23）
+
+- 状态：已修复，归入 0.1.9 之后的下一版本，不回写 0.1.9 发布范围。
+- 现象：阅读器菜单初始内容未溢出时没有纵向滚动条；展开“详细设置”后出现滚动条并占用内容宽度，所有设置卡片突然变窄。
+- 根因：`.menu-panel` 直接承担纵向滚动，只在实际 overflow 时由 Chromium 分配滚动条槽，展开前后的可用 inline size 不一致。
+- 修复：为 `.menu-panel` 增加 `scrollbar-gutter:stable`，菜单打开时便预留单侧滚动槽；不改变菜单固定宽度、缩放、详细设置结构或滚动行为。
+- 验证：菜单 CSS 契约 8/8、`tsc --noEmit` 通过。应用内浏览器连接被 WSL 工作目录元数据拒绝，未把该环境失败记为产品失败；Windows WebView2 展开前后视觉留待下一版本实机验收。
+- 关联：B-066（书架抽屉同类问题）。

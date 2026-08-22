@@ -1,6 +1,6 @@
 [package]
 name = "epub-reader"
-version = "0.1.8"
+version = "0.1.9"
 description = "EPUB 阅读器（EPUB 2/3）"
 license = "Apache-2.0"
 authors = ["HeRenFor"]
@@ -26,6 +26,11 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2.4.3"
+
+[target.'cfg(windows)'.dependencies]
+# Official windows-rs bindings (MIT OR Apache-2.0), used only to enumerate
+# DirectWrite font-family metadata. Font files are never opened or copied.
+windows = { version = "0.61.3", features = ["Win32_Graphics_DirectWrite"] }
 
 [profile.release]
 codegen-units = 1

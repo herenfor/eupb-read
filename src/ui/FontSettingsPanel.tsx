@@ -1,0 +1,125 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { SystemFont, UserFont } from "./fontStore";
+
+export interface FontSettingsPanelProps {
+  source?: "system" | "imported";
+  customFontId?: string;
+  customFontName?: string;
+  systemFonts: SystemFont[];
+  userFonts: UserFont[];
+  busy: boolean;
+  onSelectSystem(family: string): void;
+  onSelectBook(): void;
+  onSelectImported(font: UserFont): void;
+  onDelete(id: string): void;
+  onImport(file: File): void;
+  onClose(): void;
+  systemFontsStatus?: "idle" | "loading" | "ready" | "error";
+  systemFontsError?: string | null;
+  onLoadSystemFonts?(): void;
+}
+
+export const FONT_ROW_HEIGHT = 36;
+export interface FontVirtualWindow<T> {
+  items: T[];
+  start: number;
+  end: number;
+  top: number;
+  bottom: number;
+  totalHeight: number;
+}
+
+/** Fixed-size window with spacers keeps rendering bounded and scrollable. */
+export function computeFontVirtualWindow<T>(items: readonly T[], scrollTop: number, viewportHeight: number, rowHeight = FONT_ROW_HEIGHT, overscan = 4): FontVirtualWindow<T> {
+  const count = items.length;
+  const safeRow = Math.max(1, rowHeight);
+  const safeTop = Math.max(0, Number.isFinite(scrollTop) ? scrollTop : 0);
+  const safeViewport = Math.max(0, Number.isFinite(viewportHeight) ? viewportHeight : 0);
+  const first = Math.min(count, Math.max(0, Math.floor(safeTop / safeRow) - Math.max(0, Math.floor(overscan))));
+  const last = Math.min(count, Math.max(first, Math.ceil((safeTop + safeViewport) / safeRow) + Math.max(0, Math.floor(overscan))));
+  return { items: items.slice(first, last), start: first, end: last, top: first * safeRow, bottom: Math.max(0, (count - last) * safeRow), totalHeight: count * safeRow };
+}
+
+/** Compatibility helper for callers that already have a row offset. */
+export function visibleFontWindow<T>(items: readonly T[], offset: number, size: number): T[] {
+  const start = Math.max(0, Math.min(items.length, Math.floor(offset)));
+  return items.slice(start, start + Math.max(0, Math.floor(size)));
+}
+
+export function FontSettingsPanel(props: FontSettingsPanelProps) {
+  const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<"system" | "imported">("system");
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(520);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (props.systemFontsStatus === "idle") props.onLoadSystemFonts?.();
+  }, [props.systemFontsStatus, props.onLoadSystemFonts]);
+  const normalized = query.trim().toLocaleLowerCase();
+  const systems = useMemo(() => props.systemFonts.filter((font) => {
+    if (!normalized) return true;
+    return [font.family, ...font.localizedNames.map((item) => item.name)]
+      .some((name) => name.toLocaleLowerCase().includes(normalized));
+  }), [props.systemFonts, normalized]);
+  const imported = useMemo(() => props.userFonts.filter((font) => {
+    if (!normalized) return true;
+    return `${font.family} ${font.fileName}`.toLocaleLowerCase().includes(normalized);
+  }), [props.userFonts, normalized]);
+  const virtual = tab === "system"
+    ? computeFontVirtualWindow(systems, scrollTop, viewportHeight)
+    : computeFontVirtualWindow(imported, scrollTop, viewportHeight);
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const sync = () => setViewportHeight((current) => element.clientHeight === current ? current : element.clientHeight);
+    sync();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    observer?.observe(element);
+    window.addEventListener("resize", sync);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", sync);
+    };
+  }, []);
+  const resetScroll = () => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setScrollTop(0);
+  };
+  const selectTab = (next: "system" | "imported") => { setTab(next); resetScroll(); };
+  return <div className="font-settings-panel" role="dialog" aria-label="字体设置">
+    <div className="menu-head"><span>字体设置</span><button className="tb-btn" onClick={props.onClose}>✕</button></div>
+    <div className="font-settings-current">
+      当前字体：{props.source === "system" || props.source === "imported" ? props.customFontName : "跟随书籍"}
+    </div>
+    <button className={`font-settings-row${!props.source ? " active" : ""}`} onClick={props.onSelectBook}>跟随书籍{!props.source ? " ✓" : ""}</button>
+    <input className="font-search" placeholder="搜索字体名称" value={query}
+      onChange={(event) => { setQuery(event.target.value); resetScroll(); }} />
+    <div className="font-settings-tabs">
+      <button className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}>系统字体（{systems.length}）</button>
+      <button className={tab === "imported" ? "active" : ""} onClick={() => selectTab("imported")}>已导入（{imported.length}）</button>
+    </div>
+    <div ref={scrollRef} className="font-settings-scroll" onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
+      {tab === "system" && props.systemFontsStatus === "loading" && <div className="font-empty">正在读取系统字体…</div>}
+      {tab === "system" && props.systemFontsStatus === "error" && <div className="font-empty">系统字体读取失败：{props.systemFontsError ?? "未知错误"}<br /><button className="menu-item" onClick={props.onLoadSystemFonts}>重试</button></div>}
+      {tab === "system" && props.systemFontsStatus !== "loading" && props.systemFontsStatus !== "error" && props.source === "system" && props.customFontName && props.systemFontsStatus === "ready" && !systems.some((font) => font.family === props.customFontName) && <div className="font-empty">当前设备不可用：{props.customFontName}</div>}
+      {tab === "system" && systems.length === 0 && props.systemFontsStatus === "ready" && <div className="font-empty">未找到系统字体</div>}
+      {tab === "imported" && imported.length === 0 && <div className="font-empty">尚未导入字体</div>}
+      <div style={{ height: virtual.totalHeight, position: "relative" }}>
+        <div style={{ height: virtual.top }} />
+      {virtual.items.map((font) => tab === "system" ? <button key={(font as unknown as SystemFont).family}
+        className={`font-settings-row${props.source === "system" && props.customFontName === font.family ? " active" : ""}`}
+        onClick={() => props.onSelectSystem((font as unknown as SystemFont).family)}>{(font as unknown as SystemFont).family}{props.source === "system" && props.customFontName === (font as unknown as SystemFont).family ? " ✓" : ""}</button> : <div key={(font as UserFont).id} className="font-settings-row-wrap">
+        <button className={`font-settings-row${props.source === "imported" && props.customFontId === (font as UserFont).id ? " active" : ""}`}
+          onClick={() => props.onSelectImported(font as UserFont)} title={(font as UserFont).fileName}>{(font as UserFont).family}{props.customFontId === (font as UserFont).id ? " ✓" : ""}</button>
+        <button className="font-delete" onClick={() => props.onDelete((font as UserFont).id)} disabled={props.busy} title="删除字体">✕</button>
+      </div>)}
+        <div style={{ height: virtual.bottom }} />
+      </div>
+    </div>
+    <button className="menu-item" onClick={() => inputRef.current?.click()} disabled={props.busy}>＋ 导入字体</button>
+    <input ref={inputRef} type="file" accept=".ttf,.otf,.woff,.woff2" hidden onChange={(event) => {
+      const file = event.target.files?.[0]; if (file) props.onImport(file); event.target.value = "";
+    }} />
+  </div>;
+}

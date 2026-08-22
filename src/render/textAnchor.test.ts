@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_ANCHOR_SNIPPET_CODE_POINTS,
   buildVisibleTextIndex,
+  captureTextSelection,
+  resolveTextRangeOffsets,
   resolveTextAnchorOffset,
   sanitizePersistedTextAnchor,
 } from "./textAnchor";
@@ -35,12 +37,61 @@ describe("visible text anchor index", () => {
     expect(document.querySelector("p")?.getAttribute("style")).toBe("color:red");
   });
 
+  it("counts visible media units once for media-only chapters", () => {
+    const { document, viewer } = chapter('<svg><image href="x"/></svg><img src="y"><img hidden src="z">');
+    const index = buildVisibleTextIndex(document, viewer);
+    expect(index.totalChars).toBe(0);
+    expect(index.mediaUnits).toBe(2);
+  });
+
   it("validates original offsets, searches snippets linearly after drift, and chooses the nearest duplicate", () => {
     const { document, viewer } = chapter("<p>甲共享乙共享丙</p>");
     const index = buildVisibleTextIndex(document, viewer);
     expect(resolveTextAnchorOffset(index, { textOffset: 4, textSnippet: "共享" })).toBe(4);
     expect(resolveTextAnchorOffset(index, { textOffset: 5, textSnippet: "共享" })).toBe(4);
     expect(resolveTextAnchorOffset(index, { textOffset: 5, textSnippet: "不存在" })).toBeNull();
+  });
+
+  it("stores an exclusive range with a backward end snippet and recovers after bounded drift", () => {
+    const { document, viewer } = chapter("<p><span>甲😀乙</span><span>丙丁</span></p>");
+    const index = buildVisibleTextIndex(document, viewer);
+    expect(index.snippetBefore(index.totalChars)).toBe("甲😀乙丙丁");
+    const anchor = {
+      startTextOffset: 1,
+      endTextOffset: 5,
+      startTextSnippet: "😀乙丙丁",
+      endTextSnippet: "😀乙丙丁",
+    };
+    expect(resolveTextRangeOffsets(index, anchor, "😀乙丙丁")).toEqual({ start: 1, end: 5 });
+    expect(
+      resolveTextRangeOffsets(index, { ...anchor, startTextOffset: 0, endTextOffset: 4 }, "😀乙丙丁")
+    ).toEqual({ start: 1, end: 5 });
+  });
+
+  it("keeps whitespace and surrogate pairs out of persisted offsets", () => {
+    const { document, viewer } = chapter("<p>甲 \n <span>😀</span> 乙</p>");
+    const index = buildVisibleTextIndex(document, viewer);
+    expect(index.text).toBe("甲😀乙");
+    expect(index.totalChars).toBe(3);
+    expect(index.snippetBefore(3)).toBe("甲😀乙");
+  });
+
+  it("rejects both raw and normalized selections beyond the storage limit", () => {
+    const raw = `${" ".repeat(4097)}甲`;
+    const { document, viewer } = chapter(`<p>${raw}</p>`);
+    const text = document.querySelector("p")!.firstChild!;
+    const index = buildVisibleTextIndex(document, viewer);
+    const range = {
+      collapsed: false,
+      startContainer: text,
+      endContainer: text,
+      startOffset: 0,
+      endOffset: raw.length,
+      toString: () => raw,
+      getClientRects: () => [{ left: 0, top: 0, right: 10, bottom: 10 }],
+    } as unknown as Range;
+    const selection = { rangeCount: 1, isCollapsed: false, getRangeAt: () => range } as unknown as Selection;
+    expect(captureTextSelection(document, viewer, index, selection)).toBeNull();
   });
 
   it("rejects malformed persisted anchors and code-point snippets over the bounded limit", () => {

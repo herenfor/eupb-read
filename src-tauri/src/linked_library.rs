@@ -29,6 +29,8 @@ const MAX_COVER_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_ACCESS_WRITE_INTERVAL_MS: u64 = 60 * 60 * 1000;
 const MAX_ANCHOR_SNIPPET_CODE_POINTS: usize = 32;
 const MAX_ANCHOR_TEXT_OFFSET: u64 = 9_007_199_254_740_991;
+const MAX_NOTE_SELECTED_CODE_POINTS: usize = 4_096;
+const MAX_NOTE_CONTENT_CODE_POINTS: usize = 10_000;
 static TEMP_FILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
@@ -40,6 +42,12 @@ pub struct LinkedLibraryRecord {
     pub content_hash: String,
     pub title: String,
     pub creator: String,
+    /// The OPF `dc:language` value, when supplied by the publisher.
+    ///
+    /// This is optional in EPUB metadata and therefore defaults to the empty
+    /// string when loading records written by older versions.
+    #[serde(default)]
+    pub language: String,
     pub file_name: String,
     pub added_at_ms: u64,
     pub last_read_at_ms: u64,
@@ -54,6 +62,8 @@ pub struct LinkedLibraryRecord {
     pub anchor_text_snippet: Option<String>,
     #[serde(default)]
     pub bookmarks: Vec<LinkedLibraryBookmark>,
+    #[serde(default)]
+    pub notes: Vec<LinkedLibraryNote>,
     pub is_new: bool,
 }
 
@@ -75,6 +85,22 @@ pub struct LinkedLibraryBookmark {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct LinkedLibraryNote {
+    pub id: String,
+    pub spine_index: usize,
+    pub chapter_path: String,
+    pub start_text_offset: u64,
+    pub end_text_offset: u64,
+    pub start_text_snippet: String,
+    pub end_text_snippet: String,
+    pub selected_text: String,
+    pub content: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 struct DeviceBinding {
     content_hash: String,
     canonical_source_path: String,
@@ -92,6 +118,8 @@ pub struct LinkedLibraryRecordView {
     content_hash: String,
     title: String,
     creator: String,
+    #[serde(default)]
+    language: String,
     file_name: String,
     added_at_ms: u64,
     last_read_at_ms: u64,
@@ -103,6 +131,7 @@ pub struct LinkedLibraryRecordView {
     anchor_text_offset: Option<u64>,
     anchor_text_snippet: Option<String>,
     bookmarks: Vec<LinkedLibraryBookmark>,
+    notes: Vec<LinkedLibraryNote>,
     is_new: bool,
     available: bool,
     file_size: u64,
@@ -157,6 +186,7 @@ struct BindingVerification {
 struct ImportedMetadata {
     title: String,
     creator: String,
+    language: String,
     spine: Vec<String>,
     cover_zip_path: Option<String>,
     cover_mime: String,
@@ -176,6 +206,7 @@ struct OpfManifestItem {
 struct ParsedOpfMetadata {
     title: String,
     creator: String,
+    language: String,
     spine: Vec<String>,
     manifest: Vec<OpfManifestItem>,
     epub2_cover_id: Option<String>,
@@ -218,6 +249,36 @@ fn valid_optional_anchor_text(offset: Option<u64>, snippet: &Option<String>) -> 
                 && !value.chars().any(char::is_whitespace)
         }
     }
+}
+
+fn valid_note_snippet(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_ANCHOR_SNIPPET_CODE_POINTS
+        && !value.chars().any(char::is_whitespace)
+}
+
+fn normalized_code_point_count(value: &str) -> usize {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+}
+
+fn valid_note(note: &LinkedLibraryNote) -> bool {
+    !note.id.trim().is_empty()
+        && !note.chapter_path.trim().is_empty()
+        && note.start_text_offset <= MAX_ANCHOR_TEXT_OFFSET
+        && note.end_text_offset <= MAX_ANCHOR_TEXT_OFFSET
+        && note.end_text_offset > note.start_text_offset
+        && valid_note_snippet(&note.start_text_snippet)
+        && valid_note_snippet(&note.end_text_snippet)
+        && !note.selected_text.is_empty()
+        && note.selected_text.chars().count() <= MAX_NOTE_SELECTED_CODE_POINTS
+        && normalized_code_point_count(&note.selected_text)
+            == (note.end_text_offset - note.start_text_offset) as usize
+        && !note.content.trim().is_empty()
+        && note.content.chars().count() <= MAX_NOTE_CONTENT_CODE_POINTS
+        && note.updated_at_ms >= note.created_at_ms
 }
 
 fn portable_file_name(name: &str) -> bool {
@@ -525,6 +586,7 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ParsedOpfMetadata, String> {
         .unwrap_or("");
     let mut title = String::new();
     let mut creator = String::new();
+    let mut language = String::new();
     let mut capture: Option<&str> = None;
     let mut manifest = Vec::new();
     let mut manifest_indexes = HashMap::new();
@@ -538,6 +600,7 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ParsedOpfMetadata, String> {
                 capture = match name {
                     "title" if title.is_empty() => Some("title"),
                     "creator" if creator.is_empty() => Some("creator"),
+                    "language" if language.is_empty() => Some("language"),
                     _ => None,
                 };
                 if name == "item" {
@@ -608,8 +671,10 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ParsedOpfMetadata, String> {
                         .map_err(|error| format!("无法解码 OPF 元数据：{error}"))?;
                     if kind == "title" {
                         title = value.trim().to_string();
-                    } else {
+                    } else if kind == "creator" {
                         creator = value.trim().to_string();
+                    } else {
+                        language = value.trim().to_string();
                     }
                 }
             }
@@ -632,6 +697,7 @@ fn parse_opf(xml: &[u8], opf_path: &str) -> Result<ParsedOpfMetadata, String> {
     Ok(ParsedOpfMetadata {
         title,
         creator,
+        language,
         spine,
         manifest,
         epub2_cover_id,
@@ -782,6 +848,7 @@ fn inspect_epub(path: &Path) -> Result<ImportedMetadata, String> {
     Ok(ImportedMetadata {
         title: parsed.title,
         creator: parsed.creator,
+        language: parsed.language,
         spine: parsed.spine,
         cover_zip_path,
         cover_mime,
@@ -808,6 +875,7 @@ fn binding_view(
         content_hash: record.content_hash,
         title: record.title,
         creator: record.creator,
+        language: record.language,
         file_name: record.file_name,
         added_at_ms: record.added_at_ms,
         last_read_at_ms: record.last_read_at_ms,
@@ -819,6 +887,7 @@ fn binding_view(
         anchor_text_offset: record.anchor_text_offset,
         anchor_text_snippet: record.anchor_text_snippet,
         bookmarks: record.bookmarks,
+        notes: record.notes,
         is_new: record.is_new,
         available,
         file_size,
@@ -1118,13 +1187,17 @@ pub fn linked_library_import_paths(
                             metadata.title.clone()
                         },
                         creator: metadata.creator.clone(),
+                        language: metadata.language.clone(),
                         file_name: path
                             .file_name()
                             .and_then(|name| name.to_str())
                             .unwrap_or("book.epub")
                             .to_string(),
                         added_at_ms: now_ms(),
-                        last_read_at_ms: now_ms(),
+                        // Import time is not a reading event.  The UI falls
+                        // back to added_at_ms for recent sorting until the
+                        // first stable position is saved.
+                        last_read_at_ms: 0,
                         spine_index: 0,
                         page: 0,
                         progress_pct: 0,
@@ -1133,6 +1206,7 @@ pub fn linked_library_import_paths(
                         anchor_text_offset: None,
                         anchor_text_snippet: None,
                         bookmarks: Vec::new(),
+                        notes: Vec::new(),
                         is_new: true,
                     };
                     records.push(record);
@@ -1309,6 +1383,28 @@ pub fn linked_library_relink(
         .ok_or_else(|| "重新定位后无法读取书籍记录".into())
 }
 
+fn apply_progress_update(
+    record: &mut LinkedLibraryRecord,
+    last_read_at_ms: u64,
+    spine_index: usize,
+    page: usize,
+    progress_pct: u32,
+    anchor_index: Option<usize>,
+    anchor_ratio: Option<f64>,
+    anchor_text_offset: Option<u64>,
+    anchor_text_snippet: Option<String>,
+) {
+    record.last_read_at_ms = last_read_at_ms;
+    record.spine_index = spine_index;
+    record.page = page;
+    record.progress_pct = progress_pct.min(100);
+    record.anchor_index = anchor_index;
+    record.anchor_ratio = anchor_ratio;
+    record.anchor_text_offset = anchor_text_offset;
+    record.anchor_text_snippet = anchor_text_snippet;
+    record.is_new = false;
+}
+
 #[tauri::command]
 pub fn linked_library_update_progress(
     app: AppHandle,
@@ -1341,14 +1437,17 @@ pub fn linked_library_update_progress(
         .iter_mut()
         .find(|record| record.content_hash == content_hash)
         .ok_or_else(|| "书库中没有这本书".to_string())?;
-    record.last_read_at_ms = last_read_at_ms;
-    record.spine_index = spine_index;
-    record.page = page;
-    record.progress_pct = progress_pct.min(100);
-    record.anchor_index = anchor_index;
-    record.anchor_ratio = anchor_ratio;
-    record.anchor_text_offset = anchor_text_offset;
-    record.anchor_text_snippet = anchor_text_snippet;
+    apply_progress_update(
+        record,
+        last_read_at_ms,
+        spine_index,
+        page,
+        progress_pct,
+        anchor_index,
+        anchor_ratio,
+        anchor_text_offset,
+        anchor_text_snippet,
+    );
     save_records(&app, &records)?;
     let bindings = load_bindings(&app)?;
     let thumbnails = load_thumbnail_index(&app)?;
@@ -1418,6 +1517,40 @@ pub fn linked_library_update_bookmarks(
         .ok_or_else(|| "更新书签后无法读取书籍记录".into())
 }
 
+#[tauri::command]
+pub fn linked_library_update_notes(
+    app: AppHandle,
+    state: State<'_, LinkedLibraryWriteState>,
+    content_hash: String,
+    notes: Vec<LinkedLibraryNote>,
+) -> Result<LinkedLibraryRecordView, String> {
+    if !valid_content_hash(&content_hash) {
+        return Err("无效的书籍内容指纹".into());
+    }
+    let mut ids = HashSet::with_capacity(notes.len());
+    if notes
+        .iter()
+        .any(|note| !valid_note(note) || !ids.insert(note.id.clone()))
+    {
+        return Err("笔记数据无效或包含重复 ID".into());
+    }
+    let _guard = state
+        .0
+        .lock()
+        .map_err(|_| "链接书库写入锁已损坏".to_string())?;
+    let mut records = load_records(&app)?;
+    let record = records
+        .iter_mut()
+        .find(|record| record.content_hash == content_hash)
+        .ok_or_else(|| "书库中没有这本书".to_string())?;
+    record.notes = notes;
+    save_records(&app, &records)?;
+    let bindings = load_bindings(&app)?;
+    let thumbnails = load_thumbnail_index(&app)?;
+    view_by_hash(&records, &bindings, &thumbnails, &content_hash)
+        .ok_or_else(|| "更新笔记后无法读取书籍记录".into())
+}
+
 fn validate_portable_records(records: &[LinkedLibraryRecord]) -> Result<(), String> {
     let mut seen = HashSet::with_capacity(records.len());
     for record in records {
@@ -1447,6 +1580,15 @@ fn validate_portable_records(records: &[LinkedLibraryRecord]) -> Result<(), Stri
                 )
             {
                 return Err("存档含有无效书签锚点比例".into());
+            }
+        }
+        let mut note_ids = HashSet::with_capacity(record.notes.len());
+        for note in &record.notes {
+            if !valid_note(note) {
+                return Err("存档含有无效笔记".into());
+            }
+            if !note_ids.insert(note.id.clone()) {
+                return Err("存档含有重复笔记 ID".into());
             }
         }
     }
@@ -1699,10 +1841,11 @@ mod tests {
 
     #[test]
     fn opf_parser_finds_metadata_spine_and_epub3_cover() {
-        let opf = br#"<package><metadata><dc:title xmlns:dc='x'>Title</dc:title><dc:creator xmlns:dc='x'>Author</dc:creator></metadata><manifest><item id='c' href='cover.jpg' media-type='image/jpeg' properties='cover-image'/><item id='a' href='text/a.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='a'/></spine></package>"#;
+        let opf = br#"<package><metadata><dc:title xmlns:dc='x'>Title</dc:title><dc:creator xmlns:dc='x'>Author</dc:creator><dc:language xmlns:dc='x'>zh-CN</dc:language></metadata><manifest><item id='c' href='cover.jpg' media-type='image/jpeg' properties='cover-image'/><item id='a' href='text/a.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='a'/></spine></package>"#;
         let parsed = parse_opf(opf, "OPS/book.opf").unwrap();
         assert_eq!(parsed.title, "Title");
         assert_eq!(parsed.creator, "Author");
+        assert_eq!(parsed.language, "zh-CN");
         assert_eq!(parsed.spine, vec!["OPS/text/a.xhtml"]);
         let (cover_path, cover_mime) = select_cover(&parsed, |_| true);
         assert_eq!(cover_path.as_deref(), Some("OPS/cover.jpg"));
@@ -1735,6 +1878,7 @@ mod tests {
             content_hash: "a".repeat(64),
             title: "T".into(),
             creator: "C".into(),
+            language: "zh-CN".into(),
             file_name: "book.epub".into(),
             added_at_ms: 1,
             last_read_at_ms: 1,
@@ -1746,6 +1890,7 @@ mod tests {
             anchor_text_offset: None,
             anchor_text_snippet: None,
             bookmarks: vec![],
+            notes: vec![],
             is_new: true,
         };
         let json = serde_json::to_string(&record).unwrap();
@@ -1754,11 +1899,109 @@ mod tests {
     }
 
     #[test]
+    fn old_records_without_language_default_to_empty_string() {
+        let json = format!(
+            r#"{{"contentHash":"{}","title":"T","creator":"C","fileName":"book.epub","addedAtMs":1,"lastReadAtMs":1,"spineIndex":0,"page":0,"progressPct":0,"anchorIndex":null,"anchorRatio":null,"isNew":true}}"#,
+            "a".repeat(64)
+        );
+        let record: LinkedLibraryRecord = serde_json::from_str(&json).unwrap();
+        assert!(record.language.is_empty());
+    }
+
+    #[test]
+    fn progress_update_clears_new_mark_and_preserves_position() {
+        let mut record = LinkedLibraryRecord {
+            content_hash: "a".repeat(64),
+            title: "T".into(),
+            creator: "C".into(),
+            language: String::new(),
+            file_name: "book.epub".into(),
+            added_at_ms: 10,
+            last_read_at_ms: 0,
+            spine_index: 0,
+            page: 0,
+            progress_pct: 0,
+            anchor_index: None,
+            anchor_ratio: None,
+            anchor_text_offset: None,
+            anchor_text_snippet: None,
+            bookmarks: vec![],
+            notes: vec![],
+            is_new: true,
+        };
+        apply_progress_update(
+            &mut record,
+            20,
+            2,
+            3,
+            101,
+            Some(4),
+            Some(0.5),
+            Some(7),
+            Some("正文".into()),
+        );
+        assert_eq!(record.last_read_at_ms, 20);
+        assert_eq!(record.spine_index, 2);
+        assert_eq!(record.page, 3);
+        assert_eq!(record.progress_pct, 100);
+        assert_eq!(record.anchor_index, Some(4));
+        assert!(!record.is_new);
+    }
+
+    #[test]
+    fn notes_validate_unicode_range_and_limits() {
+        let valid = LinkedLibraryNote {
+            id: "note-1".into(),
+            spine_index: 2,
+            chapter_path: "Text/chapter.xhtml".into(),
+            start_text_offset: 10,
+            end_text_offset: 14,
+            start_text_snippet: "开始文字".into(),
+            end_text_snippet: "结束文字".into(),
+            selected_text: "开始 文字".into(),
+            content: "值得回看".into(),
+            created_at_ms: 100,
+            updated_at_ms: 100,
+        };
+        assert!(valid_note(&valid));
+        let mut invalid = valid.clone();
+        invalid.end_text_offset = 13;
+        assert!(!valid_note(&invalid));
+        invalid = valid.clone();
+        invalid.end_text_snippet = "有 空格".into();
+        assert!(!valid_note(&invalid));
+        invalid = valid;
+        invalid.content = "x".repeat(MAX_NOTE_CONTENT_CODE_POINTS + 1);
+        assert!(!valid_note(&invalid));
+        invalid = LinkedLibraryNote {
+            id: " \t".into(),
+            spine_index: 2,
+            chapter_path: "Text/chapter.xhtml".into(),
+            start_text_offset: 10,
+            end_text_offset: 14,
+            start_text_snippet: "开始文字".into(),
+            end_text_snippet: "结束文字".into(),
+            selected_text: "开始 文字".into(),
+            content: "值得回看".into(),
+            created_at_ms: 100,
+            updated_at_ms: 100,
+        };
+        assert!(!valid_note(&invalid));
+        invalid.id = "note-1".into();
+        invalid.chapter_path = " \n".into();
+        assert!(!valid_note(&invalid));
+        invalid.chapter_path = "Text/chapter.xhtml".into();
+        invalid.content = " \n".into();
+        assert!(!valid_note(&invalid));
+    }
+
+    #[test]
     fn portable_replace_rejects_duplicate_or_invalid_progress() {
         let mut record = LinkedLibraryRecord {
             content_hash: "a".repeat(64),
             title: "T".into(),
             creator: "C".into(),
+            language: String::new(),
             file_name: "book.epub".into(),
             added_at_ms: 1,
             last_read_at_ms: 1,
@@ -1770,6 +2013,7 @@ mod tests {
             anchor_text_offset: None,
             anchor_text_snippet: None,
             bookmarks: vec![],
+            notes: vec![],
             is_new: true,
         };
         assert!(validate_portable_records(&[record.clone()]).is_ok());
@@ -1784,6 +2028,7 @@ mod tests {
             content_hash: "a".repeat(64),
             title: "T".into(),
             creator: "C".into(),
+            language: String::new(),
             file_name: "C:\\Books\\book.epub".into(),
             added_at_ms: 1,
             last_read_at_ms: 1,
@@ -1795,6 +2040,7 @@ mod tests {
             anchor_text_offset: None,
             anchor_text_snippet: None,
             bookmarks: vec![],
+            notes: vec![],
             is_new: true,
         };
         assert!(validate_portable_records(&[record.clone()]).is_err());

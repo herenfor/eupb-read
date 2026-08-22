@@ -19,7 +19,7 @@
 
 ## 当前未同步变化
 
-状态：**真实源仓仍以 `v0.1.6` 为比较基线；隔离副本已整理为 `0.1.8` 测试发布候选，包含 B-023～B-049、链接书库重构、桌面单实例和对应文档，当前全量 Vitest 基线为 319/319、Rust 为 13/13，等待用户同步到 Windows 主机编译分发并完成实机验收。**
+状态：**真实源仓仍以 `v0.1.6` 为比较基线；`0.1.9` 测试发布候选已收口，随后已进入下一版本开发并完成 B-067 阅读器菜单稳定滚动槽修复，该修复不属于 0.1.9 发布范围。0.1.9 收口基线为前端 Vitest 52 文件/407 用例、Rust 19/19、tsc、Vite 110 modules、cargo fmt/check/test 均通过。**
 
 | 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
 |---|---|---|---|---|
@@ -255,6 +255,20 @@ B-035 当前收尾：脚注宿主 CSS 契约定向 2/2、脚注/样式/消毒/�
 | `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 四处产品版本统一提升为 0.1.8；Cargo.lock 仅修改 `epub-reader` 根包，不改同版本依赖 | 四处版本一致；Cargo metadata 识别 `epub-reader@0.1.8`；Rust 13/13、fmt/check 通过 | 是 |
 | `docs/RELEASE_0.1.8.md`、`docs/tasks/active/version-0.1.8-release-candidate.md`、`docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 建立 0.1.8 当前发布入口、WSL→Windows 备份式干净同步命令、排除项、构建产物路径和 WebView2 验收矩阵；0.1.7 文件保留为阶段历史 | 文档路径/命令核对；Vitest 35 文件 319/319、tsc、Vite build（96 modules）通过 | 是 |
 
+## 0.1.9 测试发布候选收口
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` | 更新 | 四处产品版本统一提升为 0.1.9；Cargo.lock 仅修改 `epub-reader` 根包 | 四处版本一致；Cargo metadata 识别 `epub-reader@0.1.9`；Rust 19/19、fmt/check 通过 | 是 |
+| `docs/RELEASE_0.1.9.md`、`docs/tasks/active/version-0.1.9-release-candidate.md`、`docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 建立 0.1.9 发布入口、Windows 备份式干净同步命令、构建产物路径和重点验收矩阵；0.1.8 文件保留为阶段历史 | 文档路径/命令核对；Vitest 52/407、tsc、Vite 110 modules、Rust fmt/check/test 通过 | 是 |
+
+## 0.1.9 之后的下一版本开发
+
+| 文件 | 状态 | 变更摘要 | 验证 | 是否同步 |
+|---|---|---|---|---|
+| `src/styles.css`、`src/ui/menuPanel.test.ts` | 更新 | B-067：阅读器菜单预留稳定纵向滚动槽，详细设置展开前后卡片宽度保持一致 | 菜单契约 8/8、tsc；Windows WebView2 视觉待下一版本验收 | 下一版本 |
+| `docs/BUGFIX_LOG.md`、`docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/SOURCE_DELTA.md` | 更新 | 明确 B-067 在 0.1.9 收口后开发，不属于 0.1.9 发布范围 | 文档状态核对 | 下一版本 |
+
 ## 推荐比较命令
 
 仅用于只读核对，不执行复制：
@@ -282,16 +296,148 @@ diff -qr \
 | `NOTICE` | 新增 | Apache 2.0 规范建议的 NOTICE 文件，声明 Copyright 2026 HeRenFor | 人工检查 | 是 |
 | `README.md` | 更新 | 许可章节由 MIT 改为 Apache License 2.0 | 链接检查 | 是 |
 
-## 第三方许可合规与发行包落地（2026-08-21）
+## 第三方许可合规与发行包落地（草案已存在，暂时搁置）
+
+状态：**网络波动前启动的许可材料修改在 2026-08-22 交接文档首次更新后延迟落盘。下表文件现在实际存在，但只视为待审草案：尚未完成目标 Windows 二进制的逐包传递依赖/版权/NOTICE 审计，也未验证 NSIS 与免安装包实际携带材料。等待进一步补充后再恢复，当前不得标记为正式完成。**
 
 | 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
 |---|---|---|---|---|
-| `THIRD_PARTY_LICENSES.md` | 新增 | 第三方软件声明：运行时/开发依赖许可证表（React/fflate/Tauri 生态/serde 等）、MPL-2.0 五个 crate 及源码地址（cssparser 0.36.0 等）、r-efi 多许可说明、主要依赖版权声明、标准许可证文本索引 | 与 Cargo.lock/node_modules 实际版本核对 | 是 |
-| `third-party-licenses/` | 新增 | 9 份标准许可证全文：Apache-2.0/MIT/MPL-2.0/BSD-2/BSD-3/ISC/Zlib/Unicode-3.0/CC-BY-4.0（SPDX 官方源） | 与 SPDX license-list-data 比对 | 是 |
-| `NOTICE` | 更新 | 追加 Tauri Programme 第三方说明与 THIRD_PARTY_LICENSES.md 指引 | 人工检查 | 是 |
-| `src-tauri/tauri.conf.json` | 更新 | bundle 增加 `license: "Apache-2.0"` 与 `resources`（LICENSE/NOTICE/THIRD_PARTY_LICENSES.md/third-party-licenses/），使许可材料进入 NSIS 发行包 | schema 校验、JSON 合法 | 是 |
-| `package.json` | 更新 | 增加 `"license": "Apache-2.0"`（SPDX 字段） | JSON 合法 | 是 |
-| `src-tauri/Cargo.toml` | 更新 | 增加 `license = "Apache-2.0"`；authors 由笼统名改为真实权利人 `HeRenFor` | Cargo 元数据 | 是 |
-| `README.md` | 更新 | 许可章节扩展：声明第三方组件各自许可证，指向 THIRD_PARTY_LICENSES.md | 链接检查 | 是 |
-| `CONTRIBUTING.md` | 更新 | 新增“贡献许可”条款：贡献默认按 Apache-2.0 提供且不附加额外条款 | 人工检查 | 是 |
-| `LICENSE` | 权限 | 600 → 644，便于 Linux 源码包读取 | `ls -l` | 是 |
+| `THIRD_PARTY_LICENSES.md` | 已新增、待审 | 草案列出主要运行时/开发依赖、MPL-2.0 五个 crate、r-efi 多许可选择、部分版权声明和许可证文本索引 | 文件存在；逐包传递依赖/版权/NOTICE 完整性未验收 | 完整复核后再同步 |
+| `third-party-licenses/` | 已新增、待审 | 草案收录 Apache-2.0/MIT/MPL-2.0/BSD-2/BSD-3/ISC/Zlib/Unicode-3.0/CC-BY-4.0 九份文本 | 9 个文件存在；上游原文逐字复核尚未收口 | 完整复核后再同步 |
+| `NOTICE` | 已更新、待审 | 已加入 Tauri Programme 与第三方清单入口 | 文件存在；上游 NOTICE 归属是否齐全未验收 | 完整复核后再同步 |
+| `src-tauri/tauri.conf.json` | 已更新、待实包验证 | 已配置 `bundle.license` 和许可材料 `resources`，尚未配置 `licenseFile` | JSON/schema 尚需随整组复核；NSIS/免安装包未验证 | Windows 实包验证后再同步 |
+| `package.json` | 已更新、待审 | 已增加 `"license": "Apache-2.0"` | 字段存在；整组尚未验收 | 完整复核后再同步 |
+| `src-tauri/Cargo.toml` | 已更新、待用户确认 | 已增加 `license = "Apache-2.0"`，authors 改为 `HeRenFor` | 字段存在；权利人表述待用户确认 | 用户确认后再同步 |
+| `README.md` | 已更新、待审 | 已声明第三方组件遵循各自许可证并链接第三方清单 | 链接目标存在；内容完整性未验收 | 完整复核后再同步 |
+| `CONTRIBUTING.md` | 已更新、待用户确认 | 已增加 Apache-2.0 入站贡献条款 | 条款存在；措辞待用户确认 | 用户确认后再同步 |
+| `LICENSE` | 已调整权限 | 当前权限已为 644 | `ls -l` 已确认 | 随整组材料同步 |
+
+## B-050：打开期阅读进度链修复（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/readEvidence.ts`、`src/ui/ShelfView.tsx`、`src/ui/shelf.ts` | 更新/新增 | 将已读位置证据与暂时的整数百分比分离；书架继续阅读/读过判定兼容 isNew、页码、章节和文本/legacy anchor；成功 progress patch 和 IndexedDB update 自动清除 isNew | shelf 定向通过 | 是 |
+| `src/ui/chapterCounts.ts`、`src/ui/chapterCountJob.ts`、`src/ui/chapterCountCache.ts` | 更新/新增 | 统计失败保持 error/unknown；结构 provisional 纯媒体章节按 1000 字/媒体单元保守计数，当前 measured 媒体章按 `pageCount * 1000`；job 默认每 slice 最多 4 章并带 100ms timeout；结构 estimated counts 按 `contentHash ?? shelfId` 使用版本化有界本机缓存，最多 256 entries/100000 counts，非 estimated 结果 merge-preserve 旧结构估算，缓存不进入 archive | 定向 Vitest 48/48；全量 Vitest 36/332、tsc、Vite 98 modules、Rust 14/14 + fmt/check 通过 | 是 |
+| `src/render/textAnchor.ts`、`src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx` | 更新 | measured anchor 暴露媒体单元；当前无可见文字媒体章按页数权重计分；状态栏区分计算中/约/精确；最后 linear 章末页才显式 100%；打开/隐藏/返回书架安全边界保存 cache；未改变 setPage emit/capture 顺序 | 定向 Vitest 48/48；全量 Vitest 36/332、tsc、Vite 98 modules 及 Rust 14/14 + fmt/check 通过；未启动长期 Vite/Chromium | 是 |
+| `src/ui/progressWriter.ts`、`src/ui/libraryArchive.ts`、`src-tauri/src/linked_library.rs` | 更新 | writer 增加 beginSession；portable merge 先按阅读证据再按 lastRead 时间；新导入 lastRead=0；Rust/浏览器成功进度写入清 isNew | progress/archive 定向；Rust 14/14、`cargo fmt --check`、`cargo check --quiet`、`cargo test --quiet` 通过 | 是 |
+| `docs/tasks/active/reading-progress-open-session.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-050、缓存/统计/显示/存档/会话契约和最终验证边界 | 文档链接/术语已自检；全量 Vitest 36/332、tsc、Vite 98 modules、Rust 14/14 + fmt/check 通过；Windows WebView2/发布包待用户确认 | 是 |
+
+## B-051：首次白屏加载期间丢弃翻页意图（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/turnIntent.ts`、`src/ui/turnIntent.test.ts` | 更新 | 增加每本书生命周期 `displayedOnce` 初始门；首次 display-ready 前 request 完全丢弃，首次 ready 不回放 pending；首次 ready 后仍保留跨章 loading 的最后方向单槽并消费一次；reset 保留已显示历史 | turnIntent 9/9；全量 Vitest 36/334；tsc 通过 | 是 |
+| `src/ui/ReaderView.tsx` | 更新 | 首次 display-ready 解锁后清理外层 `WheelTurnAccumulator` 未达阈值累计；不改变 paginator/CSS/显示门顺序，书籍 `key={bookKey}` 重建自然复位 | `tsc --noEmit`；未启动长期 Vite/Chromium | 是 |
+| `docs/tasks/active/initial-turn-intent-gate.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-051、首次加载输入丢弃契约、跨章持续滚轮保留行为和 Windows WebView2 风险 | 文档/术语自检；用户审核与实机输入待确认 | 是 |
+
+## B-052：Ctrl/Cmd+A 宿主选择守卫（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/selectionGuard.ts`、`src/render/selectionGuard.test.ts` | 新增 | 提供 DOM 键盘选择守卫与 document selection 清理；只拦截非编辑区域 A/a + Ctrl/Meta，编辑控件及后代放行 | selectionGuard 3/3 | 是 |
+| `src/App.tsx`、`src/render/paginator.ts` | 更新 | App 宿主和 iframe keydown 共用守卫；命中后 preventDefault、清理对应 selection；进入 reader 的 view/bookKey 生命周期清理一次宿主旧 selection，不影响方向键或章节重排 | 定向含 paginator 76/76；全量 Vitest 37/337、tsc、Vite 99 modules 通过 | 是 |
+| `docs/tasks/active/selection-shortcut-guard.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-052、宿主/iframe 选择契约、编辑控件放行边界和 WebView2 风险 | 文档/术语自检；用户审核与实机 selection 待确认 | 是 |
+
+## B-053/C-42：深色主题章节局部对比度保守修正（2026-08-22）
+
+WSL Chromium 1280×800 已实机确认目标书 `[简][雨穴].诡屋.02` 资料⑤：light 模式 body/box/p computed color 均为 `rgb(26,26,26)`，box 背景为 `rgba(255,255,255,0.8)`；dark 模式 body 为 `rgb(212,212,212)`，box/p 均为 `rgb(26,26,26)`，box 背景保持 `rgba(255,255,255,0.8)`。Vite 验证后已 Ctrl-C 释放 5173 端口；临时 `/tmp/repro-dark-dialog.mjs` 不同步。自动化最终为全量 Vitest 38 文件/341 用例、tsc、Vite 100 modules，通过；Windows WebView2 仍待用户确认。
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/darkThemeContrast.ts`、`src/render/darkThemeContrast.test.ts` | 新增 | 解析 RGB/RGBA/hex，递归合成有效背景并计算 WCAG contrast；按 html→body 单次 DFS 每元素读取一次样式，只修正接近 dark theme 前景且候选 `#1a1a1a` 显著改善的元素，保守跳过背景图/未知/opacity/作者不同色分支，支持背景容器继承 | darkThemeContrast 4/4；paginator 定向合计 68/68；全量 Vitest 38/341 | 是 |
+| `src/render/paginator.ts` | 更新 | iframe load 后、首次 prepare/measure 前只运行一次 dark contrast 修正；显示门仍 hidden，marker 随文档自然销毁，不参与翻页/reflow | `tsc --noEmit`、Vite 100 modules；全量 Vitest 38/341；未启动长期 dev server | 是 |
+| `docs/tasks/active/dark-theme-contrast-guard.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-053/C-42、目标资料⑤ 对比度证据、单次 DFS 读取约束、保守边界和 Windows WebView2 风险 | 文档/术语自检；用户审核与实机主题矩阵待确认 | 是 |
+
+## B-054/C-43：iframe 脚注 marker 与宿主弹层 hover 交接（2026-08-22）
+
+WSL Chromium 640×480 已实机确认目标书后记第二页 `note_ref020` 的交接：marker iframe `x=37.0..51.4`、宿主卡片 `x=59.4..359.4`，中间 8px gap；marker→card 12 步移动后 250ms 弹层仍 present，`MutationObserver added=1 removed=0`；离开两域 300ms 后 `added=1 removed=1`，恰好关闭一次，页码保持 `2/3`。验证后已 Ctrl-C 释放 5174 端口；临时 `/tmp/repro-footnote-flicker.mjs` 不同步。自动化最终为 39 文件/345 用例、tsc、Vite 101 modules，通过；Windows WebView2 仍待用户确认。
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/footnoteHoverGate.ts`、`src/render/footnoteHoverGate.test.ts` | 新增 | 140ms 可注入 close grace；marker/overlay 任一进入取消 timer，两者均离开且未 pinned 才单次关闭，重复 leave 不堆 timer；reset/dispose 清理 | gate 4/4；定向合计 84/84；全量 Vitest 39/345 | 是 |
+| `src/render/footnotes.ts`、`src/render/footnotes.test.ts` | 更新 | 新增 `getFootnoteHoverAnchor`，只有当前文档内确认的脚注 anchor 才能触碰 gate；普通正文/非脚注 mouseover 返回 null 并保持 pending close | footnotes 定向 10/10；定向合计 84/84 | 是 |
+| `src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/App.tsx` | 更新 | Paginator 在有效脚注 hover/show/pinned/dismiss/load cleanup/dispose 同步 gate；普通正文 mouseover 不触碰 gate；ReaderHandle 转发宿主 overlay hover，App 同步 ref；同一仍 visible marker 不重复解析/发送 payload | `tsc --noEmit`；全量 Vitest 39/345；Vite 101 modules | 是 |
+| `src/ui/FootnotePop.tsx` | 更新 | useLayoutEffect 仅在 offsetWidth/Height 实际变化时提交 size state，避免 rect 更新造成冗余渲染 | 定向脚注相关 84/84 | 是 |
+| `docs/tasks/active/footnote-hover-grace.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-054/C-43、跨 iframe/host hover 时序、固定注释边界和 WebView2 风险 | 文档/术语自检；用户审核与实机 hover 待确认 | 是 |
+
+## B-055/C-44：极窄窗口脚注弹层完整可见（2026-08-22）
+
+Root 独立验收已完成：`pnpm exec vitest run` 全量 40 files/353 tests、`tsc --noEmit`、`pnpm build`（Vite 102 modules）通过。WSL Chromium 在 Tauri minWidth 对应 640×480 下验证目标书 `[简][初鹿野創].有谁规定了在现实中不能有恋爱喜剧的？.03` 后记第 2/3 页 `note_ref020`：`.main` rect=`0,42,640x417`，card rect=`59.40625,50,300x295.421875`，`fullyInside=true`；card `clientHeight=293`、`scrollHeight=293`，无截断/内部滚动。marker→card 250ms 为 `added=1 removed=0`，离开两域 300ms 后 `added=1 removed=1`，C-43 未回归。临时 5174 已停止，5173/5174 无监听。
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/footnotePlacement.ts`、`src/ui/footnotePlacement.test.ts` | 新增 | 纯函数按 `.main` 尺寸与实际 card 尺寸计算有限非负 left/top/cardWidth/maxHeight，覆盖右/左、上/下、空间较大方向 clamp、极窄和容器不足 | placement 8/8；定向合计 92/92；全量 Vitest 40/353 | 是 |
+| `src/ui/FootnotePop.tsx`、`src/App.tsx` | 更新 | 弹层移入 `.main` 统一 payload 坐标系；使用真实 client/offset 尺寸，ResizeObserver/resize listener 只在变化时更新并 cleanup，保持 z-index 60 | `tsc --noEmit`；全量 Vitest 40/353；Vite 102 modules | 是 |
+| `docs/tasks/active/footnote-placement-narrow-window.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-055/C-44、640×480/UI scale 边界、坐标系和完整可见契约；补 root 独立 Chromium/构建验收 | `pnpm exec vitest run` 40/353、`tsc --noEmit`、`pnpm build` 102 modules；5173/5174 无监听；Windows WebView2 待用户确认 | 是 |
+
+## B-056/C-45：深色主题文字阴影可读性兜底（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/sanitize.ts` | 更新 | dark theme 的 `#epub-viewer` 根覆盖样式增加普通优先级 `text-shadow: 1px 1px 1px #1e1e1e`，依靠继承为浅色盒/复杂背景中的默认文字提供可读性兜底；不使用通配符或 `!important`，作者后代显式声明仍可覆盖 | sanitize 定向 54/54；Root 独立复验全量 40 文件/354 tests、tsc、Vite 102 modules 通过 | 是 |
+| `src/render/sanitize.test.ts` | 更新 | 增加 dark 有、light/sepia 无、声明不含 `!important`/viewer 通配符强制规则，以及作者后代 `text-shadow:none`/特效正常保留的回归 | `src/render/sanitize.test.ts` 54/54 | 是 |
+| `docs/tasks/active/dark-theme-text-shadow-fallback.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-056/C-45、仅 dark 注入/正常级联覆盖契约；Root 独立全量 40 文件/354 tests、tsc、Vite 102 modules 已复验，Windows WebView2 观感/长章节性能仍待用户 | 文档/术语自检；用户审核与实机主题/性能矩阵待确认 | 是 |
+
+## B-057/C-46：强制横排以阅读竖排 EPUB（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/render/settings.ts`、`src/ui/storage.ts`、`src/App.tsx`、`src/ui/ReaderView.tsx` | 更新 | 新增可持久化 `forceHorizontal`，App 初始化/写入/恢复默认/存档导入接入；ReaderView 保留现有 settings reload/锚点链路，并在 fixedLayout 有效设置中屏蔽 | 定向设置/固定版式 helper 通过；tsc 通过 | 是 |
+| `src/ui/MenuPanel.tsx`、`src/styles.css`、`src/ui/menuPanel.test.ts` | 更新 | 详细设置加入“强制横排”开关，关闭显示“跟随书籍”、开启显示“竖排转横排”，保持既有菜单样式 | menu helper 定向通过 | 是 |
+| `src/render/sanitize.ts`、`src/render/sanitize.test.ts` | 更新 | 仅 forceHorizontal 开启时对 html/body/viewer 及非 SVG 树普通后代注入标准/Chromium vendor horizontal writing mode 与 text orientation；不改 direction，SVG 显式写法可保留 | sanitize 55/55，覆盖根/嵌套竖排、关闭、SVG、主题无关 | 是 |
+| `src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts`、相关测试 | 更新 | portable archive 白名单和 JSON 校验保留 forceHorizontal，不丢字段；旧 archive 继续兼容 | 存档/存储定向 16/16 | 是 |
+| `docs/tasks/active/force-horizontal-reading.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/tasks/active/README.md` | 新增/更新 | 登记 B-057/C-46、fixedLayout/SVG 继承边界与用户审核风险 | 定向 73/73、helper 58/58；Root 独立全量 Vitest 42 文件/359 tests、tsc、Vite 102 modules 及 900×650 WSL Chromium `/tmp/vertical-smoke.epub` 烟测通过；临时 EPUB/脚本不入项目，Windows 实机待用户 | 是 |
+
+## B-058/C-47：Windows 系统字体与独立字体中心（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/ui/fontStore.ts`、`src/ui/fontRuntime.ts` | 更新/新增 | 增加 `system_fonts_list` 前端边界与单活动 imported Blob URL 懒加载控制器；系统字体不暴露路径，非 Windows 空列表；竞态、切换、失败和 dispose 处理 URL ownership | 字体 runtime 定向 3/3；Root 全量 Vitest 44 files/365 tests | 是 |
+| `src/ui/FontSettingsPanel.tsx`、`src/ui/MenuPanel.tsx`、`src/styles.css` | 新增/更新 | 独立字体中心、system/imported tabs、搜索、导入/删除、loading/error/empty；按实际容器高度计算的固定行高虚拟窗口含 top/bottom spacer、overscan/clamp；tab/search 同步复位 DOM scrollTop；面板 z42、backdrop z41 | 虚拟窗口定向 2/2；WSL Chromium 300 imported 末尾可达 Font299，900×900 实测 viewportHeight=292/DOM rows=13，搜索后 scrollTop=0；z/hitInside 通过 | 是 |
+| `src/App.tsx`、`src/render/settings.ts`、`src/ui/storage.ts`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts` | 更新 | 接入 `fontSource`/`customFontId` storage/archive；启动只列 imported 元数据，系统字体仅首次打开枚举并会话缓存；缺失 system 偏好不后台清空 | Root WSL binary get=0（StrictMode metadata getAll=2）、选择后 get=1，source/imported/id=012b | 是 |
+| `src/render/sanitize.ts` 及字体/存档/sanitize 测试 | 更新 | system 只写 family、不生成 @font-face；imported 只注入当前 Blob；family 字符串转义反斜杠、引号和 CR/LF/form-feed | `tsc --noEmit`、Vite build 104 modules、sanitize/字体/存档定向通过 | 是 |
+| `docs/tasks/active/font-center-system-fonts.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/rendering-layers.md`、`docs/PROJECT_CONTEXT.md`、`docs/SOURCE_DELTA.md` | 新增/更新 | 登记 B-058/C-47、Windows DirectWrite/Android 预留、性能/虚拟列表/URL 契约、验证证据与 Windows 风险 | 文档链接与编号核对；临时脚本数据不入项目 | 是 |
+
+## B-059/C-48：当前书正文基础搜索（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `src/core/search.ts`、`src/core/search.test.ts` | 新增 | 按需按 spine 提取当前书可见正文，会话级缓存；NFKC/小写/软连字符/布局空白标准化，以紧凑字符串和 TypedArray 保留原文范围到既有 code-point 锚点的映射；排除隐藏结构与脚注，支持短语及同上下文多关键词 AND | 搜索核心 8/8，覆盖取消、缓存、surrogate/NFKC/紧凑映射和结果上限；全量 Vitest 46 files/377 tests | 是 |
+| `src/ui/SearchPanel.tsx`、`src/ui/SearchPanel.test.ts`、`src/App.tsx`、`src/ui/Toolbar.tsx`、`src/styles.css` | 新增/更新 | 独立正文搜索面板、180ms debounce、进度/取消、最多 100 条显示、原文高亮；点击结果使用现有锚点和 3 步历史，同章 direct/跨章 display gate，fixed-layout 隐藏入口 | `tsc --noEmit`、Vite 106 modules；WSL Chromium 900×650 “opacity 属性”4 条结果、高亮及 back/forward 实测通过 | 是 |
+| `docs/tasks/active/reader-text-search.md`、`docs/tasks/active/README.md`、`docs/BUGFIX_LOG.md`、`docs/MODULE_CONTRACTS.md`、`docs/PROJECT_CONTEXT.md`、`docs/SEARCH_TO_RAG_ROADMAP.md`、`docs/HANDOFF.md` | 新增/更新 | 登记 B-059/C-48 的首版范围、性能/生命周期/跳转契约，并在路线图第一阶段与第二阶段标出已经完成的当前书基础项；跨书、持久化索引、模糊/语义/RAG 保持未实现 | 文档状态与代码/测试证据核对；临时脚本、书籍和截图不入项目 | 是 |
+
+## B-060/C-49：正文笔记首版（2026-08-23）
+
+| 文件 | 类型 | 相较源文件的修改 | 验证 | 同步 |
+|---|---|---|---|---|
+| `src/render/textAnchor.ts`、`src/render/paginator.ts`、`src/render/sanitize.ts` | 新增/更新 | 捕获/解析 code-point 文本范围；当前章节 CSS Custom Highlight 下划线；自定义正文右键入口，不插入笔记 span | 定向 range/sanitize/paginator 129/129；Chromium 保存前后宽度不变 | 是 |
+| `src/ui/notes.ts`、`src/ui/ReaderContextMenu.tsx`、`src/ui/NoteComposer.tsx`、`src/ui/NotesPanel.tsx`、`src/App.tsx`、`src/ui/ReaderView.tsx`、`src/ui/Toolbar.tsx`、`src/styles.css` | 新增/更新 | 笔记校验、菜单、编辑器、本书时间列表、编辑删除、文本锚点跳转与三步历史接线 | 前端全量 50 files/393 tests、tsc、Vite 110 modules；Chromium 真实链路 | 是 |
+| `src/ui/shelf.ts`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts`、`src-tauri/src/linked_library.rs`、`src-tauri/src/lib.rs` | 更新 | notes 进入浏览器/Tauri 书架记录和 portable archive，前后端边界校验，同 ID 按 updatedAt 合并 | Rust fmt/tests 18/18；存储/存档定向 32/32 | 是 |
+| `docs/tasks/active/reader-notes.md` 及项目维护文档 | 新增/更新 | 登记 B-060/C-49 范围、性能、降级、同步和待 Windows 证据 | 文档与实现核对 | 是 |
+
+## B-061/C-50：实验性相邻章节预渲染与详细设置视觉统一（2026-08-23）
+
+| 文件 | 类型 | 相较源文件的修改 | 验证 | 同步 |
+|---|---|---|---|---|
+| `src/render/paginator.ts`、`src/ui/ReaderView.tsx`、`src/ui/readerViewSettings.test.ts` | 更新 | 增加最终 display-ready 可等待边界与最多三槽的前后相邻调度；后台回调 active-gate，严格先下一篇、后上一篇，React 顺序目标提交后提升并保留旧章反向缓存；显式跳转/未命中走 P0，设置/尺寸/生命周期失效释放；稳定阅读器容器承担 resize 监听 | 全量 51 files/402 tests、tsc；Chromium 第二章三 Blob 就绪，返回原 Blob 约 7ms | 是 |
+| `src/render/settings.ts`、`src/ui/MenuPanel.tsx`、`src/App.tsx`、`src/ui/storage.ts`、`src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts`、`src/styles.css` 及测试 | 更新 | 默认关闭的“高性能模式”（内部旧字段兼容）；fixed-layout 禁用；本机设置与 portable archive 白名单接入；详细设置统一主题色浅卡片和 42×24 现代开关，纸色色块降低浓度；滑块 flex 子项允许收缩，开关标题不再继承滑块顶部 padding，控制卡统一同宽同高 | 菜单测试 7/7；Chromium 640×520 实测卡片 267×60、`+` 完整内收、开关无顶部空白 | 是 |
+| `docs/PRELOAD_PLAN.md`、`docs/tasks/active/next-chapter-preload.md` 及维护文档 | 新增/更新 | 将 P1a/P1b 前后各一章标为已实现，动画保留为后续；记录调度优先级、显式跳转门、生命周期与 Windows 待验收边界 | 文档与实现核对；临时脚本/截图/测试书不入项目；5173 已释放 | 是 |
+
+## B-062/C-51：书架筛选抽屉与 OPF 语言元数据（2026-08-23）
+
+| 文件 | 类型 | 相较源文件的修改 | 验证 | 同步 |
+|---|---|---|---|---|
+| `src/ui/shelf.ts`、`src/ui/shelf.test.ts` | 更新 | 增加可选 language、作者 NFKC/CJK 空白规范化、语言归组、保存时间分段及单索引组合筛选/交叉计数；不改原 creator/title | shelf 17/17；全量 52/407 | 是 |
+| `src/ui/ShelfView.tsx`、`src/styles.css`、`src/App.tsx`、`src/ui/shelfDrawer.test.ts` | 更新/新增 | 带 reduced-motion 的书架抽屉及迁移项；折叠选项不创建 DOM；书架不渲染顶部 Toolbar；B-063 填满滚动区，B-064/B-065 修复搜索间距及 SVG 视觉居中，B-066 预留稳定滚动槽 | Chromium 完整交互；搜索 SVG 中心偏差0；展开前后滚动区379px/卡片347px保持不变；CSS契约2/2 | 是 |
+| `src/core/opf.ts`、`src-tauri/src/linked_library.rs` | 更新 | 浏览器/Rust 均取首个非空 dc:language；Rust 记录 serde default 兼容旧 JSON，新导入持久化并返回 language | Rust fmt；19/19 | 是 |
+| `src/ui/libraryArchive.ts`、`src/ui/libraryArchiveBridge.ts` 及测试 | 更新 | portable archive v1 增加可选 language，解析、投影与本机字段隔离保持兼容 | archive/import 定向 42/42；tsc/Vite | 是 |
+| `docs/tasks/active/shelf-filter-drawer.md` 及维护文档 | 新增/更新 | 登记数据、性能、动画、可访问性、旧记录降级与 Windows 待验收边界 | 文档与实现核对；临时产物不入项目，5173 已释放 | 是 |
+
+依赖/许可核对：Windows target `windows` 0.61.3 记录为 MIT OR Apache-2.0，无 GPL；DirectWrite 为 Windows 系统 API。Android 本轮只预留接口。Linux 环境无法替代 Windows target，必须在 Windows 主机运行 cargo check/tauri build 与实机枚举。
+
+## 搜索到 RAG 的长期方向文档（2026-08-22）
+
+| 路径 | 类型 | 变化与原因 | 验证 | 建议同步 |
+|---|---|---|---|---|
+| `docs/SEARCH_TO_RAG_ROADMAP.md` | 新增 | 独立记录正文语料/全文搜索、模型管理、语义索引、混合检索、建议标签、智能书架、带引用 RAG 与分层总结的阶段清单；明确智能检索与分类是实现目标，AI 总结是最终目标 | 文档结构与用户确认方向核对；当前无代码实现、无运行测试 | 是 |
+| `docs/PROJECT_CONTEXT.md`、`docs/HANDOFF.md`、`docs/SOURCE_DELTA.md` | 更新 | 增加长期路线入口，并明确其不属于 0.1.8、不得误判为已实现功能 | 链接与状态措辞核对 | 是 |

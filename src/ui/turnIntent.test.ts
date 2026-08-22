@@ -26,12 +26,25 @@ describe("WheelTurnAccumulator", () => {
 });
 
 describe("TurnIntentBuffer", () => {
-  it("加载期间只保留最后方向，并在 ready 时消费一次", () => {
+  it("首次显示前丢弃所有输入，首次 ready 只解锁不回放", () => {
     const buffer = new TurnIntentBuffer();
     expect(buffer.request(1)).toBeNull();
     expect(buffer.request(1)).toBeNull();
     expect(buffer.request(-1)).toBeNull();
 
+    expect(buffer.markReady()).toBeNull();
+    expect(buffer.markReady()).toBeNull();
+    expect(buffer.hasDisplayedOnce).toBe(true);
+  });
+
+  it("首次 ready 后立即放行，换章 loading 只保留最后方向并消费一次", () => {
+    const buffer = new TurnIntentBuffer();
+    expect(buffer.markReady()).toBeNull();
+    expect(buffer.request(1)).toBe(1);
+
+    buffer.markLoading();
+    expect(buffer.request(1)).toBeNull();
+    expect(buffer.request(-1)).toBeNull();
     expect(buffer.markReady()).toBe(-1);
     expect(buffer.markReady()).toBeNull();
   });
@@ -46,6 +59,7 @@ describe("TurnIntentBuffer", () => {
 
   it("重复 loading 状态不会清掉持续滚轮产生的单槽意图", () => {
     const buffer = new TurnIntentBuffer();
+    buffer.markReady();
     buffer.markLoading();
     expect(buffer.request(1)).toBeNull();
     buffer.markLoading();
@@ -56,7 +70,19 @@ describe("TurnIntentBuffer", () => {
     const buffer = new TurnIntentBuffer();
     expect(buffer.request(1)).toBeNull();
     buffer.reset();
+    expect(buffer.hasDisplayedOnce).toBe(false);
+    expect(buffer.request(-1)).toBeNull();
     expect(buffer.markReady()).toBeNull();
     expect(buffer.isReady).toBe(true);
+  });
+
+  it("已首次显示后 reset 只清 pending，后续 loading 仍可缓冲", () => {
+    const buffer = new TurnIntentBuffer();
+    expect(buffer.markReady()).toBeNull();
+    buffer.reset();
+    expect(buffer.hasDisplayedOnce).toBe(true);
+    buffer.markLoading();
+    expect(buffer.request(-1)).toBeNull();
+    expect(buffer.markReady()).toBe(-1);
   });
 });

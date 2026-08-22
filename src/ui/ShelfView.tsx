@@ -1,11 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Theme } from "../render/settings";
 import {
-  filterShelfEntries,
+  createShelfFilterModel,
   formatShelfTime,
   sortShelfEntries,
+  type ShelfFilterFacets,
   type ShelfEntry,
   type ShelfSort,
+  type ShelfTimeSegment,
 } from "./shelf";
 import {
   descriptorForEntry,
@@ -15,6 +17,7 @@ import {
   thumbnailTaskQueue,
   type ThumbnailProvider,
 } from "./thumbnail";
+import { hasReadPosition } from "./readEvidence";
 
 export type ShelfDensity = "comfortable" | "standard" | "compact";
 
@@ -128,7 +131,8 @@ interface ShelfCardProps {
 const ShelfCard = memo(function ShelfCard(props: ShelfCardProps) {
   const { entry } = props;
   const last = entry.lastReadAtMs > 0 ? entry.lastReadAtMs : entry.addedAtMs;
-  const recent = Date.now() - entry.lastReadAtMs < 1000 * 60 * 60 * 24 * 7;
+  const recent = Date.now() - last < 1000 * 60 * 60 * 24 * 7;
+  const read = hasReadPosition(entry);
   return (
     <div
       className={`shelf-card${props.selected ? " selected" : ""}${entry.available === false ? " unavailable" : ""}`}
@@ -165,7 +169,7 @@ const ShelfCard = memo(function ShelfCard(props: ShelfCardProps) {
           <span className="shelf-missing">源文件缺失 · 点击重新定位</span>
         ) : (
           <>
-            {recent && entry.progressPct > 0 && <span className="shelf-continue">继续阅读</span>}
+            {recent && read && <span className="shelf-continue">继续阅读</span>}
             {entry.isNew && !props.selectionMode && <span className="shelf-new">新</span>}
           </>
         )}
@@ -195,7 +199,7 @@ const ShelfCard = memo(function ShelfCard(props: ShelfCardProps) {
         {entry.creator ? <span className="shelf-card-creator">{entry.creator}</span> : null}
         <span className="shelf-card-time">
           {formatShelfTime(last) || "刚刚"}
-          {entry.progressPct > 0 ? " · 读过" : " · 未读"}
+          {read ? " · 读过" : " · 未读"}
         </span>
       </div>
     </div>
@@ -205,6 +209,94 @@ const ShelfCard = memo(function ShelfCard(props: ShelfCardProps) {
 interface ShelfSelectOption {
   value: string;
   label: string;
+}
+
+type ShelfFilterKey = "author" | "title" | "saved" | "language";
+
+interface ShelfFilters {
+  authors: Set<string>;
+  titles: Set<string>;
+  saved: Set<ShelfTimeSegment>;
+  languages: Set<string>;
+}
+
+const EMPTY_SHELF_FILTERS: ShelfFilters = {
+  authors: new Set(),
+  titles: new Set(),
+  saved: new Set(),
+  languages: new Set(),
+};
+
+function ShelfFilterOptionList(props: {
+  options: Array<{ value: string; label: string; count: number }>;
+  selected: ReadonlySet<string>;
+  onToggle(value: string): void;
+  emptyLabel: string;
+}) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const options = props.options.filter((option) =>
+    !normalizedQuery || option.label.toLocaleLowerCase().includes(normalizedQuery)
+  );
+  const limited = options.slice(0, 80);
+  return (
+    <div className="shelf-filter-options">
+      {props.options.length > 8 && (
+        <input
+          className="shelf-filter-search"
+          type="search"
+          placeholder={`搜索${props.emptyLabel}`}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          aria-label={`搜索${props.emptyLabel}`}
+        />
+      )}
+      {limited.length === 0 ? (
+        <div className="shelf-filter-empty">没有匹配项</div>
+      ) : (
+        limited.map((option) => (
+          <label className="shelf-filter-option" key={option.value}>
+            <input
+              type="checkbox"
+              checked={props.selected.has(option.value)}
+              onChange={() => props.onToggle(option.value)}
+            />
+            <span className="shelf-filter-option-label" title={option.label}>{option.label}</span>
+            <span className="shelf-filter-option-count">{option.count}</span>
+          </label>
+        ))
+      )}
+      {options.length > limited.length && (
+        <div className="shelf-filter-limit">仅显示前 {limited.length} 项，请搜索以缩小范围</div>
+      )}
+    </div>
+  );
+}
+
+function ShelfFilterSection(props: {
+  label: string;
+  count: number;
+  open: boolean;
+  onToggleOpen(): void;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`shelf-filter-section${props.open ? " open" : ""}`}>
+      <button
+        className="shelf-filter-section-toggle"
+        type="button"
+        aria-expanded={props.open}
+        onClick={props.onToggleOpen}
+      >
+        <span>{props.label}</span>
+        <span className="shelf-filter-section-count">{props.count}</span>
+        <span className="shelf-filter-section-arrow" aria-hidden="true" />
+      </button>
+      <div className="shelf-filter-section-body">
+        <div className="shelf-filter-section-content">{props.open ? props.children : null}</div>
+      </div>
+    </section>
+  );
 }
 
 function ShelfSelect(props: {
@@ -270,17 +362,263 @@ function ShelfSelect(props: {
   );
 }
 
+interface ShelfSettingsDrawerProps {
+  open: boolean;
+  entries: ShelfEntry[];
+  busy: boolean;
+  query: string;
+  onQueryChange(value: string): void;
+  sort: ShelfSort;
+  onSortChange(value: ShelfSort): void;
+  density: ShelfDensity;
+  onDensityChange(value: ShelfDensity): void;
+  theme: Theme;
+  onThemeChange(theme: Theme): void;
+  filters: ShelfFilters;
+  facets: ShelfFilterFacets;
+  matchingCount: number;
+  onFiltersChange(filters: ShelfFilters): void;
+  onClose(): void;
+  onImportArchive(): void;
+  onExportArchive(): void;
+}
+
+function ShelfSettingsDrawer(props: ShelfSettingsDrawerProps) {
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [allBooksExpanded, setAllBooksExpanded] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<ShelfFilterKey>>(new Set());
+
+  useEffect(() => {
+    if (!props.open) return;
+    searchRef.current?.focus();
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [props.open, props.onClose]);
+
+  const toggleSection = (key: ShelfFilterKey): void => {
+    setExpandedSections((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleFilter = (key: keyof ShelfFilters, value: string): void => {
+    const previous = props.filters[key];
+    const next = new Set(previous);
+    if (next.has(value as never)) next.delete(value as never);
+    else next.add(value as never);
+    props.onFiltersChange({ ...props.filters, [key]: next });
+  };
+
+  const clearFilters = (): void => props.onFiltersChange({
+    authors: new Set(),
+    titles: new Set(),
+    saved: new Set(),
+    languages: new Set(),
+  });
+  const activeFilterCount = props.filters.authors.size + props.filters.titles.size
+    + props.filters.saved.size + props.filters.languages.size;
+
+  if (!props.open) return null;
+  return (
+    <div className="shelf-drawer-layer">
+      <div className="shelf-drawer-backdrop" aria-hidden="true" onClick={props.onClose} />
+      <aside id="shelf-settings-drawer" className="shelf-drawer" role="dialog" aria-modal="true" aria-label="书架菜单">
+        <div className="shelf-drawer-head">
+          <div>
+            <div className="shelf-drawer-title">书架菜单</div>
+            <div className="shelf-drawer-subtitle">{props.entries.length} 本书</div>
+          </div>
+          <button className="shelf-drawer-close tb-btn" type="button" onClick={props.onClose} aria-label="关闭书架菜单">
+            ×
+          </button>
+        </div>
+
+        <div className="shelf-drawer-scroll">
+          <label className="shelf-drawer-search-wrap">
+            <span className="shelf-drawer-search-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m16.25 16.25 4.25 4.25" />
+              </svg>
+            </span>
+            <input
+              ref={searchRef}
+              className="shelf-drawer-search shelf-search"
+              type="search"
+              placeholder="搜索书名或作者"
+              value={props.query}
+              disabled={props.busy}
+              onChange={(event) => props.onQueryChange(event.target.value)}
+            />
+            {props.query && (
+              <button className="shelf-drawer-search-clear" type="button" onClick={() => props.onQueryChange("")} aria-label="清除搜索">
+                ×
+              </button>
+            )}
+          </label>
+
+          <div className="shelf-drawer-group-label">书籍筛选</div>
+          <button
+            className={`shelf-all-books${allBooksExpanded ? " expanded" : ""}`}
+            type="button"
+            aria-expanded={allBooksExpanded}
+            onClick={() => setAllBooksExpanded((value) => !value)}
+          >
+            <span className="shelf-all-books-icon" aria-hidden="true">▦</span>
+            <span className="shelf-all-books-label">全部书籍</span>
+            <span className="shelf-all-books-count">{props.matchingCount}</span>
+            <span className="shelf-filter-section-arrow" aria-hidden="true" />
+          </button>
+          <div className="shelf-all-books-details">
+            <div className="shelf-all-books-details-inner">
+              {allBooksExpanded && <>
+              <ShelfFilterSection
+                label="作者"
+                count={props.facets.authors.options.length}
+                open={expandedSections.has("author")}
+                onToggleOpen={() => toggleSection("author")}
+              >
+                <ShelfFilterOptionList
+                  options={props.facets.authors.options}
+                  selected={props.filters.authors}
+                  onToggle={(value) => toggleFilter("authors", value)}
+                  emptyLabel="作者"
+                />
+              </ShelfFilterSection>
+              <ShelfFilterSection
+                label="书名"
+                count={props.facets.titles.options.length}
+                open={expandedSections.has("title")}
+                onToggleOpen={() => toggleSection("title")}
+              >
+                <ShelfFilterOptionList
+                  options={props.facets.titles.options}
+                  selected={props.filters.titles}
+                  onToggle={(value) => toggleFilter("titles", value)}
+                  emptyLabel="书名"
+                />
+              </ShelfFilterSection>
+              <ShelfFilterSection
+                label="保存时间"
+                count={props.facets.timeSegments.options.filter((item) => item.count > 0).length}
+                open={expandedSections.has("saved")}
+                onToggleOpen={() => toggleSection("saved")}
+              >
+                <ShelfFilterOptionList
+                  options={props.facets.timeSegments.options}
+                  selected={props.filters.saved}
+                  onToggle={(value) => toggleFilter("saved", value)}
+                  emptyLabel="保存时间"
+                />
+              </ShelfFilterSection>
+              <ShelfFilterSection
+                label="语言"
+                count={props.facets.languages.options.length}
+                open={expandedSections.has("language")}
+                onToggleOpen={() => toggleSection("language")}
+              >
+                <ShelfFilterOptionList
+                  options={props.facets.languages.options}
+                  selected={props.filters.languages}
+                  onToggle={(value) => toggleFilter("languages", value)}
+                  emptyLabel="语言"
+                />
+              </ShelfFilterSection>
+              </>}
+            </div>
+          </div>
+          {activeFilterCount > 0 && (
+            <button className="shelf-filter-clear" type="button" onClick={clearFilters}>
+              清除筛选（{activeFilterCount}）
+            </button>
+          )}
+
+          <div className="shelf-drawer-group-label">显示设置</div>
+          <div className="shelf-drawer-setting">
+            <span>排列方式</span>
+            <ShelfSelect
+              value={props.sort}
+              busy={props.busy}
+              title="排列方式"
+              options={[
+                { value: "recent", label: "最近阅读" },
+                { value: "added", label: "最近添加" },
+                { value: "title", label: "书名" },
+              ]}
+              onChange={(value) => props.onSortChange(value as ShelfSort)}
+            />
+          </div>
+          <div className="shelf-drawer-setting">
+            <span>排布密度</span>
+            <ShelfSelect
+              value={props.density}
+              busy={props.busy}
+              title="排布密度"
+              options={[
+                { value: "comfortable", label: "舒适" },
+                { value: "standard", label: "标准" },
+                { value: "compact", label: "紧凑" },
+              ]}
+              onChange={(value) => props.onDensityChange(value as ShelfDensity)}
+            />
+          </div>
+          <div className="shelf-drawer-setting">
+            <span>主题</span>
+            <ShelfSelect
+              value={props.theme}
+              busy={props.busy}
+              title="书架主题"
+              options={[
+                { value: "light", label: "浅色" },
+                { value: "dark", label: "深色" },
+                { value: "sepia", label: "羊皮纸" },
+              ]}
+              onChange={(value) => props.onThemeChange(value as Theme)}
+            />
+          </div>
+
+          <div className="shelf-drawer-group-label">数据管理</div>
+          <div className="shelf-drawer-actions">
+            <button className="tb-btn" type="button" onClick={props.onImportArchive} disabled={props.busy}>
+              导入存档
+            </button>
+            <button className="tb-btn" type="button" onClick={props.onExportArchive} disabled={props.busy || props.entries.length === 0}>
+              导出存档
+            </button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 export function ShelfView(props: ShelfViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<ShelfSort>("recent");
   const [density, setDensity] = useState<ShelfDensity>("standard");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [filters, setFilters] = useState<ShelfFilters>(EMPTY_SHELF_FILTERS);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTargets, setDeleteTargets] = useState<ShelfEntry[] | null>(null);
-  const visible = useMemo(() => {
-    const q = filterShelfEntries(props.entries, query);
-    return sortShelfEntries(q, sort);
-  }, [props.entries, query, sort]);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const filterModel = useMemo(() => createShelfFilterModel(props.entries, {
+    authors: [...filters.authors],
+    titles: [...filters.titles],
+    timeSegments: [...filters.saved],
+    languages: [...filters.languages],
+    query,
+  }), [props.entries, query, filters]);
+  const visible = useMemo(
+    () => sortShelfEntries(filterModel.entries, sort),
+    [filterModel.entries, sort],
+  );
   const thumbnailProvider = props.thumbnailProvider ?? legacyThumbnailProvider;
 
   const toggleSelected = useCallback((id: string): void => {
@@ -304,6 +642,11 @@ export function ShelfView(props: ShelfViewProps) {
 
   const onDeleteRequest = useCallback((entry: ShelfEntry): void => {
     setDeleteTargets([entry]);
+  }, []);
+
+  const closeDrawer = useCallback((): void => {
+    setDrawerOpen(false);
+    menuButtonRef.current?.focus();
   }, []);
 
   const onToggleSelected = toggleSelected;
@@ -348,67 +691,22 @@ export function ShelfView(props: ShelfViewProps) {
         ) : (
           <>
             <div className="shelf-title-block">
+              <button
+                className={`shelf-menu-btn${drawerOpen ? " open" : ""}`}
+                ref={menuButtonRef}
+                type="button"
+                aria-label="打开书架菜单"
+                aria-expanded={drawerOpen}
+                aria-controls="shelf-settings-drawer"
+                onClick={() => setDrawerOpen(true)}
+                disabled={props.busy}
+              >
+                <span aria-hidden="true">☰</span>
+              </button>
               <span className="shelf-title">书架</span>
               <span className="shelf-count">{props.entries.length} 本</span>
             </div>
             <div className="shelf-controls">
-              <input
-                className="shelf-search"
-                type="search"
-                placeholder="搜索书名或作者"
-                value={query}
-                disabled={props.busy}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <ShelfSelect
-                value={sort}
-                busy={props.busy}
-                title="排序方式"
-                options={[
-                  { value: "recent", label: "最近阅读" },
-                  { value: "added", label: "最近添加" },
-                  { value: "title", label: "书名" },
-                ]}
-                onChange={(v) => setSort(v as ShelfSort)}
-              />
-              <ShelfSelect
-                value={density}
-                busy={props.busy}
-                title="排布密度"
-                options={[
-                  { value: "comfortable", label: "舒适" },
-                  { value: "standard", label: "标准" },
-                  { value: "compact", label: "紧凑" },
-                ]}
-                onChange={(v) => setDensity(v as ShelfDensity)}
-              />
-              <ShelfSelect
-                value={props.theme}
-                busy={props.busy}
-                title="书架主题"
-                options={[
-                  { value: "light", label: "浅色" },
-                  { value: "dark", label: "深色" },
-                  { value: "sepia", label: "羊皮纸" },
-                ]}
-                onChange={(v) => props.onThemeChange(v as Theme)}
-              />
-              <button
-                className="shelf-archive-btn tb-btn"
-                onClick={props.onImportArchive}
-                disabled={props.busy}
-                title="导入可跨平台同步的阅读进度、书签和设置"
-              >
-                导入存档
-              </button>
-              <button
-                className="shelf-archive-btn tb-btn"
-                onClick={props.onExportArchive}
-                disabled={props.busy || props.entries.length === 0}
-                title="导出不含本机路径和 EPUB 正文的可移植存档"
-              >
-                导出存档
-              </button>
               <button
                 className="shelf-batch-btn tb-btn"
                 onClick={enterSelection}
@@ -429,6 +727,27 @@ export function ShelfView(props: ShelfViewProps) {
           </>
         )}
       </header>
+
+      <ShelfSettingsDrawer
+        open={drawerOpen}
+        entries={props.entries}
+        busy={props.busy}
+        query={query}
+        onQueryChange={setQuery}
+        sort={sort}
+        onSortChange={setSort}
+        density={density}
+        onDensityChange={setDensity}
+        theme={props.theme}
+        onThemeChange={props.onThemeChange}
+        filters={filters}
+        facets={filterModel.facets}
+        matchingCount={filterModel.entries.length}
+        onFiltersChange={setFilters}
+        onClose={closeDrawer}
+        onImportArchive={props.onImportArchive}
+        onExportArchive={props.onExportArchive}
+      />
 
       {props.entries.length === 0 ? (
         <div className="shelf-empty">

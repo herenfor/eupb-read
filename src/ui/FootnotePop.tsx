@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { placeFootnote } from "./footnotePlacement";
 
 export interface FootnotePopProps {
   text: string;
@@ -25,25 +26,55 @@ export interface FootnotePopProps {
 export function FootnotePop(props: FootnotePopProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 300, h: 120 });
+  const [containerSize, setContainerSize] = useState(() => {
+    if (typeof document === "undefined") return { w: 0, h: 0 };
+    const main = document.querySelector<HTMLElement>(".main");
+    return { w: main?.clientWidth ?? 0, h: main?.clientHeight ?? 0 };
+  });
 
   useLayoutEffect(() => {
     const el = cardRef.current;
-    if (el) setSize({ w: el.offsetWidth, h: el.offsetHeight });
+    const main = el?.closest<HTMLElement>(".main") ?? document.querySelector<HTMLElement>(".main");
+    if (!el || !main) return;
+    const syncSizes = (): void => {
+      const nextCard = { w: el.offsetWidth, h: el.offsetHeight };
+      const nextContainer = { w: main.clientWidth, h: main.clientHeight };
+      setSize((current) => (current.w === nextCard.w && current.h === nextCard.h ? current : nextCard));
+      setContainerSize((current) =>
+        current.w === nextContainer.w && current.h === nextContainer.h ? current : nextContainer,
+      );
+    };
+    syncSizes();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncSizes) : null;
+    observer?.observe(el);
+    observer?.observe(main);
+    window.addEventListener("resize", syncSizes);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", syncSizes);
+    };
   }, [props.text, props.html, props.rect]);
 
-  const gap = 8;
-  const maxX = Math.max(320, (document.querySelector(".main")?.clientWidth ?? 800) - size.w - gap);
-  const left = Math.min(Math.max(gap, props.rect.right + gap), maxX);
-  // 优先上方；不足则放标记下方
-  const aboveTop = props.rect.top - size.h - gap;
-  const top = aboveTop >= gap ? aboveTop : props.rect.bottom + gap;
+  const placement = placeFootnote({
+    anchor: props.rect,
+    containerWidth: containerSize.w,
+    containerHeight: containerSize.h,
+    cardWidth: size.w,
+    cardHeight: size.h,
+  });
 
   return (
     <div className={`footnote-pop${props.pinned ? " pinned" : ""}`} onWheel={(e) => e.stopPropagation()}>
       <div
         ref={cardRef}
         className="footnote-card"
-        style={{ left, top, width: 300 }}
+        style={{
+          left: placement.left,
+          top: placement.top,
+          width: placement.cardWidth,
+          maxHeight: placement.maxHeight,
+          boxSizing: "border-box",
+        }}
         onMouseEnter={() => props.onHoverChange(true)}
         onMouseLeave={() => props.onHoverChange(false)}
         onClick={(e) => {
